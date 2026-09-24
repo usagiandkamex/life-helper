@@ -72,9 +72,12 @@ jobs:
                 printf '%s' "$OUTPUT"
                 return 0
               fi
-              echo "az $* failed (attempt $attempt), retrying..." >&2
-              sleep $((attempt * 10))
+              if [ "$attempt" -lt 3 ]; then
+                echo "az $* failed (attempt $attempt), retrying..." >&2
+                sleep $((attempt * 10))
+              fi
             done
+            echo "az $* failed after 3 attempts" >&2
             return 1
           }
           APP_NAME=$(retry_az containerapp list \
