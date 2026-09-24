@@ -22,7 +22,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 COPY --from=ghcr.io/astral-sh/uv:0.10 /uv /usr/local/bin/uv
 RUN useradd --create-home --home-dir /home/app --uid 10001 app \
-    && mkdir -p /app /data \
+    && mkdir -p /app/backend /data \
     && chown -R app:app /app /data
 
 WORKDIR /app/backend
