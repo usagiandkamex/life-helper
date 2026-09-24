@@ -24,8 +24,8 @@ from ..knowledge.store import atomic_write
 Account = Literal["nisa_tsumitate", "nisa_growth", "tokutei", "ippan", "ideco"]
 Kind = Literal["stock", "etf", "reit", "fund"]
 # Fund NAV providers double as price sources, so the screen can show where a NAV came from.
-FundProvider = Literal["mufg_api", "manual"]
-PriceSource = Literal["broker_csv", "stooq", "nav_site", "manual", "mufg_api"]
+FundProvider = Literal["mufg_api", "rakuten_csv", "daiwa_csv", "manual"]
+PriceSource = Literal["broker_csv", "stooq", "nav_site", "manual", "mufg_api", "rakuten_csv", "daiwa_csv"]
 Market = Literal["jp", "us"]
 Currency = Literal["JPY", "USD"]
 # Japanese funds quote the NAV per 10,000 units, but the unit is kept per fund because it can differ.

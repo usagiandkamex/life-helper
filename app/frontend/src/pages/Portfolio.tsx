@@ -154,10 +154,10 @@ export function PortfolioPage() {
           method: 'POST',
           body: json({ id: target.id, provider, fund_code: fundCode, price_unit: priceUnit }),
         }),
-      () =>
+      (v) =>
         provider === 'manual'
           ? `${target.name} の基準価額を手入力に切り替えました`
-          : `${target.name} を ${fundCode} に紐付け、基準価額を取得しました`,
+          : `${target.name} を ${v.link?.official_name || fundCode} に紐付け、基準価額を取得しました`,
     )
     if (ok) {
       setFundTarget(null)
@@ -452,6 +452,31 @@ export function PortfolioPage() {
           )}
           <p className="hint">
             候補は名前が似ているだけのファンドを含みます。公式名称とファンドコードを確認してから選んでください。
+          </p>
+          <form
+            className="row wrap"
+            onSubmit={(e) => {
+              e.preventDefault()
+              const data = new FormData(e.currentTarget)
+              linkFund(fundTarget, String(data.get('provider')), String(data.get('fund_code')).trim())
+            }}
+          >
+            <select name="provider">
+              {view.fund_providers
+                .filter((p) => p.provider !== 'manual')
+                .map((p) => (
+                  <option key={p.provider} value={p.provider}>
+                    {p.manager}
+                  </option>
+                ))}
+            </select>
+            <input name="fund_code" placeholder="ファンドコード" required />
+            <button className="button small" disabled={busy}>
+              コードを指定して紐付ける
+            </button>
+          </form>
+          <p className="hint">
+            候補に出ない場合は、公式サイトのファンドページに書かれたコード（URL のファンドコードや投資信託協会コード）を指定してください。紐付け後に公式名称を表示します。
           </p>
           <form
             className="row wrap"

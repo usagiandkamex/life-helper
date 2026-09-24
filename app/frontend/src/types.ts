@@ -143,6 +143,7 @@ export type PortfolioView = {
     manual: { id: string; name: string }[]
     note: string
   }
+  link?: { ok: boolean; id: string; fund: FundRef; official_name: string | null }
 }
 
 export type Schedule = {
