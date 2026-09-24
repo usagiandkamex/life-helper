@@ -43,6 +43,18 @@ export type Price = {
   fx_rate?: number | null
   fx_date?: string | null
   fx_source?: string | null
+  source_url?: string | null
+  fetched_at?: string | null
+}
+
+export type FundRef = {
+  provider: string
+  fund_code: string
+  manager: string
+  isin: string | null
+  association_code: string | null
+  price_unit: number
+  source_url: string | null
 }
 
 export type Holding = {
@@ -57,6 +69,10 @@ export type Holding = {
   value: number | null
   gain: number | null
   price: Price | null
+  fund: FundRef | null
+  price_unit: number
+  auto_nav: boolean
+  stale: boolean
 }
 
 export type RefreshedPrice = {
@@ -72,6 +88,38 @@ export type RefreshedPrice = {
   fx_date: string | null
 }
 
+export type RefreshedNav = {
+  code: string
+  name: string
+  official_name: string
+  nav: number
+  price_unit: number
+  date: string
+  source: string
+  source_url: string
+}
+
+export type FundProvider = { provider: string; label: string; manager: string; price_unit: number }
+
+export type FundCandidate = {
+  provider: string
+  provider_label: string
+  manager: string
+  fund_code: string
+  name: string
+  isin: string | null
+  association_code: string | null
+  price_unit: number
+  score: number
+}
+
+export type FundCandidates = {
+  name: string
+  candidates: FundCandidate[]
+  errors: { code: string; error: string }[]
+  note: string
+}
+
 export type PortfolioView = {
   holdings: Holding[]
   accounts: Record<string, { label: string; value: number; cost: number }>
@@ -81,11 +129,20 @@ export type PortfolioView = {
   total_gain: number
   oldest_price_date: string | null
   missing_prices: string[]
+  stale_prices: string[]
+  manual_funds: { id: string; name: string }[]
   note: string
   brokers: { name: string; label: string }[]
+  fund_providers: FundProvider[]
   updated_at: string | null
   imported?: number
   refresh?: { updated: RefreshedPrice[]; errors: { code: string; error: string }[]; note: string }
+  refresh_funds?: {
+    updated: RefreshedNav[]
+    errors: { code: string; error: string }[]
+    manual: { id: string; name: string }[]
+    note: string
+  }
 }
 
 export type Schedule = {

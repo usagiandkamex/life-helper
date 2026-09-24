@@ -63,6 +63,9 @@ cd life-helper
 | Stooq | 日本株・米国株・ETF の前日終値と USD/JPY | ブラウザで CAPTCHA を解いて API キーを取得 |
 | 楽天ウェブサービス | 楽天トラベルの空室検索 | アプリ登録で `applicationId` と `accessKey` を取得 |
 
+投資信託の基準価額に使う[三菱UFJアセットマネジメント 投信情報 API](https://www.am.mufg.jp/tool/webapi/)は API キー不要で、設定も要りません（[利用規約](https://www.am.mufg.jp/tool/webapi/agreement.html)の範囲内で個人利用）。
+対応していない運用会社のファンドは、ポートフォリオ画面で「手入力」を選び、公式サイトの基準価額を入力します。
+
 ## ステップ 2: Azure の初回構築（1 回だけ・手元から）
 
 ### 2-1. azd 環境を作り、Azure のリソースを作成する

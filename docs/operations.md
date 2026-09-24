@@ -50,6 +50,21 @@
 4. `config.py` の `Settings`、`infra/*.bicep` のシークレット、`infra/main.parameters.json`、`scripts/setup-cicd.ps1` のシークレット一覧に追加する。
 5. 有料のサービスは、使う前に費用を判断する。
 
+## 投資信託の基準価額（運用会社の追加）
+
+基準価額は株価（Stooq）とは別に、運用会社が公式に公開している API・CSV から取得します（`POST /api/portfolio/refresh-prices` が両方を別々に実行）。
+対応済みは三菱UFJアセットマネジメント（eMAXIS Slim など。API キー不要）です。未対応の運用会社を追加する手順:
+
+1. `connectors/fund_nav.py` に `FundNavConnector` を継承したクラスを作り、`provider`・`manager`・`price_unit`・接続先ホストを定義する。
+   `fund_nav()` は `fund_code` / `name` / `nav` / `price_unit` / `date` / `source` / `source_url` を返し、`search_funds()` は候補を返す。
+2. 取得先は公式に案内されている URL 形式だけにする（画面内部の非公開エンドポイントや利用者が入力した URL は取得しない）。
+   受け取った基準価額・基準日・ファンドコードは `nav_amount()` / `nav_date()` などで必ず検証する。
+3. `market/portfolio.py` の `FundProvider` と `PriceSource` に提供元名を追加し、`connectors/registry.py` に登録する。
+4. `app/frontend/src/pages/Portfolio.tsx` の `SOURCE_LABELS` に表示名を追加する。
+5. ポートフォリオ画面の「取得元を設定」で、公式名称とファンドコードを確認してから保有銘柄に紐付ける（名前が似ているだけでは紐付けない）。
+
+自動取得に対応していないファンドは「手入力」を選び、公式サイトの基準価額を入力します。取得に失敗したファンドは直前の基準価額を残し、ほかのファンドの更新は続行します。
+
 ## 障害対応
 
 | 場所 | 見るもの |
