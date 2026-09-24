@@ -78,3 +78,44 @@ def mock_stooq(bodies: dict[str, float | str]):
         return httpx.Response(200, text=body if isinstance(body, str) else stooq_csv(body))
 
     return respx.get("https://stooq.com/q/d/l/").mock(side_effect=handler)
+
+
+ALL_COUNTRY = {
+    "fund_cd": "253425",
+    "isin_cd": "JP90C000H1T1",
+    "association_fund_cd": "0331418A",
+    "fund_name": "ｅＭＡＸＩＳ Ｓｌｉｍ 全世界株式（オール・カントリー）",
+}
+SP500 = {
+    "fund_cd": "253266",
+    "isin_cd": "JP90C000FYT1",
+    "association_fund_cd": "0331C180",
+    "fund_name": "ｅＭＡＸＩＳ Ｓｌｉｍ 米国株式（Ｓ＆Ｐ５００）",
+}
+
+
+def mufg_payload(*datasets: dict) -> dict:
+    """The envelope of the 三菱UFJアセットマネジメント fund API."""
+    return {
+        "result": {"status": 200, "retcount": len(datasets), "errcd": None, "errmsg": None},
+        "errors": {"count": 0, "error_list": None},
+        "datasets": list(datasets),
+    }
+
+
+def mock_mufg(navs: dict[str, tuple[float, str]], *, code_list: list[dict] | None = None, funds=(ALL_COUNTRY, SP500)):
+    """Mocks the fund API: ``navs`` maps any code of a fund to (基準価額, 基準日 YYYYMMDD)."""
+    import httpx
+    import respx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/code_list":
+            return httpx.Response(200, json=mufg_payload(*(code_list if code_list is not None else funds)))
+        code = request.url.path.rsplit("/", 1)[-1]
+        for fund in funds:
+            if code in (fund["fund_cd"], fund["isin_cd"], fund["association_fund_cd"]) and code in navs:
+                nav, base_date = navs[code]
+                return httpx.Response(200, json=mufg_payload(fund | {"nav": nav, "base_date": base_date}))
+        return httpx.Response(200, json=mufg_payload())
+
+    return respx.get(url__startswith="https://developer.am.mufg.jp").mock(side_effect=handler)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 
 import httpx
@@ -10,8 +11,10 @@ from pydantic import SecretStr
 
 from life_helper.connectors.registry import get_connectors
 from life_helper.market.broker_csv import BrokerCsvError, load_mapping, parse_broker_csv
+from life_helper.market.funds import refresh_fund_navs
 from life_helper.market.portfolio import (
     CapitalGainsParams,
+    FundRef,
     GainItem,
     Holding,
     InvestmentSimParams,
@@ -19,12 +22,14 @@ from life_helper.market.portfolio import (
     PortfolioStore,
     Price,
     estimate_capital_gains_tax,
+    previous_business_day,
     simulate_investment,
     summarize,
+    yen,
 )
 from life_helper.market.service import portfolio_store, refresh_stock_prices, stock_price
 
-from .conftest import mock_stooq, sign_in, stooq_csv
+from .conftest import mock_mufg, mock_stooq, sign_in, stooq_csv
 
 BROKER_DIR = Path(__file__).resolve().parents[1] / "src" / "life_helper" / "resources" / "broker_csv"
 
@@ -328,9 +333,192 @@ def test_investment_tools_registered(ctx):
         "get_portfolio",
         "get_stock_price",
         "refresh_stock_prices",
+        "get_fund_nav",
+        "refresh_fund_navs",
         "simulate_investment",
         "estimate_capital_gains_tax",
         "update_holding",
     }
     assert specs["update_holding"].writes and specs["refresh_stock_prices"].writes
     assert not specs["get_portfolio"].writes
+    # Funds are priced by the fund manager, so the tool belongs to another connector than the stock one.
+    assert specs["refresh_fund_navs"].writes and specs["refresh_fund_navs"].connector == "mufg_api"
+    assert specs["refresh_stock_prices"].connector == "stooq"
+
+
+# -- fund NAVs (投資信託の基準価額) --------------------------------------------------------------------------
+
+NAV_DAY = previous_business_day(date.today())
+OLDER_DAY = previous_business_day(NAV_DAY)
+
+
+def _mufg_ready(ctx) -> None:
+    get_connectors(ctx)["mufg_api"].min_interval_seconds = 0
+
+
+def _fund(quantity: float, *, code: str = "0331418A", price_unit: float = 10_000, **kwargs) -> Holding:
+    return Holding(
+        account="nisa_tsumitate",
+        kind="fund",
+        name=kwargs.pop("name", "eMAXIS Slim 全世界株式（オール・カントリー）"),
+        quantity=quantity,
+        cost_total=kwargs.pop("cost_total", 1_000_000),
+        fund=FundRef(provider="mufg_api", fund_code=code, price_unit=price_unit, manager="三菱UFJアセットマネジメント"),
+        **kwargs,
+    )
+
+
+def test_fund_value_uses_the_price_unit_of_the_fund():
+    fund = _fund(500_000)
+    fund.apply_price(Price(value=25_000, date="2026-09-24", source="mufg_api"))
+    assert fund.market_value() == 1_250_000
+    # A fund quoted per 1 unit instead of per 10,000 must not be valued 10,000 times too low.
+    per_unit = _fund(500, price_unit=1)
+    per_unit.apply_price(Price(value=2.5, date="2026-09-24", source="mufg_api"))
+    assert per_unit.market_value() == Decimal("1250")
+
+
+def test_fund_value_has_no_floating_point_error():
+    fund = _fund(1_182_307.279)
+    fund.apply_price(Price(value=11_699, date="2026-09-24", source="mufg_api"))
+    # 1,182,307.279 口 ÷ 10,000 × 11,699 円 exactly; in float this is 1383181.2857021003.
+    assert fund.market_value() == Decimal("1383181.2857021")
+    assert float(fund.market_value()) != 1_182_307.279 * 11_699 / 10_000
+    # Yen are rounded half up, not with the banker's rounding that float round() uses.
+    half = _fund(1_000_005)
+    half.apply_price(Price(value=5_000, date="2026-09-24", source="mufg_api"))
+    assert half.market_value() == Decimal("500002.5") and yen(half.market_value()) == 500_003
+
+
+def test_summary_flags_old_navs_and_funds_without_a_source():
+    linked = _fund(500_000)
+    linked.apply_price(Price(value=25_000, date="2026-09-01", source="mufg_api"))
+    unlinked = Holding(account="ideco", kind="fund", name="自動取得できないファンド", quantity=1_000, cost_total=1_000)
+    unlinked.apply_price(Price(value=12_000, date="2026-09-24", source="manual"))
+    s = summarize(Portfolio(holdings=[linked, unlinked]), today=date(2026, 9, 25))
+    assert s["stale_prices"] == ["eMAXIS Slim 全世界株式（オール・カントリー）"]
+    assert s["manual_funds"] == [{"id": unlinked.id, "name": "自動取得できないファンド"}]
+    assert s["holdings"][0]["auto_nav"] is True and s["holdings"][0]["price_unit"] == 10_000
+    assert s["holdings"][1]["auto_nav"] is False and s["holdings"][1]["stale"] is False
+    # A NAV published for the previous business day is the newest one there is, so it is not old.
+    fresh = summarize(Portfolio(holdings=[linked]), today=date(2026, 9, 2))
+    assert fresh["stale_prices"] == []
+
+
+async def test_refresh_fund_navs_values_holdings(ctx):
+    with portfolio_store(ctx).transaction() as portfolio:
+        portfolio.holdings = [_fund(500_000), _fund(300_000, code="0331C180", name="eMAXIS Slim 米国株式")]
+    _mufg_ready(ctx)
+    with respx.mock:
+        mock_mufg({"0331418A": (25_341, NAV_DAY.strftime("%Y%m%d"))})
+        result = await refresh_fund_navs(ctx)
+    assert [(u["code"], u["nav"], u["date"], u["source"]) for u in result["updated"]] == [
+        ("0331418A", 25_341, NAV_DAY.isoformat(), "mufg_api")
+    ]
+    assert result["updated"][0]["source_url"].startswith("https://developer.am.mufg.jp/")
+    # The fund the API has no NAV for is reported, and the others are still updated.
+    assert result["errors"] == [{"code": "0331C180", "error": "0331C180 のファンド情報が見つかりませんでした"}]
+    holdings = portfolio_store(ctx).load().holdings
+    assert holdings[0].market_value() == Decimal("1267050") and holdings[1].price is None
+    assert holdings[0].price.fetched_at and holdings[0].price.source_url
+
+
+async def test_refresh_fund_navs_keeps_the_newer_nav_and_survives_failures(ctx):
+    with portfolio_store(ctx).transaction() as portfolio:
+        portfolio.holdings = [_fund(500_000)]
+        portfolio.holdings[0].apply_price(
+            Price(value=25_000, date=NAV_DAY.isoformat(), source="broker_csv", fetched_at="keep-me")
+        )
+    _mufg_ready(ctx)
+    with respx.mock:
+        mock_mufg({"0331418A": (10_000, OLDER_DAY.strftime("%Y%m%d"))})
+        stale = await refresh_fund_navs(ctx)
+    assert stale["updated"] == [] and stale["errors"] == []
+    kept = portfolio_store(ctx).load().holdings[0]
+    assert kept.price.value == 25_000 and kept.price.date == NAV_DAY.isoformat()
+
+    with respx.mock:
+        respx.get(url__startswith="https://developer.am.mufg.jp").mock(return_value=httpx.Response(503, text=""))
+        failed = await refresh_fund_navs(ctx)
+    assert failed["updated"] == [] and "HTTP 503" in failed["errors"][0]["error"]
+    # A failed fetch leaves the previous NAV and valuation in place instead of clearing them.
+    after = portfolio_store(ctx).load().holdings[0]
+    assert after.price.value == 25_000 and after.market_value() == 1_250_000
+
+
+async def test_funds_without_a_source_are_left_to_manual_entry(ctx):
+    manual = Holding(account="ideco", kind="fund", name="自動取得未対応ファンド", quantity=1_000, cost_total=10_000)
+    manual.apply_price(Price(value=15_000, date="2026-09-01", source="manual"))
+    with portfolio_store(ctx).transaction() as portfolio:
+        portfolio.holdings = [manual]
+    _mufg_ready(ctx)
+    with respx.mock:
+        # No request is made at all: nothing tells us which official fund this is.
+        route = respx.get(url__startswith="https://developer.am.mufg.jp")
+        result = await refresh_fund_navs(ctx)
+    assert not route.called
+    assert result["updated"] == [] and result["manual"] == [{"id": manual.id, "name": "自動取得未対応ファンド"}]
+    assert portfolio_store(ctx).load().holdings[0].market_value() == 1_500
+
+
+async def test_link_fund_needs_a_confirmed_fund_code(client, ctx):
+    csrf = sign_in(client, ctx)
+    headers = {"x-csrf-token": csrf}
+    holding = Holding(account="nisa_tsumitate", kind="fund", name="全世界株式", quantity=500_000, cost_total=1_000_000)
+    with portfolio_store(ctx).transaction() as portfolio:
+        portfolio.holdings = [holding]
+    _mufg_ready(ctx)
+    with respx.mock:
+        mock_mufg({"0331418A": (25_341, NAV_DAY.strftime("%Y%m%d"))})
+        suggested = client.get(
+            "/api/portfolio/fund-candidates", params={"name": "eMAXIS Slim 全世界株式"}, headers=headers
+        ).json()
+        # Names alone only produce candidates: similar fund names stay in the list and nothing is linked yet.
+        assert [c["fund_code"] for c in suggested["candidates"]] == ["0331418A", "0331C180"]
+        assert suggested["candidates"][0]["score"] > suggested["candidates"][1]["score"]
+        assert portfolio_store(ctx).load().holdings[0].fund is None
+
+        linked = client.post(
+            "/api/portfolio/fund-link",
+            json={"id": holding.id, "provider": "mufg_api", "fund_code": "0331418A"},
+            headers=headers,
+        ).json()
+        unknown = client.post(
+            "/api/portfolio/fund-link",
+            json={"id": holding.id, "provider": "mufg_api", "fund_code": "99999999"},
+            headers=headers,
+        )
+    assert linked["link"]["official_name"] == "ｅＭＡＸＩＳ Ｓｌｉｍ 全世界株式（オール・カントリー）"
+    assert linked["holdings"][0]["fund"]["association_code"] == "0331418A"
+    assert linked["holdings"][0]["fund"]["price_unit"] == 10_000
+    assert linked["total_value"] == 1_267_050
+    assert unknown.status_code == 400
+    # The failed link left the confirmed one untouched.
+    assert portfolio_store(ctx).load().holdings[0].fund.fund_code == "0331418A"
+
+    manual = client.post(
+        "/api/portfolio/fund-link", json={"id": holding.id, "provider": "manual"}, headers=headers
+    ).json()
+    assert manual["holdings"][0]["auto_nav"] is False and manual["manual_funds"][0]["id"] == holding.id
+
+
+def test_refresh_prices_updates_stocks_and_funds_independently(client, ctx, settings):
+    csrf = sign_in(client, ctx)
+    with portfolio_store(ctx).transaction() as portfolio:
+        portfolio.holdings = [
+            Holding(account="tokutei", kind="stock", code="7203", name="トヨタ", quantity=100, cost_total=250_000),
+            _fund(500_000),
+            _fund(300_000, code="0331C180", name="eMAXIS Slim 米国株式", cost_total=500_000),
+        ]
+    _stooq_ready(ctx, settings)
+    _mufg_ready(ctx)
+    with respx.mock:
+        mock_stooq({"7203.jp": 3_000})
+        mock_mufg({"0331418A": (25_341, NAV_DAY.strftime("%Y%m%d")), "0331C180": (30_000, NAV_DAY.strftime("%Y%m%d"))})
+        view = client.post("/api/portfolio/refresh-prices", headers={"x-csrf-token": csrf}).json()
+    assert [u["code"] for u in view["refresh"]["updated"]] == ["7203"]
+    assert [u["code"] for u in view["refresh_funds"]["updated"]] == ["0331418A", "0331C180"]
+    assert "Stooq" in view["refresh"]["note"] and "公式 API" in view["refresh_funds"]["note"]
+    # 100 x 3,000 + 500,000 / 10,000 x 25,341 + 300,000 / 10,000 x 30,000
+    assert view["total_value"] == 300_000 + 1_267_050 + 900_000
+    assert view["missing_prices"] == [] and view["stale_prices"] == []

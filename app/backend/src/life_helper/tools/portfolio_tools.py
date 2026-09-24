@@ -9,6 +9,7 @@ from copilot import define_tool
 from pydantic import BaseModel, Field
 
 from ..connectors.base import ConnectorError
+from ..market.funds import fund_connectors, refresh_fund_navs
 from ..market.portfolio import (
     Account,
     CapitalGainsParams,
@@ -33,6 +34,13 @@ class EmptyParams(BaseModel):
 
 class StockPriceParams(BaseModel):
     code: str = Field(description="証券コードまたはティッカー（例: 7203、1306、MSFT）")
+
+
+class FundNavParams(BaseModel):
+    provider: str = Field(description="データ提供元（例: mufg_api）")
+    fund_code: str = Field(
+        max_length=32, description="運用会社のファンドコード・投資信託協会コード・ISIN（例: 0331418A）"
+    )
 
 
 class UpdateHoldingParams(BaseModel):
@@ -105,10 +113,32 @@ def build_tools(ctx: AppContext) -> list[ToolSpec]:
     @define_tool(
         name="refresh_stock_prices",
         description="保有している日本株・米国株・ETF・REIT の価格を Stooq の前日終値で更新する"
-        "（証券会社 CSV より新しい場合のみ。米国株は USD/JPY で円換算）。",
+        "（証券会社 CSV より新しい場合のみ。米国株は USD/JPY で円換算。投資信託は対象外）。",
     )
     async def refresh_prices(params: EmptyParams) -> dict:
         return await refresh_stock_prices(ctx)
+
+    @define_tool(
+        name="get_fund_nav",
+        description="投資信託の基準価額を運用会社の公式 API から取得する"
+        "（ファンドコードを指定。株価の Stooq とは別）。",
+    )
+    async def get_fund_nav(params: FundNavParams) -> dict:
+        connector = fund_connectors(ctx).get(params.provider)
+        if connector is None:
+            return {"error": f"対応していないデータ提供元です: {params.provider}"}
+        try:
+            return await connector.fund_nav(params.fund_code)
+        except ConnectorError as e:
+            return {"error": str(e)}
+
+    @define_tool(
+        name="refresh_fund_navs",
+        description="保有している投資信託の基準価額を、紐付けた運用会社の公式 API から更新して評価額を計算し直す"
+        "（紐付けていないファンドは手入力のまま）。",
+    )
+    async def refresh_navs(params: EmptyParams) -> dict:
+        return await refresh_fund_navs(ctx)
 
     @define_tool(
         name="simulate_investment",
@@ -137,6 +167,8 @@ def build_tools(ctx: AppContext) -> list[ToolSpec]:
         ToolSpec(get_portfolio),
         ToolSpec(get_stock_price, connector="stooq"),
         ToolSpec(refresh_prices, writes=True, connector="stooq"),
+        ToolSpec(get_fund_nav, connector="mufg_api"),
+        ToolSpec(refresh_navs, writes=True, connector="mufg_api"),
         ToolSpec(simulate_investment_tool),
         ToolSpec(estimate_tax),
         ToolSpec(update_holding, writes=True),

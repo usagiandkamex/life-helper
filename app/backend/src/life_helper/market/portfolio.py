@@ -10,7 +10,8 @@ import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Literal
 
@@ -22,9 +23,13 @@ from ..knowledge.store import atomic_write
 
 Account = Literal["nisa_tsumitate", "nisa_growth", "tokutei", "ippan", "ideco"]
 Kind = Literal["stock", "etf", "reit", "fund"]
-PriceSource = Literal["broker_csv", "stooq", "nav_site", "manual"]
+# Fund NAV providers double as price sources, so the screen can show where a NAV came from.
+FundProvider = Literal["mufg_api", "manual"]
+PriceSource = Literal["broker_csv", "stooq", "nav_site", "manual", "mufg_api"]
 Market = Literal["jp", "us"]
 Currency = Literal["JPY", "USD"]
+# Japanese funds quote the NAV per 10,000 units, but the unit is kept per fund because it can differ.
+DEFAULT_PRICE_UNIT = 10_000
 
 ACCOUNT_LABELS = {
     "nisa_tsumitate": "NISA つみたて投資枠",
@@ -40,7 +45,7 @@ TAXABLE_ACCOUNTS = ("tokutei", "ippan")
 class Price(BaseModel):
     """A price in yen. US stocks also keep the local (USD) price and the rate used to convert it."""
 
-    value: float = Field(description="円換算後の価格。投資信託は 1 万口あたりの基準価額")
+    value: float = Field(description="円換算後の価格。投資信託は価格単位（通常 1 万口）あたりの基準価額")
     date: str = Field(description="価格の日付（YYYY-MM-DD）")
     source: PriceSource
     # Optional, so that portfolios saved before US stocks were supported still load.
@@ -51,6 +56,25 @@ class Price(BaseModel):
     fx_rate: float | None = Field(default=None, description="円換算に使った USD/JPY")
     fx_date: str | None = Field(default=None, description="為替レートの日付（YYYY-MM-DD）")
     fx_source: PriceSource | None = Field(default=None, description="為替レートの取得元")
+    source_url: str | None = Field(default=None, description="公式の出典 URL（投資信託の基準価額）")
+    fetched_at: str | None = Field(default=None, description="価格を取得した日時（ISO 8601）")
+
+
+class FundRef(BaseModel):
+    """Links a holding to an official fund. Only set after the user confirmed the match, never by name alone."""
+
+    provider: FundProvider = Field(description="基準価額のデータ提供元")
+    fund_code: str = Field(default="", description="提供元のファンドコード")
+    manager: str = Field(default="", description="運用会社")
+    isin: str | None = Field(default=None, description="ISIN コード")
+    association_code: str | None = Field(default=None, description="投資信託協会コード")
+    price_unit: float = Field(default=DEFAULT_PRICE_UNIT, gt=0, description="基準価額の口数単位（通常は 1 万口）")
+    source_url: str | None = Field(default=None, description="公式の出典 URL")
+
+    @property
+    def automatic(self) -> bool:
+        """True when a connector can fetch the NAV; ``manual`` funds stay on the hand-entered price."""
+        return self.provider != "manual" and bool(self.fund_code)
 
 
 class Holding(BaseModel):
@@ -63,15 +87,23 @@ class Holding(BaseModel):
     cost_total: float = Field(ge=0, description="取得金額の合計（円、簿価）")
     price: Price | None = None
     valuation_yen: float | None = Field(default=None, description="評価額（円）。証券会社 CSV の値など")
+    fund: FundRef | None = Field(default=None, description="投資信託の公式データとの紐付け（利用者が確認して設定）")
 
-    def market_value(self) -> float | None:
+    @property
+    def price_unit(self) -> Decimal:
+        """Units the NAV is quoted for. Only funds use it; stocks are always priced per share."""
+        if self.kind != "fund":
+            return Decimal(1)
+        return Decimal(str(self.fund.price_unit)) if self.fund else Decimal(DEFAULT_PRICE_UNIT)
+
+    def market_value(self) -> Decimal | None:
+        """保有口数 ÷ 価格単位 × 基準価額（株は 株数 × 株価）。Decimal のまま返し、丸めは呼び出し側で行う。"""
         if self.valuation_yen is not None:
-            return self.valuation_yen
+            return Decimal(str(self.valuation_yen))
         if self.price is None:
             return None
-        if self.kind == "fund":
-            return self.quantity / 10_000 * self.price.value
-        return self.quantity * self.price.value
+        # Multiply before dividing so the unit division never loses digits of the NAV.
+        return Decimal(str(self.quantity)) * Decimal(str(self.price.value)) / self.price_unit
 
     def apply_price(self, price: Price) -> bool:
         """Uses ``price`` if it is at least as new as the current one. Returns True when applied."""
@@ -144,14 +176,36 @@ class PortfolioStore:
         atomic_write(path, json.dumps(cache, ensure_ascii=False))
 
 
-def summarize(portfolio: Portfolio) -> dict:
+def yen(value: Decimal) -> int:
+    """Rounds a money amount to whole yen explicitly, instead of relying on float rounding."""
+    return int(value.quantize(Decimal(1), rounding=ROUND_HALF_UP))
+
+
+def previous_business_day(today: date) -> date:
+    """Previous weekday. Japanese holidays are not known here, so those days count as business days."""
+    day = today - timedelta(days=1)
+    while day.weekday() >= 5:
+        day -= timedelta(days=1)
+    return day
+
+
+def is_stale(price: Price | None, *, today: date | None = None) -> bool:
+    """A fund publishes the NAV of a day in the evening, so the previous business day is still current."""
+    if price is None:
+        return False
+    return price.date < previous_business_day(today or date.today()).isoformat()
+
+
+def summarize(portfolio: Portfolio, *, today: date | None = None) -> dict:
+    today = today or date.today()
     by_account: dict[str, dict] = {}
-    by_kind: dict[str, float] = {}
+    by_kind: dict[str, Decimal] = {}
     items = []
-    total_value = total_cost = 0.0
+    total_value = total_cost = Decimal(0)
     for h in portfolio.holdings:
         value = h.market_value()
-        gain = (value - h.cost_total) if value is not None else None
+        cost = Decimal(str(h.cost_total))
+        gain = (value - cost) if value is not None else None
         items.append(
             {
                 "id": h.id,
@@ -161,30 +215,40 @@ def summarize(portfolio: Portfolio) -> dict:
                 "code": h.code,
                 "name": h.name,
                 "quantity": h.quantity,
-                "cost_total": round(h.cost_total),
-                "value": round(value) if value is not None else None,
-                "gain": round(gain) if gain is not None else None,
+                "cost_total": yen(cost),
+                "value": yen(value) if value is not None else None,
+                "gain": yen(gain) if gain is not None else None,
                 "price": h.price.model_dump() if h.price else None,
+                "fund": h.fund.model_dump() if h.fund else None,
+                "price_unit": float(h.price_unit),
+                "auto_nav": h.kind == "fund" and h.fund is not None and h.fund.automatic,
+                "stale": is_stale(h.price, today=today),
             }
         )
-        acc = by_account.setdefault(h.account, {"label": ACCOUNT_LABELS[h.account], "value": 0.0, "cost": 0.0})
-        acc["cost"] += h.cost_total
+        acc = by_account.setdefault(
+            h.account, {"label": ACCOUNT_LABELS[h.account], "value": Decimal(0), "cost": Decimal(0)}
+        )
+        acc["cost"] += cost
         if value is not None:
             acc["value"] += value
             total_value += value
-            by_kind[h.kind] = by_kind.get(h.kind, 0.0) + value
-        total_cost += h.cost_total
+            by_kind[h.kind] = by_kind.get(h.kind, Decimal(0)) + value
+        total_cost += cost
     missing = [i["name"] for i in items if i["value"] is None]
     dates = sorted({i["price"]["date"] for i in items if i["price"]})
     return {
         "holdings": items,
-        "accounts": {k: {**v, "value": round(v["value"]), "cost": round(v["cost"])} for k, v in by_account.items()},
-        "allocation": {k: round(v / total_value, 4) for k, v in by_kind.items()} if total_value else {},
-        "total_value": round(total_value),
-        "total_cost": round(total_cost),
-        "total_gain": round(total_value - total_cost),
+        "accounts": {k: {**v, "value": yen(v["value"]), "cost": yen(v["cost"])} for k, v in by_account.items()},
+        "allocation": ({k: round(float(v / total_value), 4) for k, v in by_kind.items()} if total_value else {}),
+        "total_value": yen(total_value),
+        "total_cost": yen(total_cost),
+        "total_gain": yen(total_value - total_cost),
         "oldest_price_date": dates[0] if dates else None,
         "missing_prices": missing,
+        "stale_prices": [i["name"] for i in items if i["stale"]],
+        "manual_funds": [
+            {"id": i["id"], "name": i["name"]} for i in items if i["kind"] == "fund" and not i["auto_nav"]
+        ],
         "note": "評価額は価格の日付時点の目安です。正確な評価額は証券会社の画面で確認してください。",
     }
 

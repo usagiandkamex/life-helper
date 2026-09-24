@@ -8,11 +8,12 @@ import pytest
 import respx
 
 from life_helper.connectors.base import ConnectorError
+from life_helper.connectors.fund_nav import MIN_SCORE, MufgFundApiConnector, match_score
 from life_helper.connectors.rakuten_travel import RakutenTravelConnector, parse_vacancies
 from life_helper.connectors.stooq import StooqConnector, symbol_candidates, to_stooq_symbol
 from life_helper.security import SecretMasker
 
-from .conftest import mock_stooq, sign_in, stooq_csv
+from .conftest import ALL_COUNTRY, SP500, mock_mufg, mock_stooq, mufg_payload, sign_in, stooq_csv
 
 STOOQ_KEY = "stooqkey-ABCDEF123456"
 APP_ID = "e5e2671a-b454-4e6f-aaaa-bbbbccccdddd"
@@ -27,6 +28,11 @@ def masker():
 @pytest.fixture
 def stooq(tmp_path, masker):
     return StooqConnector({"stooq_api_key": STOOQ_KEY}, masker, tmp_path / "state.json")
+
+
+@pytest.fixture
+def mufg(tmp_path, masker):
+    return MufgFundApiConnector({}, masker, tmp_path / "state.json")
 
 
 @pytest.fixture
@@ -254,6 +260,100 @@ async def test_rakuten_error_and_validation(rakuten):
 def test_rakuten_rejects_foreign_endpoint(tmp_path, masker):
     with pytest.raises(ValueError):
         RakutenTravelConnector({}, masker, tmp_path / "s.json", endpoint="https://evil.example/api")
+
+
+def test_fund_code_decides_the_api_path():
+    assert MufgFundApiConnector.code_path("0331418A") == "association_fund_cd/0331418A"
+    assert MufgFundApiConnector.code_path("jp90c000h1t1") == "isin_cd/JP90C000H1T1"
+    assert MufgFundApiConnector.code_path("253425") == "fund_cd/253425"
+    # A code that could escape the URL path, or that fits no known code shape, never reaches the API.
+    for bad in ("", "../../etc", "0331418A/../x", "03314", "25342A", "0331418A0331418A"):
+        with pytest.raises(ConnectorError, match="ファンドコード"):
+            MufgFundApiConnector.code_path(bad)
+
+
+def test_fund_name_matching_only_scores_candidates():
+    # Managers write fund names in full-width characters, brokers in half-width.
+    assert (
+        match_score(
+            "eMAXIS Slim 全世界株式（オール・カントリー）", "ｅＭＡＸＩＳ Ｓｌｉｍ 全世界株式（オール・カントリー）"
+        )
+        == 1.0
+    )
+    assert match_score("eMAXIS Slim 全世界株式", "ｅＭＡＸＩＳ Ｓｌｉｍ 全世界株式（オール・カントリー）") == 0.9
+    assert match_score("ひふみプラス", "ｅＭＡＸＩＳ Ｓｌｉｍ 米国株式（Ｓ＆Ｐ５００）") < MIN_SCORE
+
+
+@respx.mock
+async def test_mufg_fund_nav(mufg):
+    route = mock_mufg({"0331418A": (25_341, "20260924")})
+    result = await mufg.fund_nav("0331418A", today=date(2026, 9, 25))
+    assert result == {
+        "fund_code": "0331418A",
+        "name": "ｅＭＡＸＩＳ Ｓｌｉｍ 全世界株式（オール・カントリー）",
+        "nav": 25_341.0,
+        "price_unit": 10_000,
+        "date": "2026-09-24",
+        "source": "mufg_api",
+        "source_url": "https://developer.am.mufg.jp/fund_information_latest/association_fund_cd/0331418A",
+        "manager": "三菱UFJアセットマネジメント",
+        "isin": "JP90C000H1T1",
+        "association_code": "0331418A",
+    }
+    assert route.calls.last.request.url.path == "/fund_information_latest/association_fund_cd/0331418A"
+    assert mufg.configured and mufg.last_used() is not None
+
+
+@respx.mock
+async def test_mufg_search_offers_candidates(mufg):
+    mock_mufg({})
+    candidates = await mufg.search_funds("eMAXIS Slim 全世界株式（オール・カントリー）")
+    assert [(c["fund_code"], c["score"]) for c in candidates] == [("0331418A", 1.0)]
+    assert candidates[0]["provider"] == "mufg_api" and candidates[0]["price_unit"] == 10_000
+    # A name that matches nothing offers nothing, instead of returning the closest fund.
+    assert await mufg.search_funds("ひふみプラス") == []
+
+
+@respx.mock
+async def test_mufg_never_values_a_holding_with_another_fund(mufg):
+    respx.get(url__startswith="https://developer.am.mufg.jp").mock(
+        return_value=httpx.Response(200, json=mufg_payload(SP500 | {"nav": 30_000, "base_date": "20260924"}))
+    )
+    with pytest.raises(ConnectorError, match="別のファンド"):
+        await mufg.fund_nav("0331418A", today=date(2026, 9, 25))
+
+
+@respx.mock
+async def test_mufg_failures_are_distinguished(mufg):
+    mufg.min_interval_seconds = 0
+    route = respx.get(url__startswith="https://developer.am.mufg.jp")
+    for response, message in (
+        (httpx.Response(403, text="ERROR: The request could not be satisfied"), "HTTP 403"),
+        (httpx.Response(503, text=""), "HTTP 503"),
+        (httpx.Response(200, text="<html>maintenance</html>"), "JSON ではありません"),
+        (httpx.Response(200, json={"result": {"status": 400}, "errors": {"count": 1}}), "エラーを返しました"),
+        (httpx.Response(200, json={"result": {"status": 200}}), "datasets がありません"),
+        (httpx.Response(200, json=mufg_payload()), "見つかりませんでした"),
+        (httpx.Response(200, json=mufg_payload(ALL_COUNTRY | {"nav": 0, "base_date": "20260924"})), "基準価額が不正"),
+        (httpx.Response(200, json=mufg_payload(ALL_COUNTRY | {"base_date": "20260924"})), "基準価額が不正"),
+        (httpx.Response(200, json=mufg_payload(ALL_COUNTRY | {"nav": 1, "base_date": "2026-99-99"})), "基準日が不正"),
+        (httpx.Response(200, json=mufg_payload(ALL_COUNTRY | {"nav": 1, "base_date": "20261005"})), "未来の日付"),
+    ):
+        route.mock(return_value=response)
+        with pytest.raises(ConnectorError, match=message):
+            await mufg.fund_nav("0331418A", today=date(2026, 9, 25))
+
+
+@respx.mock
+async def test_mufg_network_error_is_reported_as_connector_error(mufg):
+    respx.get(url__startswith="https://developer.am.mufg.jp").mock(side_effect=httpx.ConnectError("boom"))
+    with pytest.raises(ConnectorError, match="接続できませんでした"):
+        await mufg.fund_nav("0331418A")
+
+
+async def test_fund_connector_refuses_other_hosts(mufg):
+    with pytest.raises(ConnectorError):
+        await mufg.get("https://evil.example/fund_information_latest/fund_cd/253425", params={})
 
 
 def test_tool_registered_only_when_configured(ctx, settings):

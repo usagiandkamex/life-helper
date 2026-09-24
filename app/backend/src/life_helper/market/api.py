@@ -3,21 +3,30 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from pydantic import BaseModel, Field
 
 from ..auth import CurrentUser, require_user
 from ..context import AppContext, get_ctx
 from ..tools.portfolio_tools import UpdateHoldingParams, apply_holding_update
 from .broker_csv import BrokerCsvError, list_brokers, load_mapping, parse_broker_csv
+from .funds import fund_providers, link_fund, refresh_fund_navs, suggest_funds
 from .portfolio import InvestmentSimParams, simulate_investment, summarize
 from .service import portfolio_store, refresh_stock_prices
 
 router = APIRouter(prefix="/api/portfolio")
 
 
+class FundLinkParams(BaseModel):
+    id: str = Field(description="保有銘柄の ID")
+    provider: str = Field(description="データ提供元（manual は手入力のまま）")
+    fund_code: str = Field(default="", max_length=32, description="提供元のファンドコード")
+
+
 def _view(ctx: AppContext) -> dict:
     portfolio = portfolio_store(ctx).load()
     return summarize(portfolio) | {
         "brokers": list_brokers(ctx.settings.broker_csv_dir),
+        "fund_providers": fund_providers(ctx),
         "updated_at": portfolio.updated_at,
     }
 
@@ -59,8 +68,29 @@ async def import_csv(
 
 @router.post("/refresh-prices")
 async def refresh_prices(user: CurrentUser = Depends(require_user), ctx: AppContext = Depends(get_ctx)) -> dict:
+    # Two independent sources: Stooq for what trades on an exchange, the fund managers for 基準価額.
     result = await refresh_stock_prices(ctx)
-    return _view(ctx) | {"refresh": result}
+    funds = await refresh_fund_navs(ctx)
+    return _view(ctx) | {"refresh": result, "refresh_funds": funds}
+
+
+@router.get("/fund-candidates")
+async def fund_candidates(
+    name: str, user: CurrentUser = Depends(require_user), ctx: AppContext = Depends(get_ctx)
+) -> dict:
+    if not name.strip():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "ファンド名を指定してください")
+    return await suggest_funds(ctx, name[:200])
+
+
+@router.post("/fund-link")
+async def set_fund_link(
+    body: FundLinkParams, user: CurrentUser = Depends(require_user), ctx: AppContext = Depends(get_ctx)
+) -> dict:
+    result = await link_fund(ctx, body.id, body.provider, body.fund_code)
+    if "error" in result:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, result["error"])
+    return _view(ctx) | {"link": result}
 
 
 @router.post("/simulate")
