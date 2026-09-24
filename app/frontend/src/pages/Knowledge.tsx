@@ -13,6 +13,9 @@ const GROUP_LABELS: Record<string, string> = {
   '': 'その他',
 }
 
+// 形式ちがい・サイズ超過など、そのファイルだけが拒否された場合に /api/files/upload が返す状態コード。
+const FILE_ERROR_STATUSES = [400, 413]
+
 const summarize = (items: string[], limit = 3): string =>
   items.length > limit ? `${items.slice(0, limit).join('、')} ほか ${items.length - limit} 件` : items.join('、')
 
@@ -93,47 +96,55 @@ export function KnowledgePage() {
     const failed: string[] = []
     const notes: string[] = []
     const problems: string[] = []
-    // 1 ファイルずつ順番に送る: 同名ファイルの連番（docs/x-2.md）が取り込んだ順に決まる。
-    for (const [index, file] of files.entries()) {
-      setUploading({ current: index + 1, total: files.length })
-      const form = new FormData()
-      form.append('file', file)
-      try {
-        const res = await api<{ path: string; redacted: string[] }>('/api/files/upload', {
-          method: 'POST',
-          body: form,
-        })
-        saved.push(res.path)
-        for (const kind of res.redacted) redacted.add(kind)
-      } catch (e) {
-        // 形式・サイズなどファイル固有のエラーは残りのファイルを続ける。認証切れや通信・サーバーエラーは中断する。
-        if (e instanceof ApiError && e.status < 500 && e.status !== 401 && e.status !== 403) {
-          failed.push(`${file.name}（${e.message}）`)
-          continue
-        }
-        problems.push(`${file.name}（${(e as Error).message}）で中断しました。残りのファイルは取り込んでいません`)
-        break
-      }
-    }
-    setUploading(null)
-    if (saved.length) {
-      notes.push(
-        saved.length === 1 ? `${saved[0]} に取り込みました` : `${saved.length} 件を取り込みました（${summarize(saved)}）`,
-      )
-      if (redacted.size) notes.push(`${[...redacted].join('・')}は削除して保存しました`)
-    }
-    if (failed.length) problems.unshift(`取り込めませんでした: ${summarize(failed)}`)
     try {
-      if (saved.length) {
-        await load()
-        await open(saved[0])
+      // 1 ファイルずつ順番に送る: 同名ファイルの連番（docs/x-2.md）が取り込んだ順に決まる。
+      for (const [index, file] of files.entries()) {
+        setUploading({ current: index + 1, total: files.length })
+        const form = new FormData()
+        form.append('file', file)
+        try {
+          const res = await api<{ path: string; redacted: string[] }>('/api/files/upload', {
+            method: 'POST',
+            body: form,
+          })
+          saved.push(res.path)
+          for (const kind of res.redacted) redacted.add(kind)
+        } catch (e) {
+          // そのファイルだけの問題なら残りを続ける。認証切れ・通信・サーバーのエラーは続けても失敗するので中断する。
+          if (e instanceof ApiError && FILE_ERROR_STATUSES.includes(e.status)) {
+            failed.push(`${file.name}（${e.message}）`)
+            continue
+          }
+          const rest = files.length - index - 1
+          problems.push(
+            `${file.name}（${(e as Error).message}）で中断しました${rest ? `。残りの ${rest} 件は取り込んでいません` : ''}`,
+          )
+          break
+        }
       }
-    } catch (e) {
-      problems.push((e as Error).message)
+      if (saved.length) {
+        notes.push(
+          saved.length === 1
+            ? `${saved[0]} に取り込みました`
+            : `${saved.length} 件を取り込みました（${summarize(saved)}）`,
+        )
+        if (redacted.size) notes.push(`${[...redacted].join('・')}は削除して保存しました`)
+      }
+      if (failed.length) problems.unshift(`取り込めませんでした: ${summarize(failed)}`)
+      try {
+        if (saved.length) {
+          await load()
+          await open(saved[0])
+        }
+      } catch (e) {
+        problems.push((e as Error).message)
+      }
+      // open() は両方のバナーを消すため、最後にまとめて表示する。
+      setMessage(notes.join('。'))
+      setError(problems.join(' / '))
+    } finally {
+      setUploading(null)
     }
-    // open() は両方のバナーを消すため、最後にまとめて表示する。
-    setMessage(notes.join('。'))
-    setError(problems.join(' / '))
   }
 
   return (
