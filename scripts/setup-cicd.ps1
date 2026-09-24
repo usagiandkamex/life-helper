@@ -1,17 +1,16 @@
 #!/usr/bin/env pwsh
 <#
 .SYNOPSIS
-  CI/CD（GitHub Actions → Azure）の設定を行う。手元での初回構築（azd up）の後に 1 回だけ実行する。何度実行しても同じ結果になる。
+  CI/CD（GitHub Actions → Azure）の設定を行う。手元での初回構築（docs/setup.md のステップ2）の後に実行する。何度実行しても同じ結果になる。
 
 .DESCRIPTION
   1. Azure に GitHub Actions 用のアプリ登録（サービス プリンシパル）を作り、OIDC のフェデレーション資格情報を付ける
-     （サブジェクト: repo:<Repo>:environment:production。パスワードやキーは作らない）
+     （GitHub API からリポジトリの OIDC subject prefix を取得する。パスワードやキーは作らない）
   2. ロールを付与する: サブスクリプションに「共同作成者」、アプリのリソースグループに「ユーザー アクセス管理者」
-  3. GitHub の環境 production に、デプロイに必要な変数とシークレットを登録する（値は azd 環境から読む）
+  3. GitHub の環境 production を作り、デプロイに必要な変数とシークレットを登録する（値は azd 環境から読む）
   4. -EnableDeploy を付けた場合、リポジトリ変数 DEPLOY_ENABLED=true を設定して自動デプロイを有効にする
 
-  前提: az login 済み（アプリ登録を作れる権限）、gh auth login 済み（usagiandkamex）、azd env が選択済み、
-        ./scripts/setup-github-repo.ps1 を実行済み（環境 production がある）。
+  前提: az login 済み（アプリ登録を作れる権限）、gh auth login 済み（usagiandkamex）、azd env が選択済み。
 
 .EXAMPLE
   ./scripts/setup-cicd.ps1 -EnableDeploy
@@ -33,38 +32,54 @@ function Invoke-Checked {
 Write-Host '== 0/4 azd 環境の値を読み込み'
 $envValues = Invoke-Checked azd env get-values --output json | Out-String | ConvertFrom-Json
 foreach ($required in 'AZURE_ENV_NAME', 'AZURE_LOCATION', 'AZURE_SUBSCRIPTION_ID', 'AZURE_RESOURCE_GROUP') {
-  if (-not $envValues.$required) { throw "$required が azd 環境にありません。先に docs/setup.md のステップ 2（azd up）を実行してください。" }
+  if (-not $envValues.$required) { throw "$required が azd 環境にありません。先に docs/setup.md のステップ2を完了してください。" }
 }
 $subscriptionId = $envValues.AZURE_SUBSCRIPTION_ID
-$tenantId = (Invoke-Checked az account show --subscription $subscriptionId --query tenantId -o tsv).Trim()
+Invoke-Checked az account set --subscription $subscriptionId | Out-Null
+$tenantId = (Invoke-Checked az account show --subscription $subscriptionId --query tenantId --output tsv).Trim()
+Invoke-Checked az group show --name $envValues.AZURE_RESOURCE_GROUP --subscription $subscriptionId --query id --output tsv | Out-Null
+Invoke-Checked gh repo view $Repo --json nameWithOwner | Out-Null
 
 Write-Host "== 1/4 アプリ登録とフェデレーション資格情報（$AppDisplayName）"
-$appId = (Invoke-Checked az ad app list --display-name $AppDisplayName --query '[0].appId' -o tsv | Out-String).Trim()
+$appId = (Invoke-Checked az ad app list --display-name $AppDisplayName --query '[0].appId' --output tsv | Out-String).Trim()
 if (-not $appId) {
-  $appId = (Invoke-Checked az ad app create --display-name $AppDisplayName --query appId -o tsv).Trim()
+  $appId = (Invoke-Checked az ad app create --display-name $AppDisplayName --query appId --output tsv).Trim()
   Write-Host "   アプリ登録を作成しました: $appId"
 }
-$spId = (Invoke-Checked az ad sp list --filter "appId eq '$appId'" --query '[0].id' -o tsv | Out-String).Trim()
+$spId = (Invoke-Checked az ad sp list --filter "appId eq '$appId'" --query '[0].id' --output tsv | Out-String).Trim()
 if (-not $spId) {
-  $spId = (Invoke-Checked az ad sp create --id $appId --query id -o tsv).Trim()
+  $spId = (Invoke-Checked az ad sp create --id $appId --query id --output tsv).Trim()
 }
-$subject = "repo:${Repo}:environment:production"
+$subjectPrefix = (Invoke-Checked gh api "repos/$Repo/actions/oidc/customization/sub" --jq .sub_claim_prefix | Out-String).Trim()
+if (-not $subjectPrefix) {
+  throw "GitHub OIDC subject prefix を取得できませんでした: $Repo"
+}
+$subject = "${subjectPrefix}:environment:production"
 $existingCreds = Invoke-Checked az ad app federated-credential list --id $appId | Out-String | ConvertFrom-Json
-if (-not ($existingCreds | Where-Object { $_.subject -eq $subject })) {
+$matchingCred = $existingCreds | Where-Object { $_.subject -eq $subject } | Select-Object -First 1
+if (-not $matchingCred) {
+  $productionCred = $existingCreds | Where-Object { $_.name -eq 'github-production' } | Select-Object -First 1
   $cred = @{
-    name = 'github-production'
     issuer = 'https://token.actions.githubusercontent.com'
     subject = $subject
     audiences = @('api://AzureADTokenExchange')
-  } | ConvertTo-Json -Compress
+  }
+  if (-not $productionCred) {
+    $cred.name = 'github-production'
+  }
   $credFile = New-TemporaryFile
   try {
-    Set-Content -Path $credFile -Value $cred -Encoding utf8
-    Invoke-Checked az ad app federated-credential create --id $appId --parameters "@$credFile" | Out-Null
+    Set-Content -Path $credFile -Value ($cred | ConvertTo-Json -Compress) -Encoding utf8
+    if ($productionCred) {
+      Invoke-Checked az ad app federated-credential update --id $appId --federated-credential-id $productionCred.id --parameters "@$credFile" | Out-Null
+      Write-Host "   更新しました: $subject"
+    } else {
+      Invoke-Checked az ad app federated-credential create --id $appId --parameters "@$credFile" | Out-Null
+      Write-Host "   作成しました: $subject"
+    }
   } finally {
     Remove-Item $credFile -Force
   }
-  Write-Host "   フェデレーション資格情報を作成しました: $subject"
 }
 
 Write-Host '== 2/4 ロールの付与'
@@ -73,7 +88,7 @@ $assignments = @(
   @{ Role = 'User Access Administrator'; Scope = "/subscriptions/$subscriptionId/resourceGroups/$($envValues.AZURE_RESOURCE_GROUP)" }
 )
 foreach ($a in $assignments) {
-  $found = Invoke-Checked az role assignment list --assignee $spId --role $a.Role --scope $a.Scope --query '[0].id' -o tsv | Out-String
+  $found = Invoke-Checked az role assignment list --assignee $spId --role $a.Role --scope $a.Scope --query '[0].id' --output tsv | Out-String
   if (-not $found.Trim()) {
     Invoke-Checked az role assignment create --assignee-object-id $spId --assignee-principal-type ServicePrincipal --role $a.Role --scope $a.Scope | Out-Null
     Write-Host "   $($a.Role) を付与しました: $($a.Scope)"
@@ -81,6 +96,7 @@ foreach ($a in $assignments) {
 }
 
 Write-Host '== 3/4 GitHub の環境 production に変数とシークレットを登録'
+Invoke-Checked gh api -X PUT "repos/$Repo/environments/production" | Out-Null
 $variables = [ordered]@{
   AZURE_CLIENT_ID = $appId
   AZURE_TENANT_ID = $tenantId

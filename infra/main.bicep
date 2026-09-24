@@ -12,9 +12,6 @@ param location string
 @description('Container image for the app and the job (set by azd deploy). Empty on the first provision.')
 param appImageName string = ''
 
-@description('Set by azd: whether the container app already exists (then its current image is kept on re-provision).')
-param appExists string = 'false'
-
 @description('Numeric GitHub user id allowed to sign in (usagiandkamex = 134019422).')
 param allowedGithubUserId string = '134019422'
 
@@ -74,7 +71,6 @@ module resources 'resources.bicep' = {
     location: location
     tags: tags
     appImageName: appImageName
-    appExists: toLower(appExists) == 'true'
     allowedGithubUserId: allowedGithubUserId
     githubOauthClientId: githubOauthClientId
     githubOauthClientSecret: githubOauthClientSecret

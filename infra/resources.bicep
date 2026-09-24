@@ -2,7 +2,6 @@ param environmentName string
 param location string
 param tags object
 param appImageName string
-param appExists bool
 param allowedGithubUserId string
 param githubOauthClientId string
 @secure()
@@ -32,12 +31,7 @@ var appName = 'ca-lifehelper-${token}'
 var acrPullRoleId = '7f951dda-4ed3-4680-a7ca-43fe172d538d'
 var appPlaceholderImage = 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
 
-// Keep the currently deployed image on re-provision (CI starts with a fresh azd env without SERVICE_APP_IMAGE_NAME).
-resource existingApp 'Microsoft.App/containerApps@2024-03-01' existing = if (appExists) {
-  name: appName
-}
-var currentImage = appExists ? existingApp!.properties.template.containers[0].image : ''
-var resolvedImage = !empty(appImageName) ? appImageName : currentImage
+var resolvedImage = appImageName
 var hasImage = !empty(resolvedImage) && resolvedImage != appPlaceholderImage
 
 resource logs 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {

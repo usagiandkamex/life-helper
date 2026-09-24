@@ -62,6 +62,20 @@ jobs:
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       - name: Install the Azure CLI containerapp extension (needed by the postdeploy hook)
         run: az extension add --name containerapp --upgrade --yes
+      - name: Preserve the currently deployed image
+        run: |
+          APP_NAME=$(az containerapp list \
+            --resource-group "rg-${AZURE_ENV_NAME}" \
+            --query "[?tags.\"azd-service-name\"=='app'].name | [0]" \
+            --output tsv)
+          if [ -n "$APP_NAME" ]; then
+            CURRENT_IMAGE=$(az containerapp show \
+              --resource-group "rg-${AZURE_ENV_NAME}" \
+              --name "$APP_NAME" \
+              --query "properties.template.containers[0].image" \
+              --output tsv)
+            echo "SERVICE_APP_IMAGE_NAME=$CURRENT_IMAGE" >> "$GITHUB_ENV"
+          fi
       - name: Provision (keeps the currently deployed image)
         run: azd provision --no-prompt
       - name: Deploy the app image (the postdeploy hook points the job at the same image)

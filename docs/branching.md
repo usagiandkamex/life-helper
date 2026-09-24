@@ -6,8 +6,8 @@
 
 | ブランチ | 用途 | 寿命 |
 |---|---|---|
-| `main` | 本番。マージされると CI 合格後に Azure へ自動デプロイされる | 永続（保護） |
-| `feature/<内容>` | 機能追加（例: `feature/rakuten-travel-connector`） | PR をマージしたら自動削除 |
+| `main` | 本番。マージされると CI 合格後に Azure へ自動デプロイされる | 永続 |
+| `feature/<内容>` | 機能追加（例: `feature/rakuten-travel-connector`） | PR をマージしたら削除 |
 | `fix/<内容>` | 不具合修正 | 同上 |
 | `chore/<内容>` | 依存関係・設定・CI などの保守 | 同上 |
 | `docs/<内容>` | ドキュメントだけの変更 | 同上 |
@@ -15,16 +15,14 @@
 - ブランチ名は英小文字とハイフン。1 つのブランチでは 1 つの目的だけを扱い、短期間でマージします。
 - `main` から切り、`main` に戻します（`develop` などの長期ブランチは作りません）。
 
-## main の保護（ルールセット `protect-main`）
+## main の運用ルール
 
-`scripts/setup-github-repo.ps1` で設定します（定義: `.github/rulesets/protect-main.json`）。管理者も例外なく適用されます。
+`main` に GitHub のルールセットは設定しません。次のルールを運用で守ります。
 
-| ルール | 内容 |
-|---|---|
-| Pull Request 必須 | `main` への直接 push は不可。レビュー承認は 0 件（1 人開発のため）、未解決のコメントがあるとマージ不可 |
-| CI 必須 | `backend` / `frontend` / `infra` / `docker` / `secret-scan` のすべてが合格し、ブランチが最新の `main` を含むこと |
-| マージ方法 | squash マージのみ（1 PR = `main` 上の 1 コミット）。マージ後に作業ブランチを自動削除 |
-| 履歴の保護 | 強制 push・ブランチ削除の禁止、履歴は一直線 |
+- `main` へ直接 push または force push しない。
+- 変更は作業ブランチから Pull Request を作り、CI の全ジョブが合格してからマージする。
+- squash マージを使い、1 PR を `main` 上の 1 コミットにする。
+- マージ後の作業ブランチは削除する。
 
 ## 1 回の変更の流れ
 
@@ -41,7 +39,8 @@ git add -A
 git commit -m "feat: <変更の要約>"
 git push -u origin feature/<内容>
 gh pr create --fill --base main          # PR テンプレートのチェックリストを埋める
-gh pr merge --squash --auto              # CI が全部通ったら自動でマージ
+gh pr checks --watch                     # CI が全部通ることを確認
+gh pr merge --squash --delete-branch     # squash マージして作業ブランチを削除
 ```
 
 マージされると、`main` の CI → `Deploy` ワークフローの順に実行され、CI が合格したコミットだけが Azure にデプロイされます。
