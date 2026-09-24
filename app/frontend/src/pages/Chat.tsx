@@ -119,6 +119,8 @@ export function ChatPage() {
     async (id: string) => {
       sourceRef.current?.close()
       setTurnId(null)
+      // The composer belongs to the conversation it was typed in, so it must not follow us to another one.
+      if (id !== currentId) setInput('')
       setCurrentId(id)
       setDrawer(false)
       setItems([])
@@ -131,7 +133,7 @@ export function ChatPage() {
         setError((e as Error).message)
       }
     },
-    [attach],
+    [attach, currentId],
   )
 
   useEffect(() => {
@@ -213,6 +215,7 @@ export function ChatPage() {
       if (currentId === id) {
         setCurrentId(null)
         setItems([])
+        setInput('')
       }
       await loadConversations()
     } catch (e) {
@@ -224,6 +227,7 @@ export function ChatPage() {
     const res = await api<{ turn_id: string; conversation_id: string }>('/api/memories/organize', { method: 'POST' })
     await loadConversations()
     setCurrentId(res.conversation_id)
+    setInput('')
     setItems([{ kind: 'user', text: 'メモリの整理を依頼しました。' }])
     attach(res.turn_id)
   }
