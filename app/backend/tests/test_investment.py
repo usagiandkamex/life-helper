@@ -346,8 +346,9 @@ def test_investment_tools_registered(ctx):
     assert specs["refresh_fund_navs"].writes
     assert specs["refresh_fund_navs"].connector == ("mufg_api", "rakuten_csv", "daiwa_csv")
     assert specs["refresh_stock_prices"].connector == "stooq"
-    # An automation that picked a single fund manager still gets the fund tools, but not the stock ones.
-    assert specs["refresh_fund_navs"].allowed(["daiwa_csv"])
+    # An automation gets the fund tools only when it selected every manager they can reach.
+    assert specs["refresh_fund_navs"].allowed(["mufg_api", "rakuten_csv", "daiwa_csv"])
+    assert not specs["refresh_fund_navs"].allowed(["daiwa_csv"])
     assert not specs["refresh_stock_prices"].allowed(["daiwa_csv"])
 
 

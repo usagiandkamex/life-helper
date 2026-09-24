@@ -15,14 +15,14 @@ if TYPE_CHECKING:
 class ToolSpec:
     tool: Tool
     writes: bool = False
-    # External services this tool can call; automations only receive the connectors they selected.
+    # External services this tool can call; automations only receive it when they selected every one of them.
     connector: str | tuple[str, ...] | None = None
 
     def allowed(self, connectors: list[str]) -> bool:
         if self.connector is None:
             return True
         names = (self.connector,) if isinstance(self.connector, str) else self.connector
-        return any(name in connectors for name in names)
+        return bool(names) and all(name in connectors for name in names)
 
 
 def build_tools(

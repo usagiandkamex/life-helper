@@ -129,13 +129,21 @@ def _is_header(row: list[str]) -> bool:
     return any(n in keys for n in CSV_DATE_HEADERS) and any(n in keys for n in CSV_NAV_HEADERS)
 
 
+def _csv_rows(text: str) -> list[list[str]]:
+    """The non-empty rows of ``text``. A CSV Python cannot read is this fund's error, not the whole refresh's."""
+    try:
+        return [row for row in csv.reader(io.StringIO(text)) if any(c.strip() for c in row)]
+    except csv.Error:
+        raise ConnectorError("公式 CSV を読み取れませんでした（形式が想定と異なります）") from None
+
+
 def latest_csv_nav(text: str) -> tuple[date, str]:
     """The newest (基準日, 基準価額) of a NAV history CSV.
 
     The newest row is picked by date instead of by position: managers order the history differently, and a
     reversed file would otherwise value a holding with the oldest NAV in the history.
     """
-    rows = [row for row in csv.reader(io.StringIO(text)) if any(c.strip() for c in row)]
+    rows = _csv_rows(text)
     # The header is not always the first line: managers put a title or a note above it.
     header_at = next((i for i, row in enumerate(rows) if _is_header(row)), None)
     if header_at is None:
@@ -201,7 +209,7 @@ class FundCsvConnector(FundNavConnector):
 
     async def fund_nav(self, fund_code: str, *, today: date | None = None) -> dict:
         code = self.fund_code(fund_code)
-        response = await self.get(self.csv_url(code), params=self.csv_params(code))
+        response = await self.get(self.csv_url(code), params=self.csv_params(code), max_bytes=MAX_CSV_BYTES)
         day, nav = latest_csv_nav(self._text(response))
         return {
             "fund_code": code,
@@ -233,8 +241,6 @@ class FundCsvConnector(FundNavConnector):
         if response.status_code != 200:
             raise ConnectorError(f"{self.manager} から基準価額を取得できませんでした（HTTP {response.status_code}）")
         body = response.content
-        if len(body) > MAX_CSV_BYTES:
-            raise ConnectorError(f"{self.manager} の公式 CSV が想定より大きいため取り込みませんでした")
         for encoding in CSV_ENCODINGS:
             try:
                 text = body.decode(encoding)

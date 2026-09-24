@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import logging
 from datetime import date
 
@@ -9,6 +10,7 @@ import respx
 
 from life_helper.connectors.base import ConnectorError
 from life_helper.connectors.fund_nav import (
+    MAX_CSV_BYTES,
     MIN_SCORE,
     DaiwaFundCsvConnector,
     MufgFundApiConnector,
@@ -25,6 +27,7 @@ from .conftest import (
     FANG_PLUS,
     RAKUTEN_HEADER,
     SP500,
+    daiwa_csv,
     mock_daiwa,
     mock_mufg,
     mock_rakuten,
@@ -499,10 +502,31 @@ async def test_fund_csv_failures_are_distinguished(daiwa):
         (httpx.Response(200, text=f"{DAIWA_HEADER}\n20260924,1e100,0,1,0,0,0\n"), "基準価額が不正"),
         # A date past today is a corrupt file, not tomorrow's NAV published early.
         (httpx.Response(200, text=f"{DAIWA_HEADER}\n20261005,28251,0,1,0,0,0\n"), "未来の日付"),
+        # A file Python's csv module refuses is this fund's error, never an exception that aborts the refresh.
+        (httpx.Response(200, text=f'{DAIWA_HEADER}\n20260924,"{"x" * 131_100}",0,1,0,0,0\n'), "読み取れませんでした"),
+        (httpx.Response(200, content=b"x" * (MAX_CSV_BYTES + 1)), "想定より大きい"),
     ):
         route.mock(return_value=response)
         with pytest.raises(ConnectorError, match=message):
             await daiwa.fund_nav("3346", today=date(2026, 9, 25))
+
+
+@respx.mock
+async def test_fund_csv_reads_a_compressed_answer(daiwa):
+    # The size cap reads the body itself, so a gzip answer must still arrive decompressed and keep its headers.
+    body = gzip.compress(daiwa_csv(28_251).encode("cp932"))
+    respx.get(url__startswith="https://www.daiwa-am.co.jp").mock(
+        return_value=httpx.Response(
+            200,
+            content=body,
+            headers={
+                "content-encoding": "gzip",
+                b"content-disposition": f'attachment; filename="{FANG_PLUS}.csv"'.encode("cp932"),
+            },
+        )
+    )
+    result = await daiwa.fund_nav("3346", today=date(2026, 9, 25))
+    assert (result["nav"], result["name"]) == (28_251.0, FANG_PLUS)
 
 
 @respx.mock
