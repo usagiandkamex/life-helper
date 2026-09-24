@@ -24,7 +24,7 @@ from life_helper.market.portfolio import (
 )
 from life_helper.market.service import portfolio_store, refresh_stock_prices, stock_price
 
-from .conftest import mock_stooq, sign_in
+from .conftest import mock_stooq, sign_in, stooq_csv
 
 BROKER_DIR = Path(__file__).resolve().parents[1] / "src" / "life_helper" / "resources" / "broker_csv"
 
@@ -186,7 +186,7 @@ def test_portfolio_api_import_refresh_and_holdings(client, ctx, settings):
     ctx.extras.pop("connectors", None)
     with respx.mock:
         respx.get("https://stooq.com/q/d/l/").mock(
-            return_value=httpx.Response(200, text="Date,Open,High,Low,Close,Volume\n2099-01-01,1,1,1,3000,1\n")
+            return_value=httpx.Response(200, text=stooq_csv(3_000, date.today().isoformat()))
         )
         refreshed = client.post("/api/portfolio/refresh-prices", headers=h).json()
     assert refreshed["refresh"]["updated"][0]["code"] == "1306"
@@ -226,13 +226,14 @@ def test_refresh_prices_values_japanese_and_us_stocks(client, ctx, settings):
     with portfolio_store(ctx).transaction() as portfolio:
         portfolio.holdings = [
             Holding(account="tokutei", kind="stock", code="7203", name="トヨタ", quantity=100, cost_total=250_000),
+            Holding(account="tokutei", kind="etf", code="1306", name="TOPIX ETF", quantity=10, cost_total=20_000),
             Holding(account="tokutei", kind="stock", code="MSFT", name="Microsoft", quantity=10, cost_total=400_000),
             Holding(account="nisa_growth", kind="stock", code="AAPL", name="Apple", quantity=5, cost_total=100_000),
             Holding(account="ippan", kind="stock", code="NOPE", name="謎の銘柄", quantity=1, cost_total=1_000),
         ]
     _stooq_ready(ctx, settings)
     with respx.mock:
-        route = mock_stooq({"7203.jp": 3_000, "msft.us": 100, "aapl.us": 200, "usdjpy": 150})
+        route = mock_stooq({"7203.jp": 3_000, "1306.jp": 2_500, "msft.us": 100, "aapl.us": 200, "usdjpy": 150})
         view = client.post("/api/portfolio/refresh-prices", headers={"x-csrf-token": csrf}).json()
 
     updated = {u["code"]: u for u in view["refresh"]["updated"]}
@@ -242,6 +243,8 @@ def test_refresh_prices_values_japanese_and_us_stocks(client, ctx, settings):
         "JPY",
     )
     assert updated["7203"]["close"] == 3_000 and updated["7203"]["close_jpy"] == 3_000
+    # ETFs and REITs keep going through the Japanese market.
+    assert (updated["1306"]["market"], updated["1306"]["symbol"]) == ("jp", "1306.jp")
     assert (updated["MSFT"]["market"], updated["MSFT"]["symbol"], updated["MSFT"]["currency"]) == (
         "us",
         "msft.us",
@@ -250,7 +253,7 @@ def test_refresh_prices_values_japanese_and_us_stocks(client, ctx, settings):
     # 100 USD x 150 JPY/USD = 15,000 JPY
     assert updated["MSFT"]["close"] == 100 and updated["MSFT"]["close_jpy"] == 15_000
     assert (updated["MSFT"]["fx_rate"], updated["MSFT"]["fx_date"]) == (150, "2026-09-24")
-    assert view["total_value"] == 100 * 3_000 + 10 * 15_000 + 5 * 30_000
+    assert view["total_value"] == 100 * 3_000 + 10 * 2_500 + 10 * 15_000 + 5 * 30_000
     # One code failing does not stop the others, and the reason names the symbols that were tried.
     assert view["missing_prices"] == ["謎の銘柄"]
     assert view["refresh"]["errors"] == [
@@ -291,6 +294,30 @@ async def test_price_cache_without_market_is_refetched(ctx, settings):
         quote = await stock_price(ctx, "7203", today=today)
         assert (quote["market"], quote["close"], quote["close_jpy"], quote["cached"]) == ("jp", 3_000, 3_000, False)
         assert (await stock_price(ctx, "7203", today=today))["cached"] is True
+
+
+async def test_incomplete_price_cache_is_refetched(ctx, settings):
+    """A cached entry missing the exchange-rate fields is fetched again instead of failing the refresh."""
+    today = date.today()
+    portfolio_store(ctx).cache_price(
+        "MSFT",
+        today,
+        {
+            "code": "MSFT",
+            "symbol": "msft.us",
+            "market": "us",
+            "currency": "USD",
+            "close": 100,
+            "close_jpy": 15_000,
+            "date": "2026-09-20",
+            "source": "stooq",
+        },
+    )
+    _stooq_ready(ctx, settings)
+    with respx.mock:
+        mock_stooq({"msft.us": 120, "usdjpy": 150})
+        quote = await stock_price(ctx, "MSFT", today=today)
+    assert (quote["close"], quote["close_jpy"], quote["fx_rate"], quote["cached"]) == (120, 18_000, 150, False)
 
 
 def test_investment_tools_registered(ctx):

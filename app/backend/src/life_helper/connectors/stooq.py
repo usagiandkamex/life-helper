@@ -63,11 +63,15 @@ def _number(raw: str | None, label: str) -> float:
     return value
 
 
-def _day(raw: str | None, label: str) -> str:
+def _day(raw: str | None, label: str, latest: date) -> str:
     try:
-        return date.fromisoformat((raw or "").strip()).isoformat()
+        day = date.fromisoformat((raw or "").strip())
     except ValueError:
         raise ConnectorError(f"Stooq から取得した{label}の日付が不正です") from None
+    # A date past the requested range means a broken answer; one day of slack covers the exchange time zones.
+    if day > latest + timedelta(days=1):
+        raise ConnectorError(f"Stooq から取得した{label}の日付が不正です")
+    return day.isoformat()
 
 
 def _body_error(symbol: str, body: str) -> ConnectorError:
@@ -77,7 +81,7 @@ def _body_error(symbol: str, body: str) -> ConnectorError:
         return ConnectorError("Stooq の API キーの利用上限に達したため株価を取得できませんでした")
     if "apikey" in text or "api key" in text or "captcha" in text:
         return ConnectorError("Stooq の API キーが無効なため株価を取得できませんでした")
-    if not text or "no data" in text:
+    if "no data" in text:
         return SymbolNotFoundError(f"{symbol} の価格データが見つかりませんでした")
     return ConnectorError("Stooq から想定外の応答が返りました（API キーまたは証券コードを確認してください）")
 
@@ -107,7 +111,7 @@ class StooqConnector(Connector):
                 "symbol": symbol,
                 "market": market,
                 "currency": "JPY" if market == "jp" else "USD",
-                "date": _day(row.get("Date"), "株価"),
+                "date": _day(row.get("Date"), "株価", today),
                 "close": _number(row.get("Close"), "株価"),
                 "source": "stooq",
             }
@@ -123,7 +127,7 @@ class StooqConnector(Connector):
         return {
             "pair": "USDJPY",
             "symbol": USD_JPY_SYMBOL,
-            "date": _day(row.get("Date"), "為替レート"),
+            "date": _day(row.get("Date"), "為替レート", today),
             "rate": _number(row.get("Close"), "為替レート"),
             "source": "stooq",
         }
@@ -143,7 +147,11 @@ class StooqConnector(Connector):
         if not body.lower().startswith("date,"):
             # Stooq returns an HTML page instead of CSV when the key is missing or invalid.
             raise _body_error(symbol, body)
-        rows = [r for r in csv.DictReader(io.StringIO(body)) if r.get("Close") not in (None, "", "N/D")]
+        reader = csv.DictReader(io.StringIO(body))
+        if not {"Date", "Close"} <= set(reader.fieldnames or ()):
+            raise ConnectorError("Stooq から想定外の応答が返りました（CSV の項目が足りません）")
+        rows = [r for r in reader if r.get("Close") not in (None, "", "N/D")]
         if not rows:
+            # Stooq answers with the header alone when it has no price for the symbol.
             raise SymbolNotFoundError(f"{symbol} の価格データが見つかりませんでした")
         return rows[-1]

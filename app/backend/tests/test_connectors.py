@@ -126,8 +126,11 @@ async def test_stooq_failures_are_distinguished(stooq):
         ("Exceeded the daily hits limit", "利用上限"),
         ("<html>get your apikey</html>", "API キーが無効"),
         ("<html>maintenance</html>", "想定外の応答"),
+        ("", "想定外の応答"),
+        ("Date,Open,High,Low\n2026-09-24,1,1,1\n", "想定外の応答"),
         (stooq_csv(0), "株価が不正"),
         ("Date,Open,High,Low,Close,Volume\n2026-99-99,1,1,1,10,1\n", "日付が不正"),
+        (stooq_csv(10, "2026-10-05"), "日付が不正"),
     ):
         route.mock(return_value=httpx.Response(200, text=body))
         with pytest.raises(ConnectorError, match=message):

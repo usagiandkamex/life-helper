@@ -18,7 +18,9 @@ logger = logging.getLogger(__name__)
 PRICED_BY_STOOQ = ("stock", "etf", "reit")
 # Six characters, so it can never clash with a security code in the per-day price cache.
 FX_CACHE_CODE = "USDJPY"
-QUOTE_KEYS = frozenset({"code", "symbol", "market", "currency", "close", "close_jpy", "date", "source"})
+QUOTE_KEYS = frozenset(
+    {"code", "symbol", "market", "currency", "close", "close_jpy", "date", "source", "fx_rate", "fx_date", "fx_source"}
+)
 FX_KEYS = frozenset({"pair", "symbol", "date", "rate", "source"})
 
 
