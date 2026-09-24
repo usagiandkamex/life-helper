@@ -13,11 +13,10 @@ from life_helper.market.portfolio import (
     GainItem,
     Holding,
     InvestmentSimParams,
-    NisaUsage,
     Portfolio,
+    PortfolioStore,
     Price,
     estimate_capital_gains_tax,
-    nisa_allowance,
     simulate_investment,
     summarize,
 )
@@ -25,12 +24,6 @@ from life_helper.market.portfolio import (
 from .conftest import sign_in
 
 BROKER_DIR = Path(__file__).resolve().parents[1] / "src" / "life_helper" / "resources" / "broker_csv"
-LIMITS = {
-    "tsumitate_annual": 1_200_000,
-    "growth_annual": 2_400_000,
-    "lifetime_total": 18_000_000,
-    "lifetime_growth": 12_000_000,
-}
 
 
 def test_market_value_and_summary():
@@ -55,19 +48,22 @@ def test_apply_price_only_when_newer():
     assert h.market_value() == 600
 
 
-def test_nisa_allowance():
-    p = Portfolio(
-        holdings=[
-            Holding(account="nisa_growth", kind="stock", name="a", quantity=1, cost_total=11_500_000),
-            Holding(account="nisa_tsumitate", kind="fund", name="b", quantity=1, cost_total=3_000_000),
-        ],
-        nisa_annual_used={"2026": NisaUsage(tsumitate=600_000, growth=100_000)},
+def test_legacy_nisa_usage_in_saved_yaml_is_dropped(tmp_path):
+    store = PortfolioStore(tmp_path)
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text(
+        "holdings: []\nnisa_annual_used:\n  '2026': {tsumitate: 600000, growth: 100000}\n", encoding="utf-8"
     )
-    r = nisa_allowance(p, 2026, LIMITS)
-    assert r["annual_remaining"]["tsumitate"] == 600_000
-    # Growth is capped by the remaining lifetime growth allowance (12,000,000 - 11,500,000).
-    assert r["annual_remaining"]["growth"] == 500_000
-    assert r["lifetime"]["remaining"] == 3_500_000
+    store.save(store.load())
+    assert "nisa_annual_used" not in store.path.read_text(encoding="utf-8")
+
+
+def test_summary_has_no_nisa_allowance():
+    p = Portfolio(holdings=[Holding(account="nisa_growth", kind="stock", name="a", quantity=1, cost_total=100_000)])
+    s = summarize(p)
+    assert "nisa" not in s
+    # NISA accounts are still aggregated like any other account.
+    assert s["accounts"]["nisa_growth"]["cost"] == 100_000
 
 
 def test_simulate_investment_zero_return_and_percentiles():
@@ -151,11 +147,12 @@ def test_parse_rejects_unexpected_header_and_unknown_broker():
         load_mapping(BROKER_DIR, "../etc")
 
 
-def test_portfolio_api_import_refresh_and_nisa(client, ctx, settings):
+def test_portfolio_api_import_refresh_and_holdings(client, ctx, settings):
     csrf = sign_in(client, ctx)
     h = {"x-csrf-token": csrf}
     view = client.get("/api/portfolio").json()
     assert view["holdings"] == [] and {b["name"] for b in view["brokers"]} == {"sbi", "rakuten"}
+    assert "nisa" not in view
 
     imported = client.post(
         "/api/portfolio/import",
@@ -180,10 +177,11 @@ def test_portfolio_api_import_refresh_and_nisa(client, ctx, settings):
     assert refreshed["total_value"] == 30_000 + 180_000
     assert "stooqkey" not in str(refreshed)
 
-    nisa = client.put(
+    # The NISA allowance endpoint is gone: only the SPA catch-all (GET) is left on that path.
+    removed = client.put(
         "/api/portfolio/nisa-usage", json={"year": 2026, "tsumitate": 0, "growth": 1_000_000}, headers=h
-    ).json()
-    assert nisa["nisa"]["annual"]["growth"]["used"] in (0, 1_000_000)
+    )
+    assert removed.status_code == 405
 
     added = client.post(
         "/api/portfolio/holdings",
@@ -209,7 +207,6 @@ def test_investment_tools_registered(ctx):
         "get_portfolio",
         "get_stock_price",
         "refresh_stock_prices",
-        "check_nisa_allowance",
         "simulate_investment",
         "estimate_capital_gains_tax",
         "update_holding",

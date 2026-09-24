@@ -7,8 +7,7 @@ from typing import TYPE_CHECKING
 
 from ..connectors.base import ConnectorError
 from ..connectors.registry import get_connectors
-from ..tools.tax_params import load_tax_params
-from .portfolio import Portfolio, PortfolioStore, Price, nisa_allowance
+from .portfolio import PortfolioStore, Price
 
 if TYPE_CHECKING:
     from ..context import AppContext
@@ -60,8 +59,3 @@ async def refresh_stock_prices(ctx: AppContext) -> dict:
         "note": "投資信託は Stooq の対象外です。"
         "基準価額はチャットで運用会社のサイトから取得するか、手入力してください。",
     }
-
-
-def nisa_status(ctx: AppContext, portfolio: Portfolio, year: int) -> dict:
-    params = load_tax_params(ctx.settings.tax_params_dir, year)
-    return nisa_allowance(portfolio, year, params["nisa"]) | {"warnings": params.warnings}

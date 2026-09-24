@@ -101,18 +101,6 @@ export function PortfolioPage() {
       run(() => api<PortfolioView>('/api/portfolio/holdings', { method: 'POST', body: json({ action: 'delete', id }) }))
   }
 
-  const saveNisa = (form: HTMLFormElement) => {
-    const data = new FormData(form)
-    run(
-      () =>
-        api<PortfolioView>('/api/portfolio/nisa-usage', {
-          method: 'PUT',
-          body: json({ year: view?.nisa.year, tsumitate: Number(data.get('tsumitate')), growth: Number(data.get('growth')) }),
-        }),
-      () => 'NISA の買付額を保存しました',
-    )
-  }
-
   const simulate = async (form: HTMLFormElement) => {
     const data = new FormData(form)
     const res = await api<{ principal: number; expected_value: number; percentiles: Record<string, number>; after_tax: Record<string, number>; yearly: Record<string, number>[] }>(
@@ -243,51 +231,6 @@ export function PortfolioPage() {
             手入力で追加
           </button>
         </form>
-      </section>
-
-      <section className="panel">
-        <h2>NISA（{view.nisa.year} 年）</h2>
-        <div className="cards">
-          <div className="card">
-            <h3>つみたて投資枠の残り</h3>
-            <p className="big">{yen(view.nisa.annual_remaining.tsumitate)}</p>
-            <small>年間 {yen(view.nisa.annual.tsumitate.limit)}</small>
-          </div>
-          <div className="card">
-            <h3>成長投資枠の残り</h3>
-            <p className="big">{yen(view.nisa.annual_remaining.growth)}</p>
-            <small>年間 {yen(view.nisa.annual.growth.limit)}</small>
-          </div>
-          <div className="card">
-            <h3>生涯投資枠の残り</h3>
-            <p className="big">{yen(view.nisa.lifetime.remaining)}</p>
-            <small>簿価 {yen(view.nisa.lifetime.used_book_value)} / {yen(view.nisa.lifetime.limit)}</small>
-          </div>
-        </div>
-        <form
-          className="row wrap"
-          onSubmit={(e) => {
-            e.preventDefault()
-            saveNisa(e.currentTarget)
-          }}
-        >
-          <label>
-            今年のつみたて投資枠の買付額
-            <input name="tsumitate" type="number" min="0" defaultValue={view.nisa.annual.tsumitate.used} />
-          </label>
-          <label>
-            今年の成長投資枠の買付額
-            <input name="growth" type="number" min="0" defaultValue={view.nisa.annual.growth.used} />
-          </label>
-          <button className="button" disabled={busy}>
-            保存
-          </button>
-        </form>
-        {[...view.nisa.notes, ...view.nisa.warnings].map((n) => (
-          <p key={n} className="hint">
-            {n}
-          </p>
-        ))}
       </section>
 
       <section className="panel">

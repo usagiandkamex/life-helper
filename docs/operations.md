@@ -17,7 +17,7 @@
 ## 年度ごとの税パラメータ
 
 `app/backend/src/life_helper/resources/tax_params/<年>.yaml` を毎年更新します（ブランチ → PR で変更）。
-出典（国税庁・総務省・金融庁）で値を確認して `status: verified` にします。`provisional` の間、および未登録の年度で計算すると、結果に警告が表示されます。
+出典（国税庁・総務省）で値を確認して `status: verified` にします。`provisional` の間、および未登録の年度で計算すると、結果に警告が表示されます。
 
 ## 証券会社 CSV の列
 
