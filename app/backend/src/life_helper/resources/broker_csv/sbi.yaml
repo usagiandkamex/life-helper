@@ -1,0 +1,24 @@
+# SBI 証券の「ポートフォリオ（保有証券一覧）」CSV の列対応。
+# 実際の CSV の見出しと違う場合は、この候補リストに見出しを追加してください（コード変更は不要）。
+name: sbi
+label: SBI証券
+encodings: [cp932, utf-8-sig]
+columns:
+  code_name: ["銘柄（コード）", "銘柄(コード)"]
+  code: ["銘柄コード", "コード"]
+  name: ["銘柄名称", "銘柄名", "ファンド名"]
+  account: ["預り区分", "口座区分", "口座"]
+  quantity: ["数量", "保有数量", "保有口数", "口数"]
+  avg_cost: ["取得単価", "平均取得単価", "平均取得価額"]
+  cost_total: ["取得金額", "取得金額合計"]
+  price: ["現在値", "基準価額"]
+  valuation: ["評価額", "時価評価額", "評価額(円)"]
+required: [quantity, valuation]
+# 口座区分の判定に使う語（列の値、またはセクション見出しの行に含まれる語）
+accounts:
+  nisa_tsumitate: ["つみたて投資枠", "つみたてNISA", "NISA預り(つみたて"]
+  nisa_growth: ["成長投資枠", "NISA預り(成長", "NISA預り"]
+  ideco: ["iDeCo", "確定拠出"]
+  tokutei: ["特定"]
+  ippan: ["一般"]
+fund_markers: ["投資信託", "ファンド"]
