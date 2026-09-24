@@ -81,10 +81,14 @@ def apply_holding_update(ctx: AppContext, p: UpdateHoldingParams) -> dict:
         if p.action == "delete":
             portfolio.holdings.remove(target)
         else:
+            name = target.name
             for field in ("account", "kind", "code", "name", "quantity", "cost_total"):
                 value = getattr(p, field)
                 if value is not None:
                     setattr(target, field, value)
+            # A renamed or re-typed holding may be another fund, so its confirmed NAV source has to be picked again.
+            if target.kind != "fund" or (p.name is not None and p.name != name):
+                target.fund = None
             if p.price:
                 target.apply_price(Price(value=p.price, date=price_date, source=p.price_source))
         return {"ok": True, "id": target.id}

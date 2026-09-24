@@ -28,6 +28,7 @@ from life_helper.market.portfolio import (
     yen,
 )
 from life_helper.market.service import portfolio_store, refresh_stock_prices, stock_price
+from life_helper.tools.portfolio_tools import UpdateHoldingParams, apply_holding_update
 
 from .conftest import mock_mufg, mock_stooq, sign_in, stooq_csv
 
@@ -573,3 +574,16 @@ def test_csv_reimport_keeps_the_confirmed_fund_link(client, ctx):
     # A fund the user never confirmed is not linked just because its name looks similar.
     renamed = [h for h in upload(RAKUTEN_CSV.replace("楽天・全米株式", "楽天・全米株式インデックス"))["holdings"]]
     assert [h["fund"] for h in renamed if h["kind"] == "fund"] == [None]
+
+
+def test_renaming_a_holding_clears_the_confirmed_fund_link(ctx):
+    holding = _fund(500_000)
+    with portfolio_store(ctx).transaction() as portfolio:
+        portfolio.holdings = [holding]
+    kept = UpdateHoldingParams(action="update", id=holding.id, quantity=600_000)
+    assert apply_holding_update(ctx, kept) == {"ok": True, "id": holding.id}
+    assert portfolio_store(ctx).load().holdings[0].fund.fund_code == "0331418A"
+    # The row may now be a different fund, so the link has to be confirmed again instead of being reused.
+    renamed = UpdateHoldingParams(action="update", id=holding.id, name="ひふみプラス")
+    apply_holding_update(ctx, renamed)
+    assert portfolio_store(ctx).load().holdings[0].fund is None
