@@ -84,6 +84,13 @@ export function ChatPage() {
   const bottomRef = useRef<HTMLDivElement | null>(null)
   const messagesRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLTextAreaElement | null>(null)
+  // Async handlers must see the conversation that is active now, not the one captured when they started.
+  const currentIdRef = useRef<string | null>(null)
+
+  const selectConversation = useCallback((id: string | null) => {
+    currentIdRef.current = id
+    setCurrentId(id)
+  }, [])
 
   const loadConversations = useCallback(async () => {
     setConversations(await api<Conversation[]>('/api/conversations'))
@@ -120,8 +127,8 @@ export function ChatPage() {
       sourceRef.current?.close()
       setTurnId(null)
       // The composer belongs to the conversation it was typed in, so it must not follow us to another one.
-      if (id !== currentId) setInput('')
-      setCurrentId(id)
+      if (id !== currentIdRef.current) setInput('')
+      selectConversation(id)
       setDrawer(false)
       setItems([])
       setError('')
@@ -133,7 +140,7 @@ export function ChatPage() {
         setError((e as Error).message)
       }
     },
-    [attach, currentId],
+    [attach, selectConversation],
   )
 
   useEffect(() => {
@@ -187,7 +194,7 @@ export function ChatPage() {
     if (!id) {
       const conv = await api<Conversation>('/api/conversations', { method: 'POST', body: json({ model }) })
       id = conv.id
-      setCurrentId(id)
+      selectConversation(id)
     }
     try {
       const res = await api<{ turn_id: string }>(`/api/conversations/${id}/turns`, {
@@ -212,8 +219,8 @@ export function ChatPage() {
     if (!window.confirm('この会話を削除しますか？（Copilot 側の履歴も削除されます）')) return
     try {
       await api(`/api/conversations/${id}`, { method: 'DELETE' })
-      if (currentId === id) {
-        setCurrentId(null)
+      if (currentIdRef.current === id) {
+        selectConversation(null)
         setItems([])
         setInput('')
       }
@@ -226,7 +233,7 @@ export function ChatPage() {
   const organize = async () => {
     const res = await api<{ turn_id: string; conversation_id: string }>('/api/memories/organize', { method: 'POST' })
     await loadConversations()
-    setCurrentId(res.conversation_id)
+    selectConversation(res.conversation_id)
     setInput('')
     setItems([{ kind: 'user', text: 'メモリの整理を依頼しました。' }])
     attach(res.turn_id)
