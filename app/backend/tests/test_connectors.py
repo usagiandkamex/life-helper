@@ -8,12 +8,31 @@ import pytest
 import respx
 
 from life_helper.connectors.base import ConnectorError
-from life_helper.connectors.fund_nav import MIN_SCORE, MufgFundApiConnector, match_score
+from life_helper.connectors.fund_nav import (
+    MIN_SCORE,
+    DaiwaFundCsvConnector,
+    MufgFundApiConnector,
+    RakutenFundCsvConnector,
+    match_score,
+)
 from life_helper.connectors.rakuten_travel import RakutenTravelConnector, parse_vacancies
 from life_helper.connectors.stooq import StooqConnector, symbol_candidates, to_stooq_symbol
 from life_helper.security import SecretMasker
 
-from .conftest import ALL_COUNTRY, SP500, mock_mufg, mock_stooq, mufg_payload, sign_in, stooq_csv
+from .conftest import (
+    ALL_COUNTRY,
+    DAIWA_HEADER,
+    FANG_PLUS,
+    RAKUTEN_HEADER,
+    SP500,
+    mock_daiwa,
+    mock_mufg,
+    mock_rakuten,
+    mock_stooq,
+    mufg_payload,
+    sign_in,
+    stooq_csv,
+)
 
 STOOQ_KEY = "stooqkey-ABCDEF123456"
 APP_ID = "e5e2671a-b454-4e6f-aaaa-bbbbccccdddd"
@@ -33,6 +52,16 @@ def stooq(tmp_path, masker):
 @pytest.fixture
 def mufg(tmp_path, masker):
     return MufgFundApiConnector({}, masker, tmp_path / "state.json")
+
+
+@pytest.fixture
+def daiwa(tmp_path, masker):
+    return DaiwaFundCsvConnector({}, masker, tmp_path / "state.json")
+
+
+@pytest.fixture
+def rakuten_fund(tmp_path, masker):
+    return RakutenFundCsvConnector({}, masker, tmp_path / "state.json")
 
 
 @pytest.fixture
@@ -372,6 +401,127 @@ async def test_mufg_network_error_is_reported_as_connector_error(mufg):
 async def test_fund_connector_refuses_other_hosts(mufg):
     with pytest.raises(ConnectorError):
         await mufg.get("https://evil.example/fund_information_latest/fund_cd/253425", params={})
+
+
+@respx.mock
+async def test_daiwa_fund_nav(daiwa):
+    route = mock_daiwa({"3346": (28_251, "20260924")})
+    result = await daiwa.fund_nav("3346", today=date(2026, 9, 25))
+    assert result == {
+        "fund_code": "3346",
+        # 大和 names the download after the fund, which is the only official name the CSV carries.
+        "name": FANG_PLUS,
+        "nav": 28_251.0,
+        "price_unit": 10_000,
+        "date": "2026-09-24",
+        "source": "daiwa_csv",
+        "source_url": "https://www.daiwa-am.co.jp/funds/detail/3346/detail_top.html",
+        "manager": "大和アセットマネジメント",
+        "isin": None,
+        "association_code": None,
+    }
+    request = route.calls.last.request
+    assert request.url.path == "/funds/detail/csv_out.php"
+    assert dict(request.url.params) == {"code": "3346", "type": "1"}
+
+
+@respx.mock
+async def test_rakuten_fund_nav(rakuten_fund):
+    route = mock_rakuten({"100124": (13_999, "2026/09/24")})
+    result = await rakuten_fund.fund_nav("100124", today=date(2026, 9, 25))
+    assert result == {
+        "fund_code": "100124",
+        # The CSV carries no fund name, so nothing is claimed as the official name.
+        "name": "",
+        "nav": 13_999.0,
+        "price_unit": 10_000,
+        "date": "2026-09-24",
+        "source": "rakuten_csv",
+        "source_url": "https://www.rakuten-toushin.co.jp/assets/csv/chart_100124.csv",
+        "manager": "楽天投信投資顧問",
+        "isin": None,
+        "association_code": None,
+    }
+    assert route.calls.last.request.url.path == "/assets/csv/chart_100124.csv"
+
+
+def test_fund_csv_code_shapes_keep_stray_codes_out_of_the_url(daiwa, rakuten_fund):
+    assert daiwa.fund_code("３３４６") == "3346"
+    assert rakuten_fund.fund_code(" 100124 ") == "100124"
+    for connector, bad in (
+        (daiwa, "../../etc/passwd"),
+        (daiwa, "3346&type=2"),
+        (daiwa, "33460"),
+        (daiwa, "334a"),
+        (daiwa, ""),
+        (rakuten_fund, "100124.csv"),
+        (rakuten_fund, "3346"),
+        (rakuten_fund, "chart_100124"),
+    ):
+        with pytest.raises(ConnectorError, match="ファンドコード"):
+            connector.fund_code(bad)
+
+
+@respx.mock
+async def test_fund_csv_uses_the_newest_row_whatever_the_order(rakuten_fund):
+    rows = [RAKUTEN_HEADER, "2026/09/24,13999,13999,412.14,", "2026/09/18,13000,13000,410.00,"]
+    respx.get(url__startswith="https://www.rakuten-toushin.co.jp").mock(
+        return_value=httpx.Response(200, content="\n".join(rows).encode("cp932"))
+    )
+    result = await rakuten_fund.fund_nav("100124", today=date(2026, 9, 25))
+    assert (result["date"], result["nav"]) == ("2026-09-24", 13_999.0)
+
+
+@respx.mock
+async def test_fund_csv_reads_columns_by_name(daiwa):
+    # A manager adding or reordering columns must not shift which value is read as the NAV.
+    body = "ダウンロード日 2026/09/25\n\n前日比,基準価額,基準日,分配金再投資基準価額\n-18,28251,2026年9月24日,99999\n"
+    respx.get(url__startswith="https://www.daiwa-am.co.jp").mock(
+        return_value=httpx.Response(200, content=body.encode("utf-8-sig"))
+    )
+    result = await daiwa.fund_nav("3346", today=date(2026, 9, 25))
+    assert (result["date"], result["nav"]) == ("2026-09-24", 28_251.0)
+
+
+@respx.mock
+async def test_fund_csv_failures_are_distinguished(daiwa):
+    daiwa.min_interval_seconds = 0
+    route = respx.get(url__startswith="https://www.daiwa-am.co.jp")
+    for response, message in (
+        (httpx.Response(404, text="Not Found"), "公式 CSV がありません"),
+        (httpx.Response(503, text=""), "HTTP 503"),
+        (httpx.Response(200, text="<!DOCTYPE html><html>maintenance</html>"), "CSV ではありません"),
+        (httpx.Response(200, content=b"\x89\xba\x97\x8e"), "列が見つかりません"),
+        (httpx.Response(200, text=DAIWA_HEADER), "基準価額の行がありません"),
+        (httpx.Response(200, text=f"{DAIWA_HEADER}\n備考,合計,,,,,\n"), "基準価額の行がありません"),
+        (httpx.Response(200, text=f"{DAIWA_HEADER}\n20260924,0,0,1,0,0,0\n"), "基準価額が不正"),
+        (httpx.Response(200, text=f"{DAIWA_HEADER}\n20260924,-1,0,1,0,0,0\n"), "基準価額が不正"),
+        (httpx.Response(200, text=f"{DAIWA_HEADER}\n20260924,1e100,0,1,0,0,0\n"), "基準価額が不正"),
+        # A date past today is a corrupt file, not tomorrow's NAV published early.
+        (httpx.Response(200, text=f"{DAIWA_HEADER}\n20261005,28251,0,1,0,0,0\n"), "未来の日付"),
+    ):
+        route.mock(return_value=response)
+        with pytest.raises(ConnectorError, match=message):
+            await daiwa.fund_nav("3346", today=date(2026, 9, 25))
+
+
+@respx.mock
+async def test_fund_csv_network_error_is_reported_as_connector_error(rakuten_fund):
+    respx.get(url__startswith="https://www.rakuten-toushin.co.jp").mock(side_effect=httpx.ConnectError("boom"))
+    with pytest.raises(ConnectorError, match="接続できませんでした"):
+        await rakuten_fund.fund_nav("100124")
+
+
+async def test_csv_providers_never_guess_a_fund_from_its_name(daiwa, rakuten_fund):
+    # Neither manager publishes a fund list, so a name resolves to nothing instead of to a similar fund.
+    assert await daiwa.search_funds("iFreeNEXT FANG+インデックス") == []
+    assert await rakuten_fund.search_funds("楽天・全米株式インデックス・ファンド") == []
+
+
+async def test_fund_csv_connectors_refuse_other_hosts(daiwa, rakuten_fund):
+    for connector in (daiwa, rakuten_fund):
+        with pytest.raises(ConnectorError):
+            await connector.get("https://evil.example/assets/csv/chart_100124.csv", params={})
 
 
 def test_tool_registered_only_when_configured(ctx, settings):

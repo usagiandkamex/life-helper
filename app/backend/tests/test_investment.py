@@ -11,7 +11,7 @@ from pydantic import SecretStr
 
 from life_helper.connectors.registry import get_connectors
 from life_helper.market.broker_csv import BrokerCsvError, load_mapping, parse_broker_csv
-from life_helper.market.funds import link_fund, refresh_fund_navs
+from life_helper.market.funds import fund_connectors, link_fund, refresh_fund_navs, suggest_funds
 from life_helper.market.portfolio import (
     CapitalGainsParams,
     FundRef,
@@ -30,7 +30,7 @@ from life_helper.market.portfolio import (
 from life_helper.market.service import portfolio_store, refresh_stock_prices, stock_price
 from life_helper.tools.portfolio_tools import UpdateHoldingParams, apply_holding_update
 
-from .conftest import mock_mufg, mock_stooq, sign_in, stooq_csv
+from .conftest import FANG_PLUS, mock_daiwa, mock_mufg, mock_rakuten, mock_stooq, sign_in, stooq_csv
 
 BROKER_DIR = Path(__file__).resolve().parents[1] / "src" / "life_helper" / "resources" / "broker_csv"
 
@@ -343,8 +343,12 @@ def test_investment_tools_registered(ctx):
     assert specs["update_holding"].writes and specs["refresh_stock_prices"].writes
     assert not specs["get_portfolio"].writes
     # Funds are priced by the fund manager, so the tool belongs to another connector than the stock one.
-    assert specs["refresh_fund_navs"].writes and specs["refresh_fund_navs"].connector == "mufg_api"
+    assert specs["refresh_fund_navs"].writes
+    assert specs["refresh_fund_navs"].connector == ("mufg_api", "rakuten_csv", "daiwa_csv")
     assert specs["refresh_stock_prices"].connector == "stooq"
+    # An automation that picked a single fund manager still gets the fund tools, but not the stock ones.
+    assert specs["refresh_fund_navs"].allowed(["daiwa_csv"])
+    assert not specs["refresh_stock_prices"].allowed(["daiwa_csv"])
 
 
 # -- fund NAVs (投資信託の基準価額) --------------------------------------------------------------------------
@@ -353,8 +357,9 @@ NAV_DAY = previous_business_day(date.today())
 OLDER_DAY = previous_business_day(NAV_DAY)
 
 
-def _mufg_ready(ctx) -> None:
-    get_connectors(ctx)["mufg_api"].min_interval_seconds = 0
+def _funds_ready(ctx) -> None:
+    for connector in fund_connectors(ctx).values():
+        connector.min_interval_seconds = 0
 
 
 def _fund(quantity: float, *, code: str = "0331418A", price_unit: float = 10_000, **kwargs) -> Holding:
@@ -364,7 +369,12 @@ def _fund(quantity: float, *, code: str = "0331418A", price_unit: float = 10_000
         name=kwargs.pop("name", "eMAXIS Slim 全世界株式（オール・カントリー）"),
         quantity=quantity,
         cost_total=kwargs.pop("cost_total", 1_000_000),
-        fund=FundRef(provider="mufg_api", fund_code=code, price_unit=price_unit, manager="三菱UFJアセットマネジメント"),
+        fund=FundRef(
+            provider=kwargs.pop("provider", "mufg_api"),
+            fund_code=code,
+            price_unit=price_unit,
+            manager=kwargs.pop("manager", "三菱UFJアセットマネジメント"),
+        ),
         **kwargs,
     )
 
@@ -409,7 +419,7 @@ def test_summary_flags_old_navs_and_funds_without_a_source():
 async def test_refresh_fund_navs_values_holdings(ctx):
     with portfolio_store(ctx).transaction() as portfolio:
         portfolio.holdings = [_fund(500_000), _fund(300_000, code="0331C180", name="eMAXIS Slim 米国株式")]
-    _mufg_ready(ctx)
+    _funds_ready(ctx)
     with respx.mock:
         mock_mufg({"0331418A": (25_341, NAV_DAY.strftime("%Y%m%d"))})
         result = await refresh_fund_navs(ctx)
@@ -430,7 +440,7 @@ async def test_refresh_fund_navs_keeps_the_newer_nav_and_survives_failures(ctx):
         portfolio.holdings[0].apply_price(
             Price(value=25_000, date=NAV_DAY.isoformat(), source="broker_csv", fetched_at="keep-me")
         )
-    _mufg_ready(ctx)
+    _funds_ready(ctx)
     with respx.mock:
         mock_mufg({"0331418A": (10_000, OLDER_DAY.strftime("%Y%m%d"))})
         stale = await refresh_fund_navs(ctx)
@@ -447,12 +457,69 @@ async def test_refresh_fund_navs_keeps_the_newer_nav_and_survives_failures(ctx):
     assert after.price.value == 25_000 and after.market_value() == 1_250_000
 
 
+async def test_refresh_fund_navs_updates_every_manager_independently(ctx):
+    daiwa = _fund(250_000, provider="daiwa_csv", code="3346", name="iFreeNEXT FANG+インデックス", manager="大和")
+    rakuten = _fund(100_000, provider="rakuten_csv", code="100124", name="楽天・全米株式", manager="楽天投信")
+    with portfolio_store(ctx).transaction() as portfolio:
+        portfolio.holdings = [_fund(500_000), daiwa, rakuten]
+    _funds_ready(ctx)
+    with respx.mock:
+        mock_mufg({"0331418A": (25_341, NAV_DAY.strftime("%Y%m%d"))})
+        mock_daiwa({"3346": (28_251, NAV_DAY.strftime("%Y%m%d"))})
+        mock_rakuten({"100124": (13_999, NAV_DAY.strftime("%Y/%m/%d"))})
+        result = await refresh_fund_navs(ctx)
+    # Every manager is asked with its own connector, and each NAV keeps the source it came from.
+    assert [(u["code"], u["source"]) for u in result["updated"]] == [
+        ("0331418A", "mufg_api"),
+        ("3346", "daiwa_csv"),
+        ("100124", "rakuten_csv"),
+    ]
+    assert result["errors"] == []
+    # 500,000 / 10,000 x 25,341 + 250,000 / 10,000 x 28,251 + 100,000 / 10,000 x 13,999
+    assert summarize(portfolio_store(ctx).load())["total_value"] == 1_267_050 + 706_275 + 139_990
+
+    with respx.mock:
+        mock_mufg({"0331418A": (25_500, NAV_DAY.strftime("%Y%m%d"))})
+        mock_rakuten({"100124": (14_100, NAV_DAY.strftime("%Y/%m/%d"))})
+        respx.get(url__startswith="https://www.daiwa-am.co.jp").mock(return_value=httpx.Response(503, text=""))
+        second = await refresh_fund_navs(ctx)
+    # One manager being down neither stops the others nor clears the NAV it published before.
+    assert [u["code"] for u in second["updated"]] == ["0331418A", "100124"]
+    assert second["errors"][0]["code"] == "3346" and "HTTP 503" in second["errors"][0]["error"]
+    assert portfolio_store(ctx).load().holdings[1].price.value == 28_251
+
+
+async def test_link_fund_by_code_shows_the_official_name_of_the_csv_manager(ctx):
+    holding = Holding(account="tokutei", kind="fund", name="FANG+", quantity=250_000, cost_total=500_000)
+    with portfolio_store(ctx).transaction() as portfolio:
+        portfolio.holdings = [holding]
+    _funds_ready(ctx)
+    with respx.mock:
+        mock_mufg({})
+        mock_daiwa({"3346": (28_251, NAV_DAY.strftime("%Y%m%d"))})
+        # A fund name alone resolves to nothing here: the manager publishes no list to match names against.
+        assert (await suggest_funds(ctx, "iFreeNEXT FANG+インデックス"))["candidates"] == []
+        result = await link_fund(ctx, holding.id, "daiwa_csv", "3346")
+    # The code came from the official fund page, and the name it answers with is what confirms the link.
+    assert result["official_name"] == FANG_PLUS
+    assert result["fund"]["source_url"] == "https://www.daiwa-am.co.jp/funds/detail/3346/detail_top.html"
+    linked = portfolio_store(ctx).load().holdings[0]
+    assert linked.price.source == "daiwa_csv" and linked.market_value() == Decimal("706275")
+
+    with respx.mock:
+        mock_daiwa({})
+        unknown = await link_fund(ctx, holding.id, "daiwa_csv", "9999")
+    assert "CSV ではありません" in unknown["error"]
+    # The failed link left the confirmed one, and its NAV, untouched.
+    assert portfolio_store(ctx).load().holdings[0].fund.fund_code == "3346"
+
+
 async def test_funds_without_a_source_are_left_to_manual_entry(ctx):
     manual = Holding(account="ideco", kind="fund", name="自動取得未対応ファンド", quantity=1_000, cost_total=10_000)
     manual.apply_price(Price(value=15_000, date="2026-09-01", source="manual"))
     with portfolio_store(ctx).transaction() as portfolio:
         portfolio.holdings = [manual]
-    _mufg_ready(ctx)
+    _funds_ready(ctx)
     with respx.mock:
         # No request is made at all: nothing tells us which official fund this is.
         route = respx.get(url__startswith="https://developer.am.mufg.jp")
@@ -468,7 +535,7 @@ async def test_link_fund_needs_a_confirmed_fund_code(client, ctx):
     holding = Holding(account="nisa_tsumitate", kind="fund", name="全世界株式", quantity=500_000, cost_total=1_000_000)
     with portfolio_store(ctx).transaction() as portfolio:
         portfolio.holdings = [holding]
-    _mufg_ready(ctx)
+    _funds_ready(ctx)
     with respx.mock:
         mock_mufg({"0331418A": (25_341, NAV_DAY.strftime("%Y%m%d"))})
         suggested = client.get(
@@ -512,7 +579,7 @@ def test_refresh_prices_updates_stocks_and_funds_independently(client, ctx, sett
             _fund(300_000, code="0331C180", name="eMAXIS Slim 米国株式", cost_total=500_000),
         ]
     _stooq_ready(ctx, settings)
-    _mufg_ready(ctx)
+    _funds_ready(ctx)
     with respx.mock:
         mock_stooq({"7203.jp": 3_000})
         mock_mufg({"0331418A": (25_341, NAV_DAY.strftime("%Y%m%d")), "0331C180": (30_000, NAV_DAY.strftime("%Y%m%d"))})
@@ -530,7 +597,7 @@ async def test_relinking_a_fund_drops_the_price_of_the_previous_one(ctx):
     holding.apply_price(Price(value=25_000, date=NAV_DAY.isoformat(), source="mufg_api"))
     with portfolio_store(ctx).transaction() as portfolio:
         portfolio.holdings = [holding]
-    _mufg_ready(ctx)
+    _funds_ready(ctx)
     with respx.mock:
         # The NAV of the fund now picked is older than the one already stored for the fund picked before.
         mock_mufg({"0331C180": (30_000, OLDER_DAY.strftime("%Y%m%d"))})

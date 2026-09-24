@@ -37,7 +37,7 @@ class StockPriceParams(BaseModel):
 
 
 class FundNavParams(BaseModel):
-    provider: str = Field(description="データ提供元（例: mufg_api）")
+    provider: str = Field(description="データ提供元（例: mufg_api、rakuten_csv、daiwa_csv）")
     fund_code: str = Field(
         max_length=32, description="運用会社のファンドコード・投資信託協会コード・ISIN（例: 0331418A）"
     )
@@ -95,6 +95,8 @@ def apply_holding_update(ctx: AppContext, p: UpdateHoldingParams) -> dict:
 
 
 def build_tools(ctx: AppContext) -> list[ToolSpec]:
+    fund_provider_names = tuple(fund_connectors(ctx))
+
     @define_tool(
         name="get_portfolio",
         description="保有銘柄、口座区分ごとの評価額・含み損益・資産配分、価格の日付と出どころを返す。",
@@ -124,8 +126,8 @@ def build_tools(ctx: AppContext) -> list[ToolSpec]:
 
     @define_tool(
         name="get_fund_nav",
-        description="投資信託の基準価額を運用会社の公式 API から取得する"
-        "（ファンドコードを指定。株価の Stooq とは別）。",
+        description="投資信託の基準価額を運用会社の公式 API・公式 CSV から取得する"
+        "（データ提供元とファンドコードを指定。株価の Stooq とは別）。",
     )
     async def get_fund_nav(params: FundNavParams) -> dict:
         connector = fund_connectors(ctx).get(params.provider)
@@ -138,8 +140,8 @@ def build_tools(ctx: AppContext) -> list[ToolSpec]:
 
     @define_tool(
         name="refresh_fund_navs",
-        description="保有している投資信託の基準価額を、紐付けた運用会社の公式 API から更新して評価額を計算し直す"
-        "（紐付けていないファンドは手入力のまま）。",
+        description="保有している投資信託の基準価額を、紐付けた運用会社の公式 API・公式 CSV から更新して"
+        "評価額を計算し直す（紐付けていないファンドは手入力のまま）。",
     )
     async def refresh_navs(params: EmptyParams) -> dict:
         return await refresh_fund_navs(ctx)
@@ -171,8 +173,8 @@ def build_tools(ctx: AppContext) -> list[ToolSpec]:
         ToolSpec(get_portfolio),
         ToolSpec(get_stock_price, connector="stooq"),
         ToolSpec(refresh_prices, writes=True, connector="stooq"),
-        ToolSpec(get_fund_nav, connector="mufg_api"),
-        ToolSpec(refresh_navs, writes=True, connector="mufg_api"),
+        ToolSpec(get_fund_nav, connector=fund_provider_names),
+        ToolSpec(refresh_navs, writes=True, connector=fund_provider_names),
         ToolSpec(simulate_investment_tool),
         ToolSpec(estimate_tax),
         ToolSpec(update_holding, writes=True),

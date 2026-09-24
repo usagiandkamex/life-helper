@@ -23,6 +23,8 @@ const SOURCE_LABELS: Record<string, string> = {
   nav_site: '基準価額サイト',
   manual: '手入力',
   mufg_api: '三菱UFJアセットマネジメント',
+  rakuten_csv: '楽天投信投資顧問',
+  daiwa_csv: '大和アセットマネジメント',
 }
 const MARKET_LABELS: Record<string, string> = { jp: '日本株', us: '米国株' }
 
@@ -411,7 +413,9 @@ export function PortfolioPage() {
             </p>
           ))}
           {candidates && candidates.candidates.length === 0 && (
-            <p className="hint">候補が見つかりませんでした。公式サイトの基準価額を手入力してください。</p>
+            <p className="hint">
+              候補が見つかりませんでした。運用会社とファンドコードを指定して紐付けるか、公式サイトの基準価額を手入力してください。
+            </p>
           )}
           {candidates && candidates.candidates.length > 0 && (
             <div className="table-wrap">
@@ -476,7 +480,8 @@ export function PortfolioPage() {
             </button>
           </form>
           <p className="hint">
-            候補に出ない場合は、公式サイトのファンドページに書かれたコード（URL のファンドコードや投資信託協会コード）を指定してください。紐付け後に公式名称を表示します。
+            運用会社によっては名前で検索できません。公式サイトのファンドページに書かれたコード（URL のファンドコード、投資信託協会コード、基準価額
+            CSV のリンクの番号）を指定してください。紐付け後に公式名称を表示します。
           </p>
           <form
             className="row wrap"
