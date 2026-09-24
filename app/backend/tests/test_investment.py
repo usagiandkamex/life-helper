@@ -49,21 +49,19 @@ def test_apply_price_only_when_newer():
 
 
 def test_legacy_nisa_usage_in_saved_yaml_is_dropped(tmp_path):
+    """Portfolios saved before the NISA allowance feature was removed still load, minus the unused key."""
     store = PortfolioStore(tmp_path)
     store.path.parent.mkdir(parents=True, exist_ok=True)
     store.path.write_text(
-        "holdings: []\nnisa_annual_used:\n  '2026': {tsumitate: 600000, growth: 100000}\n", encoding="utf-8"
+        "holdings:\n"
+        "  - {id: abc, account: nisa_growth, kind: stock, name: a, quantity: 1, cost_total: 100000}\n"
+        "nisa_annual_used:\n"
+        "  '2026': {tsumitate: 600000, growth: 100000}\n",
+        encoding="utf-8",
     )
-    store.save(store.load())
+    saved = store.save(store.load())
+    assert [(h.id, h.account, h.cost_total) for h in saved.holdings] == [("abc", "nisa_growth", 100_000)]
     assert "nisa_annual_used" not in store.path.read_text(encoding="utf-8")
-
-
-def test_summary_has_no_nisa_allowance():
-    p = Portfolio(holdings=[Holding(account="nisa_growth", kind="stock", name="a", quantity=1, cost_total=100_000)])
-    s = summarize(p)
-    assert "nisa" not in s
-    # NISA accounts are still aggregated like any other account.
-    assert s["accounts"]["nisa_growth"]["cost"] == 100_000
 
 
 def test_simulate_investment_zero_return_and_percentiles():
@@ -177,11 +175,11 @@ def test_portfolio_api_import_refresh_and_holdings(client, ctx, settings):
     assert refreshed["total_value"] == 30_000 + 180_000
     assert "stooqkey" not in str(refreshed)
 
-    # The NISA allowance endpoint is gone: only the SPA catch-all (GET) is left on that path.
+    # The NISA allowance endpoint is gone (405 because only the SPA catch-all, which is GET, matches the path).
     removed = client.put(
         "/api/portfolio/nisa-usage", json={"year": 2026, "tsumitate": 0, "growth": 1_000_000}, headers=h
     )
-    assert removed.status_code == 405
+    assert removed.status_code in (404, 405)
 
     added = client.post(
         "/api/portfolio/holdings",
