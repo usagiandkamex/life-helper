@@ -104,6 +104,7 @@ td.actions { white-space: nowrap; display: flex; gap: 0.5rem; }
 .markdown p { margin: 0.4rem 0; }
 .empty { color: var(--muted); }
 .composer { border-top: 1px solid var(--border); padding: 0.75rem; display: flex; flex-direction: column; gap: 0.5rem; }
+.composer textarea { max-height: calc(5lh + 0.8rem + 2px); overflow-y: auto; resize: none; }
 .composer-actions { display: flex; justify-content: space-between; gap: 0.5rem; }
 .chart { margin: 0.5rem 0; }
 .chart figcaption { font-size: 0.85rem; color: var(--muted); }

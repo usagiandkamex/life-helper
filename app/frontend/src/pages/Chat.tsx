@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api, ApiError, json } from '../api'
 import { LazyChart } from '../components/LazyChart'
@@ -82,6 +82,8 @@ export function ChatPage() {
   const [error, setError] = useState('')
   const sourceRef = useRef<EventSource | null>(null)
   const bottomRef = useRef<HTMLDivElement | null>(null)
+  const messagesRef = useRef<HTMLDivElement | null>(null)
+  const inputRef = useRef<HTMLTextAreaElement | null>(null)
 
   const loadConversations = useCallback(async () => {
     setConversations(await api<Conversation[]>('/api/conversations'))
@@ -146,6 +148,28 @@ export function ChatPage() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [items])
+
+  // The composer grows with the text; CSS caps it at 5 lines and scrolls beyond that.
+  const resizeInput = useCallback(() => {
+    const el = inputRef.current
+    if (!el) return
+    const messages = messagesRef.current
+    // A taller composer shrinks the thread, so keep the latest message in view when it was.
+    const atBottom = messages ? messages.scrollHeight - messages.scrollTop - messages.clientHeight < 40 : false
+    const style = getComputedStyle(el)
+    const borders = parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth)
+    el.style.height = 'auto' // back to the rows= size so the text can shrink it again
+    el.style.height = `${el.scrollHeight + borders}px` // scrollHeight excludes borders
+    if (messages && atBottom) messages.scrollTop = messages.scrollHeight
+  }, [])
+
+  useLayoutEffect(resizeInput, [input, resizeInput])
+
+  useEffect(() => {
+    // Re-wrapping on a width change also changes the number of lines.
+    window.addEventListener('resize', resizeInput)
+    return () => window.removeEventListener('resize', resizeInput)
+  }, [resizeInput])
 
   const newConversation = async () => {
     const conv = await api<Conversation>('/api/conversations', { method: 'POST', body: json({ model }) })
@@ -238,7 +262,7 @@ export function ChatPage() {
           </button>
           <Disclaimer />
         </div>
-        <div className="messages">
+        <div className="messages" ref={messagesRef}>
           {items.length === 0 && (
             <div className="empty">
               <p>何でも相談してください。例:</p>
@@ -263,6 +287,7 @@ export function ChatPage() {
           }}
         >
           <textarea
+            ref={inputRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder="メッセージを入力（Ctrl+Enter で送信）"
