@@ -1,0 +1,25 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "environmentName": { "value": "${AZURE_ENV_NAME}" },
+    "location": { "value": "${AZURE_LOCATION}" },
+    "appImageName": { "value": "${SERVICE_APP_IMAGE_NAME=}" },
+    "appExists": { "value": "${SERVICE_APP_RESOURCE_EXISTS=false}" },
+    "allowedGithubUserId": { "value": "${LH_ALLOWED_GITHUB_USER_ID=134019422}" },
+    "githubOauthClientId": { "value": "${LH_GITHUB_OAUTH_CLIENT_ID=}" },
+    "githubOauthClientSecret": { "value": "${LH_GITHUB_OAUTH_CLIENT_SECRET=}" },
+    "sessionSecret": { "value": "${LH_SESSION_SECRET}" },
+    "tokenEncryptionKey": { "value": "${LH_TOKEN_ENCRYPTION_KEY}" },
+    "stooqApiKey": { "value": "${LH_STOOQ_API_KEY=}" },
+    "rakutenApplicationId": { "value": "${LH_RAKUTEN_APPLICATION_ID=}" },
+    "rakutenAccessKey": { "value": "${LH_RAKUTEN_ACCESS_KEY=}" },
+    "githubAppId": { "value": "${LH_GITHUB_APP_ID=}" },
+    "githubAppPrivateKey": { "value": "${LH_GITHUB_APP_PRIVATE_KEY=}" },
+    "githubAppInstallationId": { "value": "${LH_GITHUB_APP_INSTALLATION_ID=}" },
+    "notifyRepo": { "value": "${LH_NOTIFY_REPO=}" },
+    "budgetAmount": { "value": "${LH_BUDGET_AMOUNT=0}" },
+    "budgetContactEmail": { "value": "${LH_BUDGET_EMAIL=}" },
+    "budgetStartDate": { "value": "${LH_BUDGET_START_DATE=}" }
+  }
+}
