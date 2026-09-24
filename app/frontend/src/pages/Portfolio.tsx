@@ -24,6 +24,7 @@ export function PortfolioPage() {
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [calculating, setCalculating] = useState(false)
   const [broker, setBroker] = useState('sbi')
   const [chart, setChart] = useState<ChartData | null>(null)
   const [simResult, setSimResult] = useState<{ principal: number; expected_value: number; percentiles: Record<string, number>; after_tax: Record<string, number> } | null>(null)
@@ -57,11 +58,21 @@ export function PortfolioPage() {
     run(() => api<PortfolioView>('/api/portfolio/import', { method: 'POST', body: form }), (v) => `${v.imported} 件の保有銘柄を取り込みました`)
   }
 
-  const refresh = () =>
-    run(
-      () => api<PortfolioView>('/api/portfolio/refresh-prices', { method: 'POST' }),
-      (v) => `${v.refresh?.updated.length ?? 0} 件の株価を更新しました。${v.refresh?.errors.length ? `取得できなかった銘柄: ${v.refresh.errors.map((e) => e.code).join(', ')}。` : ''}${v.refresh?.note ?? ''}`,
-    )
+  const calculate = async () => {
+    setCalculating(true)
+    try {
+      await run(
+        () => api<PortfolioView>('/api/portfolio/refresh-prices', { method: 'POST' }),
+        (v) =>
+          `評価額を計算しました: 合計 ${yen(v.total_value)}（株価を ${v.refresh?.updated.length ?? 0} 件反映）。` +
+          `${v.refresh?.errors.length ? `取得できなかった銘柄: ${v.refresh.errors.map((e) => e.code).join('、')}。` : ''}` +
+          `${v.missing_prices.length ? `価格が未登録の ${v.missing_prices.length} 件は合計に含めていません。` : ''}` +
+          `${v.refresh?.note ?? ''}`,
+      )
+    } finally {
+      setCalculating(false)
+    }
+  }
 
   const addHolding = (form: HTMLFormElement) => {
     const data = new FormData(form)
@@ -144,6 +155,14 @@ export function PortfolioPage() {
           </div>
         ))}
       </section>
+      <div className="row wrap">
+        <button className="button primary" onClick={calculate} disabled={busy || calculating}>
+          {calculating ? '計算中…' : '評価額を計算'}
+        </button>
+        <span className="hint">
+          株式・ETF・REIT は Stooq の前日終値を取り込んでから計算します。投資信託の基準価額は手入力かチャットで更新してください。
+        </span>
+      </div>
       <p className="hint">
         {view.note} 最も古い価格の日付: {view.oldest_price_date ?? '—'}
         {view.missing_prices.length > 0 && ` / 価格未登録: ${view.missing_prices.join('、')}`}
@@ -163,11 +182,8 @@ export function PortfolioPage() {
             保有証券 CSV を取り込む
             <input type="file" accept=".csv" hidden disabled={busy} onChange={(e) => e.target.files?.[0] && importCsv(e.target.files[0])} />
           </label>
-          <button className="button" onClick={refresh} disabled={busy}>
-            株価を更新（Stooq・前日終値）
-          </button>
         </div>
-        <p className="hint">CSV の取り込みは保有銘柄を置き換えます。CSV の評価額が最も正確です（取り込み時点）。</p>
+        <p className="hint">CSV の取り込みは保有銘柄を置き換えます。CSV の評価額が最も正確です（取り込み時点）。株価の更新は「評価額を計算」から行います。</p>
       </section>
 
       <section className="panel">
