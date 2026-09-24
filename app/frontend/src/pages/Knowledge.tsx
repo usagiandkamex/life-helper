@@ -13,6 +13,12 @@ const GROUP_LABELS: Record<string, string> = {
   '': 'その他',
 }
 
+// 形式ちがい・サイズ超過など、そのファイルだけが拒否された場合に /api/files/upload が返す状態コード。
+const FILE_ERROR_STATUSES = [400, 413]
+
+const summarize = (items: string[], limit = 3): string =>
+  items.length > limit ? `${items.slice(0, limit).join('、')} ほか ${items.length - limit} 件` : items.join('、')
+
 export function KnowledgePage() {
   const [files, setFiles] = useState<FileEntry[]>([])
   const [selected, setSelected] = useState<string | null>(null)
@@ -21,6 +27,7 @@ export function KnowledgePage() {
   const [editing, setEditing] = useState(false)
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
+  const [uploading, setUploading] = useState<{ current: number; total: number } | null>(null)
 
   const load = useCallback(async () => setFiles(await api<FileEntry[]>('/api/files')), [])
   useEffect(() => {
@@ -80,20 +87,63 @@ export function KnowledgePage() {
     }
   }
 
-  const upload = async (file: File) => {
-    const form = new FormData()
-    form.append('file', file)
+  const upload = async (files: File[]) => {
+    if (!files.length) return
+    setError('')
+    setMessage('')
+    const saved: string[] = []
+    const redacted = new Set<string>()
+    const failed: string[] = []
+    const notes: string[] = []
+    const problems: string[] = []
     try {
-      const res = await api<{ path: string; redacted: string[] }>('/api/files/upload', { method: 'POST', body: form })
-      setMessage(
-        res.redacted.length
-          ? `${res.path} に取り込みました（${res.redacted.join('・')}は削除して保存しました）`
-          : `${res.path} に取り込みました`,
-      )
-      await load()
-      await open(res.path)
-    } catch (e) {
-      setError((e as Error).message)
+      // 1 ファイルずつ順番に送る: 同名ファイルの連番（docs/x-2.md）が取り込んだ順に決まる。
+      for (const [index, file] of files.entries()) {
+        setUploading({ current: index + 1, total: files.length })
+        const form = new FormData()
+        form.append('file', file)
+        try {
+          const res = await api<{ path: string; redacted: string[] }>('/api/files/upload', {
+            method: 'POST',
+            body: form,
+          })
+          saved.push(res.path)
+          for (const kind of res.redacted) redacted.add(kind)
+        } catch (e) {
+          // そのファイルだけの問題なら残りを続ける。認証切れ・通信・サーバーのエラーは続けても失敗するので中断する。
+          if (e instanceof ApiError && FILE_ERROR_STATUSES.includes(e.status)) {
+            failed.push(`${file.name}（${e.message}）`)
+            continue
+          }
+          const rest = files.length - index - 1
+          problems.push(
+            `${file.name}（${(e as Error).message}）で中断しました${rest ? `。残りの ${rest} 件は取り込んでいません` : ''}`,
+          )
+          break
+        }
+      }
+      if (saved.length) {
+        notes.push(
+          saved.length === 1
+            ? `${saved[0]} に取り込みました`
+            : `${saved.length} 件を取り込みました（${summarize(saved)}）`,
+        )
+        if (redacted.size) notes.push(`${[...redacted].join('・')}は削除して保存しました`)
+      }
+      if (failed.length) problems.unshift(`取り込めませんでした: ${summarize(failed)}`)
+      try {
+        if (saved.length) {
+          await load()
+          await open(saved[0])
+        }
+      } catch (e) {
+        problems.push((e as Error).message)
+      }
+      // open() は両方のバナーを消すため、最後にまとめて表示する。
+      setMessage(notes.join('。'))
+      setError(problems.join(' / '))
+    } finally {
+      setUploading(null)
     }
   }
 
@@ -105,8 +155,20 @@ export function KnowledgePage() {
             ＋ ノート
           </button>
           <label className="button small">
-            資料を取り込む
-            <input type="file" accept=".md,.txt,.pdf" hidden onChange={(e) => e.target.files?.[0] && upload(e.target.files[0])} />
+            {uploading ? `取り込み中…（${uploading.current}/${uploading.total}）` : '資料を取り込む'}
+            <input
+              type="file"
+              accept=".md,.txt,.pdf"
+              multiple
+              hidden
+              disabled={!!uploading}
+              onChange={(e) => {
+                const files = Array.from(e.currentTarget.files ?? [])
+                // 同じファイルを選び直しても再度取り込めるように、送信前に選択を空にする。
+                e.currentTarget.value = ''
+                upload(files)
+              }}
+            />
           </label>
           <a className="button small" href="/api/export.zip">
             ZIP で書き出し
@@ -129,7 +191,9 @@ export function KnowledgePage() {
               </ul>
             </div>
           ))}
-        <p className="hint">PDF はテキストを抽出して保存します（スキャン画像の PDF は非対応）。原本は保存しません。</p>
+        <p className="hint">
+          資料は複数まとめて選べます。PDF はテキストを抽出して保存します（スキャン画像の PDF は非対応）。原本は保存しません。
+        </p>
       </aside>
       <section className="panel grow">
         {message && <div className="banner ok">{message}</div>}
