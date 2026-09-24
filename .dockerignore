@@ -1,0 +1,17 @@
+.git
+.github
+.azure
+.data
+.env
+.env.*
+**/node_modules
+**/dist
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+app/backend/tests
+app/backend/uv.lock
+infra
+*.md
+!app/backend/src/life_helper/resources/**/*.md

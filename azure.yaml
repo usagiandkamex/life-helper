@@ -1,0 +1,25 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+name: life-helper
+metadata:
+  template: life-helper@0.1.0
+infra:
+  provider: bicep
+  path: infra
+services:
+  app:
+    project: .
+    language: docker
+    host: containerapp
+    docker:
+      path: Dockerfile
+      context: .
+      remoteBuild: true
+hooks:
+  # azd deploy only updates the container app; point the scheduled job at the same image afterwards.
+  postdeploy:
+    posix:
+      shell: sh
+      run: ./infra/hooks/update-job-image.sh
+    windows:
+      shell: pwsh
+      run: ./infra/hooks/update-job-image.ps1

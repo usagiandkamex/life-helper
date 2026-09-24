@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+# uv.lock is regenerated in CI/Docker because local installs may go through a private package mirror.
+app/backend/uv.lock
+
+# Node
+node_modules/
+dist/
+
+# Local data and secrets
+.data/
+.env
+.env.*
+!.env.example
+*.pem
+
+# Azure Developer CLI
+.azure/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json

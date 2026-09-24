@@ -1,0 +1,15 @@
+# Secret scanning configuration. Only the obviously fake values used by unit tests are allow-listed.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Fake credentials used by unit tests to verify masking"
+regexes = [
+  '''gho_(devtoken_example|real_token_1234|other|test_token_value|secret_token_123|unit_test_token_1234|revoked_token_value)''',
+  '''ghs_installation_token_1234''',
+  '''stooqkey-ABCDEF123456''',
+  '''rakuten-access-key-987654''',
+  '''e5e2671a-b454-4e6f-aaaa-bbbbccccdddd''',
+  '''(client-secret-value|test-session-secret-0123456789|SUPERSECRETKEY|SECRET-API-KEY-123|apikey-123456)''',
+  '''(app-id-123456|access-key-123456)''',
+]

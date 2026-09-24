@@ -1,0 +1,192 @@
+"""HTTP API for conversations, turns (SSE), models and memory organisation."""
+
+from __future__ import annotations
+
+from dataclasses import asdict
+
+from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+
+from ..auth import CurrentUser, require_user
+from ..context import AppContext, get_ctx
+from ..security import SENSITIVE_LABELS, detect_sensitive
+from .events import history_from_events
+from .manager import NoTokenError, SessionStateError
+from .turns import TurnBusyError
+
+router = APIRouter(prefix="/api")
+
+ORGANIZE_PROMPT = (
+    "memory-keeper スキルに従って、知識ベースの memories/ を見直してください。"
+    "重複している内容は統合し、古くなった情報は更新し、INDEX.md の目次を整えてください。"
+    "最後に、変更したファイルと変更内容を一覧で報告してください。"
+)
+
+
+class CreateConversation(BaseModel):
+    title: str = ""
+    model: str | None = None
+
+
+class UpdateConversation(BaseModel):
+    title: str | None = Field(default=None, max_length=120)
+    model: str | None = None
+
+
+class TurnBody(BaseModel):
+    prompt: str = Field(min_length=1, max_length=20000)
+    model: str | None = None
+    confirm_sensitive: bool = False
+
+
+def _reauth() -> HTTPException:
+    return HTTPException(status.HTTP_409_CONFLICT, {"code": "reauth", "message": "GitHub への再ログインが必要です"})
+
+
+@router.get("/models")
+async def models(user: CurrentUser = Depends(require_user), ctx: AppContext = Depends(get_ctx)) -> dict:
+    try:
+        items = await ctx.copilot.list_models()
+    except NoTokenError as e:
+        raise _reauth() from e
+    return {"default": ctx.settings.default_model, "models": items}
+
+
+@router.get("/conversations")
+def list_conversations(user: CurrentUser = Depends(require_user), ctx: AppContext = Depends(get_ctx)) -> list[dict]:
+    return [asdict(c) | {"busy": ctx.turns.busy(c.id)} for c in ctx.extras["conversations"].list()]
+
+
+@router.post("/conversations")
+def create_conversation(
+    body: CreateConversation, user: CurrentUser = Depends(require_user), ctx: AppContext = Depends(get_ctx)
+) -> dict:
+    conv = ctx.extras["conversations"].create(body.title.strip()[:120], body.model or ctx.settings.default_model)
+    return asdict(conv)
+
+
+@router.patch("/conversations/{conversation_id}")
+def update_conversation(
+    conversation_id: str,
+    body: UpdateConversation,
+    user: CurrentUser = Depends(require_user),
+    ctx: AppContext = Depends(get_ctx),
+) -> dict:
+    conv = ctx.extras["conversations"].update(conversation_id, title=body.title, model=body.model)
+    if conv is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "conversation not found")
+    return asdict(conv)
+
+
+@router.delete("/conversations/{conversation_id}")
+async def delete_conversation(
+    conversation_id: str, user: CurrentUser = Depends(require_user), ctx: AppContext = Depends(get_ctx)
+) -> dict:
+    conv = ctx.extras["conversations"].get(conversation_id)
+    if conv is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "conversation not found")
+    try:
+        async with ctx.turns.reserve(conversation_id):
+            if conv.started:
+                await ctx.copilot.delete_session(conversation_id)
+            ctx.extras["conversations"].delete(conversation_id)
+    except TurnBusyError as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, "the conversation is answering; wait until it finishes") from e
+    except NoTokenError as e:
+        raise _reauth() from e
+    except SessionStateError as e:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(e)) from e
+    return {"ok": True}
+
+
+@router.get("/conversations/{conversation_id}/messages")
+async def conversation_messages(
+    conversation_id: str, user: CurrentUser = Depends(require_user), ctx: AppContext = Depends(get_ctx)
+) -> dict:
+    conv = ctx.extras["conversations"].get(conversation_id)
+    if conv is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "conversation not found")
+    if ctx.turns.busy(conversation_id):
+        # Do not touch the live session while it answers; the client re-attaches to the running turn instead.
+        return {"messages": [], "busy": True, "turn_id": ctx.turns.active_turn_id(conversation_id)}
+    if not conv.started:
+        return {"messages": [], "busy": False}
+    try:
+        # Reserve so a turn cannot start while the history is being read from the session.
+        async with ctx.turns.reserve(conversation_id):
+            active = await ctx.copilot.open_session(conversation_id, model=conv.model, resume=True)
+            events = await active.session.get_events()
+    except TurnBusyError:
+        return {"messages": [], "busy": True, "turn_id": ctx.turns.active_turn_id(conversation_id)}
+    except NoTokenError as e:
+        raise _reauth() from e
+    except SessionStateError as e:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(e)) from e
+    return {"messages": history_from_events(events, ctx.masker), "busy": False}
+
+
+async def _start_turn(ctx: AppContext, conversation_id: str, prompt: str, model: str | None) -> dict:
+    conv = ctx.extras["conversations"].get(conversation_id)
+    if conv is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "conversation not found")
+    if not ctx.github_token():
+        raise _reauth()
+    if conv.title == "新しい会話":
+        ctx.extras["conversations"].update(conversation_id, title=prompt.strip().splitlines()[0][:40])
+    try:
+        turn = await ctx.turns.start(conversation_id, prompt, model or conv.model)
+    except TurnBusyError as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, "the conversation is already answering") from e
+    return {"turn_id": turn.id, "conversation_id": conversation_id}
+
+
+@router.post("/conversations/{conversation_id}/turns")
+async def start_turn(
+    conversation_id: str, body: TurnBody, user: CurrentUser = Depends(require_user), ctx: AppContext = Depends(get_ctx)
+) -> dict:
+    kinds = detect_sensitive(body.prompt)
+    if kinds and not body.confirm_sensitive:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            {
+                "code": "sensitive_data",
+                "kinds": kinds,
+                "message": "機微情報の可能性があります: " + "、".join(SENSITIVE_LABELS[k] for k in kinds),
+            },
+        )
+    return await _start_turn(ctx, conversation_id, body.prompt, body.model)
+
+
+@router.get("/turns/{turn_id}/events")
+async def turn_events(
+    turn_id: str,
+    last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+    user: CurrentUser = Depends(require_user),
+    ctx: AppContext = Depends(get_ctx),
+) -> StreamingResponse:
+    turn = ctx.turns.get(turn_id)
+    if turn is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "turn not found (it may have expired)")
+    try:
+        last = int(last_event_id) if last_event_id is not None else -1
+    except ValueError:
+        last = -1
+    return StreamingResponse(
+        ctx.turns.stream(turn, last),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post("/turns/{turn_id}/abort")
+async def abort_turn(
+    turn_id: str, user: CurrentUser = Depends(require_user), ctx: AppContext = Depends(get_ctx)
+) -> dict:
+    return {"aborted": await ctx.turns.abort(turn_id)}
+
+
+@router.post("/memories/organize")
+async def organize_memories(user: CurrentUser = Depends(require_user), ctx: AppContext = Depends(get_ctx)) -> dict:
+    conv = ctx.extras["conversations"].create("メモリの整理", ctx.settings.default_model)
+    return await _start_turn(ctx, conv.id, ORGANIZE_PROMPT, None)

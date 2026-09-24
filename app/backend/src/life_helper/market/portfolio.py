@@ -1,0 +1,312 @@
+"""Portfolio model and storage (money/portfolio.yaml), valuation, NISA allowance, simulations and tax estimates."""
+
+from __future__ import annotations
+
+import json
+import math
+import random
+import threading
+import time
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import UTC, date, datetime
+from pathlib import Path
+from typing import Literal
+
+import yaml
+from pydantic import BaseModel, Field
+
+from ..automation.locks import FileLock
+from ..knowledge.store import atomic_write
+
+Account = Literal["nisa_tsumitate", "nisa_growth", "tokutei", "ippan", "ideco"]
+Kind = Literal["stock", "etf", "reit", "fund"]
+PriceSource = Literal["broker_csv", "stooq", "nav_site", "manual"]
+
+ACCOUNT_LABELS = {
+    "nisa_tsumitate": "NISA つみたて投資枠",
+    "nisa_growth": "NISA 成長投資枠",
+    "tokutei": "特定口座",
+    "ippan": "一般口座",
+    "ideco": "iDeCo",
+}
+NISA_ACCOUNTS = ("nisa_tsumitate", "nisa_growth")
+TAXABLE_ACCOUNTS = ("tokutei", "ippan")
+
+
+class Price(BaseModel):
+    value: float = Field(description="株価（円）。投資信託は 1 万口あたりの基準価額")
+    date: str = Field(description="価格の日付（YYYY-MM-DD）")
+    source: PriceSource
+
+
+class Holding(BaseModel):
+    id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12])
+    account: Account
+    kind: Kind
+    code: str = Field(default="", description="証券コード（株・ETF・REIT）またはファンドコード")
+    name: str
+    quantity: float = Field(ge=0, description="株数、または投資信託の口数")
+    cost_total: float = Field(ge=0, description="取得金額の合計（円、簿価）")
+    price: Price | None = None
+    valuation_yen: float | None = Field(default=None, description="評価額（円）。証券会社 CSV の値など")
+
+    def market_value(self) -> float | None:
+        if self.valuation_yen is not None:
+            return self.valuation_yen
+        if self.price is None:
+            return None
+        if self.kind == "fund":
+            return self.quantity / 10_000 * self.price.value
+        return self.quantity * self.price.value
+
+    def apply_price(self, price: Price) -> bool:
+        """Uses ``price`` if it is at least as new as the current one. Returns True when applied."""
+        if self.price is not None and self.price.date > price.date:
+            return False
+        self.price = price
+        self.valuation_yen = None
+        return True
+
+
+class NisaUsage(BaseModel):
+    tsumitate: float = 0
+    growth: float = 0
+
+
+class Portfolio(BaseModel):
+    holdings: list[Holding] = Field(default_factory=list)
+    # Purchases made in NISA per year (簿価). Entered by the user or taken from the broker's annual report.
+    nisa_annual_used: dict[str, NisaUsage] = Field(default_factory=dict)
+    updated_at: str | None = None
+
+
+class PortfolioStore:
+    def __init__(self, knowledge_root: Path) -> None:
+        self.path = knowledge_root / "money" / "portfolio.yaml"
+        self.prices_dir = knowledge_root / "money" / "prices"
+        self._lock = threading.Lock()
+
+    def load(self) -> Portfolio:
+        with self._lock:
+            if not self.path.exists():
+                return Portfolio()
+            raw = yaml.safe_load(self.path.read_text(encoding="utf-8")) or {}
+            return Portfolio.model_validate(raw)
+
+    def save(self, portfolio: Portfolio) -> Portfolio:
+        with self._lock:
+            portfolio.updated_at = datetime.now(UTC).isoformat()
+            header = "# 保有銘柄。ポートフォリオ画面（手入力・証券会社 CSV の取り込み）から更新します。\n"
+            body = yaml.safe_dump(portfolio.model_dump(mode="json"), allow_unicode=True, sort_keys=False)
+            atomic_write(self.path, header + body)
+            return portfolio
+
+    @contextmanager
+    def transaction(self) -> Iterator[Portfolio]:
+        """Load-modify-save under a file lock shared with the scheduled job (same Azure Files volume)."""
+        lock = FileLock(self.path.with_name(".portfolio.lock"), ttl_seconds=60)
+        for _ in range(100):
+            if lock.try_acquire():
+                break
+            time.sleep(0.05)
+        else:
+            raise TimeoutError("portfolio is being updated; try again")
+        try:
+            portfolio = self.load()
+            yield portfolio
+            self.save(portfolio)
+        finally:
+            lock.release()
+
+    # -- price cache -------------------------------------------------------------------------------------
+
+    def cached_price(self, code: str, on: date) -> dict | None:
+        path = self.prices_dir / f"{on.isoformat()}.json"
+        try:
+            return json.loads(path.read_text(encoding="utf-8")).get(code)
+        except (OSError, ValueError):
+            return None
+
+    def cache_price(self, code: str, on: date, data: dict) -> None:
+        path = self.prices_dir / f"{on.isoformat()}.json"
+        try:
+            cache = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        except (OSError, ValueError):
+            cache = {}
+        cache[code] = data
+        atomic_write(path, json.dumps(cache, ensure_ascii=False))
+
+
+def summarize(portfolio: Portfolio) -> dict:
+    by_account: dict[str, dict] = {}
+    by_kind: dict[str, float] = {}
+    items = []
+    total_value = total_cost = 0.0
+    for h in portfolio.holdings:
+        value = h.market_value()
+        gain = (value - h.cost_total) if value is not None else None
+        items.append(
+            {
+                "id": h.id,
+                "account": h.account,
+                "account_label": ACCOUNT_LABELS[h.account],
+                "kind": h.kind,
+                "code": h.code,
+                "name": h.name,
+                "quantity": h.quantity,
+                "cost_total": round(h.cost_total),
+                "value": round(value) if value is not None else None,
+                "gain": round(gain) if gain is not None else None,
+                "price": h.price.model_dump() if h.price else None,
+            }
+        )
+        acc = by_account.setdefault(h.account, {"label": ACCOUNT_LABELS[h.account], "value": 0.0, "cost": 0.0})
+        acc["cost"] += h.cost_total
+        if value is not None:
+            acc["value"] += value
+            total_value += value
+            by_kind[h.kind] = by_kind.get(h.kind, 0.0) + value
+        total_cost += h.cost_total
+    missing = [i["name"] for i in items if i["value"] is None]
+    dates = sorted({i["price"]["date"] for i in items if i["price"]})
+    return {
+        "holdings": items,
+        "accounts": {k: {**v, "value": round(v["value"]), "cost": round(v["cost"])} for k, v in by_account.items()},
+        "allocation": {k: round(v / total_value, 4) for k, v in by_kind.items()} if total_value else {},
+        "total_value": round(total_value),
+        "total_cost": round(total_cost),
+        "total_gain": round(total_value - total_cost),
+        "oldest_price_date": dates[0] if dates else None,
+        "missing_prices": missing,
+        "note": "評価額は価格の日付時点の目安です。正確な評価額は証券会社の画面で確認してください。",
+    }
+
+
+def nisa_allowance(portfolio: Portfolio, year: int, limits: dict) -> dict:
+    used = portfolio.nisa_annual_used.get(str(year), NisaUsage())
+    lifetime_growth = sum(h.cost_total for h in portfolio.holdings if h.account == "nisa_growth")
+    lifetime_total = lifetime_growth + sum(h.cost_total for h in portfolio.holdings if h.account == "nisa_tsumitate")
+    lifetime_growth_left = max(0.0, limits["lifetime_growth"] - lifetime_growth)
+    lifetime_left = max(0.0, limits["lifetime_total"] - lifetime_total)
+    return {
+        "year": year,
+        "annual": {
+            "tsumitate": {"limit": limits["tsumitate_annual"], "used": round(used.tsumitate)},
+            "growth": {"limit": limits["growth_annual"], "used": round(used.growth)},
+        },
+        "annual_remaining": {
+            "tsumitate": round(max(0.0, min(limits["tsumitate_annual"] - used.tsumitate, lifetime_left))),
+            "growth": round(max(0.0, min(limits["growth_annual"] - used.growth, lifetime_growth_left, lifetime_left))),
+        },
+        "lifetime": {
+            "limit": limits["lifetime_total"],
+            "used_book_value": round(lifetime_total),
+            "remaining": round(lifetime_left),
+            "growth_limit": limits["lifetime_growth"],
+            "growth_used_book_value": round(lifetime_growth),
+            "growth_remaining": round(lifetime_growth_left),
+        },
+        "notes": [
+            "生涯投資枠は現在保有している NISA 銘柄の簿価（取得金額）で計算しています。"
+            "売却した分の枠は翌年に復活します。",
+            "年間の使用額は、画面で入力した今年の買付額（簿価）を使っています。",
+        ],
+    }
+
+
+class InvestmentSimParams(BaseModel):
+    initial: float = Field(default=0, ge=0, description="現在の元本（円）")
+    monthly_contribution: float = Field(default=0, ge=0, description="毎月の積立額（円）")
+    years: int = Field(ge=1, le=60, description="運用年数")
+    expected_return: float = Field(default=0.04, ge=-0.2, le=0.3, description="想定利回り（年率、信託報酬控除前）")
+    volatility: float = Field(default=0.15, ge=0, le=0.6, description="リスク（年率の標準偏差）")
+    expense_ratio: float = Field(default=0.001, ge=0, le=0.03, description="信託報酬（年率）")
+    tax_rate: float = Field(default=0.20315, ge=0, le=0.6, description="課税口座の税率")
+    simulations: int = Field(default=1000, ge=100, le=5000)
+    seed: int | None = Field(default=42, description="乱数の種（同じ条件なら同じ結果になる）")
+
+
+def simulate_investment(p: InvestmentSimParams) -> dict:
+    months = p.years * 12
+    net_annual = p.expected_return - p.expense_ratio
+    monthly_rate = (1 + net_annual) ** (1 / 12) - 1
+    principal = p.initial + p.monthly_contribution * months
+
+    deterministic, yearly = p.initial, []
+    for m in range(1, months + 1):
+        deterministic = deterministic * (1 + monthly_rate) + p.monthly_contribution
+        if m % 12 == 0:
+            yearly.append(
+                {
+                    "year": m // 12,
+                    "principal": round(p.initial + p.monthly_contribution * m),
+                    "value": round(deterministic),
+                }
+            )
+
+    rng = random.Random(p.seed)  # noqa: S311 - simulation, not cryptography
+    mu = math.log(1 + net_annual) / 12 - (p.volatility**2) / 24
+    sigma = p.volatility / math.sqrt(12)
+    finals = []
+    for _ in range(p.simulations):
+        value = p.initial
+        for _m in range(months):
+            value = value * math.exp(rng.gauss(mu, sigma)) + p.monthly_contribution
+        finals.append(value)
+    finals.sort()
+
+    def pct(q: float) -> int:
+        return round(finals[min(len(finals) - 1, int(q * len(finals)))])
+
+    gain = max(0.0, deterministic - principal)
+    return {
+        "principal": round(principal),
+        "expected_value": round(deterministic),
+        "percentiles": {"p10": pct(0.10), "p50": pct(0.50), "p90": pct(0.90)},
+        "yearly": yearly,
+        "after_tax": {
+            "nisa": round(deterministic),
+            "taxable": round(deterministic - gain * p.tax_rate),
+            "tax_saved_by_nisa": round(gain * p.tax_rate),
+        },
+        "assumptions": [
+            f"想定利回り {p.expected_return:.1%}、信託報酬 {p.expense_ratio:.2%}、リスク {p.volatility:.0%}（年率）",
+            f"モンテカルロ法 {p.simulations} 回の 10% / 50% / 90% 点を示しています。",
+            "課税口座は運用終了時に一括で売却した場合の税引後額です。",
+        ],
+        "chart": {"type": "investment", "x": "year", "series": ["principal", "value"]},
+        "disclaimer": "結果は目安であり、将来の運用成果を保証するものではありません。",
+    }
+
+
+class GainItem(BaseModel):
+    label: str = Field(default="", description="銘柄名など")
+    kind: Literal["sale", "dividend"] = "sale"
+    amount: float = Field(description="売却益（損失はマイナス）または配当金額（税引前、円）")
+
+
+class CapitalGainsParams(BaseModel):
+    items: list[GainItem]
+    tax_rate: float = Field(default=0.20315, ge=0, le=0.6)
+
+
+def estimate_capital_gains_tax(p: CapitalGainsParams) -> dict:
+    sales = sum(i.amount for i in p.items if i.kind == "sale")
+    dividends = sum(i.amount for i in p.items if i.kind == "dividend")
+    # Losses on sales offset dividends received in the same taxable account (損益通算).
+    net = sales + dividends
+    taxable = max(0.0, net)
+    return {
+        "sales_net": round(sales),
+        "dividends": round(dividends),
+        "taxable_amount": round(taxable),
+        "estimated_tax": math.floor(taxable * p.tax_rate),
+        "carryforward_loss": round(-net) if net < 0 else 0,
+        "notes": [
+            "特定口座（源泉徴収あり）の場合、税金は証券会社が計算して納付します。",
+            "損失は確定申告をすると翌年以降 3 年間繰り越せます。NISA 口座の損益は通算できません。",
+        ],
+        "disclaimer": "結果は目安です。正確な税額は証券会社の年間取引報告書や税理士に確認してください。",
+    }

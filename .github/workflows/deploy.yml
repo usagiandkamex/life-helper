@@ -1,0 +1,71 @@
+name: Deploy
+
+on:
+  # Deploy only commits that passed CI on main (and allow manual runs).
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # OIDC federation with Azure (no stored Azure credentials)
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # DEPLOY_ENABLED is a repository-level variable set by scripts/setup-cicd.ps1 (docs/setup.md step 3).
+    # Environment-level variables are not available in a job-level `if`.
+    if: >-
+      vars.DEPLOY_ENABLED == 'true' &&
+      (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      AZURE_ENV_NAME: ${{ vars.AZURE_ENV_NAME }}
+      AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+      LH_ALLOWED_GITHUB_USER_ID: "134019422"
+      LH_GITHUB_OAUTH_CLIENT_ID: ${{ vars.LH_GITHUB_OAUTH_CLIENT_ID }}
+      LH_GITHUB_OAUTH_CLIENT_SECRET: ${{ secrets.LH_GITHUB_OAUTH_CLIENT_SECRET }}
+      LH_SESSION_SECRET: ${{ secrets.LH_SESSION_SECRET }}
+      LH_TOKEN_ENCRYPTION_KEY: ${{ secrets.LH_TOKEN_ENCRYPTION_KEY }}
+      LH_STOOQ_API_KEY: ${{ secrets.LH_STOOQ_API_KEY }}
+      LH_RAKUTEN_APPLICATION_ID: ${{ secrets.LH_RAKUTEN_APPLICATION_ID }}
+      LH_RAKUTEN_ACCESS_KEY: ${{ secrets.LH_RAKUTEN_ACCESS_KEY }}
+      LH_GITHUB_APP_ID: ${{ vars.LH_GITHUB_APP_ID }}
+      LH_GITHUB_APP_PRIVATE_KEY: ${{ secrets.LH_GITHUB_APP_PRIVATE_KEY }}
+      LH_GITHUB_APP_INSTALLATION_ID: ${{ vars.LH_GITHUB_APP_INSTALLATION_ID }}
+      LH_NOTIFY_REPO: ${{ vars.LH_NOTIFY_REPO }}
+      LH_BUDGET_AMOUNT: ${{ vars.LH_BUDGET_AMOUNT }}
+      LH_BUDGET_EMAIL: ${{ vars.LH_BUDGET_EMAIL }}
+      LH_BUDGET_START_DATE: ${{ vars.LH_BUDGET_START_DATE }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Deploy exactly the commit that CI tested.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - uses: Azure/setup-azd@v2
+      - name: Sign in to Azure with azd (OIDC)
+        run: azd auth login --client-id "$AZURE_CLIENT_ID" --federated-credential-provider github --tenant-id "$AZURE_TENANT_ID"
+      - name: Sign in to Azure CLI (OIDC, used by the postdeploy hook)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Install the Azure CLI containerapp extension (needed by the postdeploy hook)
+        run: az extension add --name containerapp --upgrade --yes
+      - name: Provision (keeps the currently deployed image)
+        run: azd provision --no-prompt
+      - name: Deploy the app image (the postdeploy hook points the job at the same image)
+        run: azd deploy --no-prompt
+      - name: Re-apply the infrastructure with the new image
+        # Needed on the very first deployment so the app switches from the placeholder (port 80) to port 8000 + /data.
+        run: azd provision --no-prompt

@@ -1,0 +1,64 @@
+# 2025 年分（令和 7 年分）の税・制度パラメータ。
+# 出典を確認して status を verified にしてください。provisional の間は計算結果に警告を表示します。
+year: 2025
+status: provisional
+sources:
+  - https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1410.htm   # 給与所得控除
+  - https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1199.htm   # 基礎控除
+  - https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/2260.htm   # 所得税の税率
+  - https://www.soumu.go.jp/main_sosiki/jichi_zeisei/czaisei/czaisei_seido/furusato/mechanism/deduction.html  # ふるさと納税の控除
+  - https://www.fsa.go.jp/policy/nisa2/about/index.html                  # NISA
+
+# 給与所得控除: 収入が upto 以下の区間で rate * 収入 + add（min があれば下限）
+employment_income_deduction:
+  - { upto: 1900000, fixed: 650000 }
+  - { upto: 3600000, rate: 0.30, add: 80000 }
+  - { upto: 6600000, rate: 0.20, add: 440000 }
+  - { upto: 8500000, rate: 0.10, add: 1100000 }
+  - { upto: null, fixed: 1950000 }
+
+# 所得税の基礎控除（合計所得金額が upto 以下）
+income_tax_basic_deduction:
+  - { upto: 1320000, amount: 950000 }
+  - { upto: 3360000, amount: 880000 }
+  - { upto: 4890000, amount: 680000 }
+  - { upto: 6550000, amount: 630000 }
+  - { upto: 23500000, amount: 580000 }
+  - { upto: 24000000, amount: 480000 }
+  - { upto: 24500000, amount: 320000 }
+  - { upto: 25000000, amount: 160000 }
+  - { upto: null, amount: 0 }
+
+resident_tax_basic_deduction: 430000
+
+# 所得税の税率（課税所得 upto 以下の区間の限界税率）
+income_tax_brackets:
+  - { upto: 1950000, rate: 0.05, deduction: 0 }
+  - { upto: 3300000, rate: 0.10, deduction: 97500 }
+  - { upto: 6950000, rate: 0.20, deduction: 427500 }
+  - { upto: 9000000, rate: 0.23, deduction: 636000 }
+  - { upto: 18000000, rate: 0.33, deduction: 1536000 }
+  - { upto: 40000000, rate: 0.40, deduction: 2796000 }
+  - { upto: null, rate: 0.45, deduction: 4796000 }
+
+reconstruction_surtax_rate: 0.021
+resident_tax_rate: 0.10
+resident_tax_income_rate_basic: 0.10  # ふるさと納税の計算に使う住民税基本分の率
+
+# 人的控除（所得税 / 住民税）と、調整控除に使う人的控除差
+personal_deductions:
+  spouse: { income_tax: 380000, resident_tax: 330000, diff: 50000, spouse_income_limit: 580000 }
+  dependent_general: { income_tax: 380000, resident_tax: 330000, diff: 50000 }     # 16〜18 歳、23〜69 歳
+  dependent_specific: { income_tax: 630000, resident_tax: 450000, diff: 180000 }   # 19〜22 歳
+  dependent_elderly: { income_tax: 480000, resident_tax: 380000, diff: 100000 }    # 70 歳以上（同居老親等以外）
+  basic_diff: 50000
+
+life_insurance_deduction_max: { income_tax: 120000, resident_tax: 70000 }
+
+nisa:
+  tsumitate_annual: 1200000
+  growth_annual: 2400000
+  lifetime_total: 18000000
+  lifetime_growth: 12000000
+
+capital_gains_tax_rate: 0.20315

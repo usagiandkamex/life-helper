@@ -1,0 +1,23 @@
+# 楽天証券の「保有商品一覧（すべて）」CSV の列対応。
+# 実際の CSV の見出しと違う場合は、この候補リストに見出しを追加してください（コード変更は不要）。
+name: rakuten
+label: 楽天証券
+encodings: [cp932, utf-8-sig]
+columns:
+  kind: ["種別"]
+  code: ["銘柄コード・ティッカー", "銘柄コード"]
+  name: ["銘柄", "銘柄名", "ファンド名"]
+  account: ["口座", "口座区分"]
+  quantity: ["保有数量", "保有口数", "数量"]
+  avg_cost: ["平均取得価額", "取得単価"]
+  cost_total: ["取得総額[円]", "取得金額[円]", "取得金額"]
+  price: ["現在値", "基準価額"]
+  valuation: ["時価評価額[円]", "評価額[円]", "時価評価額"]
+required: [quantity, valuation]
+accounts:
+  nisa_tsumitate: ["つみたて投資枠", "つみたてNISA"]
+  nisa_growth: ["成長投資枠", "NISA成長"]
+  ideco: ["iDeCo", "確定拠出"]
+  tokutei: ["特定"]
+  ippan: ["一般"]
+fund_markers: ["投資信託", "投信"]

@@ -1,0 +1,54 @@
+[project]
+name = "life-helper"
+version = "0.1.0"
+description = "Private life-support chat app built on the GitHub Copilot SDK"
+authors = [{ name = "usagiandkamex" }]
+requires-python = ">=3.12"
+dependencies = [
+    "croniter>=6.2.4",
+    "cryptography>=50.0.1",
+    "fastapi>=0.141.1",
+    "github-copilot-sdk>=1.0.14",
+    "httpx>=0.28.1",
+    "itsdangerous>=2.2.0",
+    "pydantic-settings>=2.15.0",
+    "pyjwt[crypto]>=2.10.0",
+    "pypdf>=6.19.0",
+    "python-multipart>=0.0.32",
+    "pyyaml>=6.0.3",
+    "tzdata>=2026.4",
+    "uvicorn[standard]>=0.53.0",
+]
+
+[project.scripts]
+life-helper-job = "life_helper.jobs:cli"
+
+[build-system]
+requires = ["uv_build>=0.10.6,<0.11.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "respx>=0.23.1",
+    "ruff>=0.16.8",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S", "ASYNC"]
+ignore = ["S101", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106", "S108", "ASYNC109", "E501"]
+"src/life_helper/copilot_integration/system_prompt.py" = ["E501"]
+"src/life_helper/resources/**" = ["E501"]

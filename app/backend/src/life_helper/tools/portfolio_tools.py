@@ -1,0 +1,156 @@
+"""Copilot tools for NISA, funds and stocks."""
+
+from __future__ import annotations
+
+from datetime import date
+from typing import TYPE_CHECKING, Literal
+
+from copilot import define_tool
+from pydantic import BaseModel, Field
+
+from ..connectors.base import ConnectorError
+from ..market.portfolio import (
+    Account,
+    CapitalGainsParams,
+    Holding,
+    InvestmentSimParams,
+    Kind,
+    Price,
+    estimate_capital_gains_tax,
+    simulate_investment,
+    summarize,
+)
+from ..market.service import nisa_status, portfolio_store, refresh_stock_prices, stock_price
+from .registry import ToolSpec
+
+if TYPE_CHECKING:
+    from ..context import AppContext
+
+
+class EmptyParams(BaseModel):
+    pass
+
+
+class StockPriceParams(BaseModel):
+    code: str = Field(description="証券コード（例: 7203、1306）")
+
+
+class NisaParams(BaseModel):
+    year: int = Field(description="対象の年（西暦）")
+
+
+class UpdateHoldingParams(BaseModel):
+    action: Literal["add", "update", "delete"]
+    id: str | None = Field(default=None, description="update / delete の対象 ID（get_portfolio の結果にある id）")
+    account: Account | None = None
+    kind: Kind | None = None
+    code: str | None = None
+    name: str | None = None
+    quantity: float | None = Field(default=None, ge=0)
+    cost_total: float | None = Field(default=None, ge=0, description="取得金額の合計（円）")
+    price: float | None = Field(default=None, gt=0, description="株価、または投資信託の 1 万口あたり基準価額")
+    price_date: date | None = None
+    price_source: Literal["nav_site", "manual"] = "manual"
+
+
+def apply_holding_update(ctx: AppContext, p: UpdateHoldingParams) -> dict:
+    price_date = (p.price_date or date.today()).isoformat()
+    with portfolio_store(ctx).transaction() as portfolio:
+        if p.action == "add":
+            if not (p.account and p.kind and p.name and p.quantity is not None and p.cost_total is not None):
+                return {"error": "add には account・kind・name・quantity・cost_total が必要です"}
+            holding = Holding(
+                account=p.account,
+                kind=p.kind,
+                code=p.code or "",
+                name=p.name,
+                quantity=p.quantity,
+                cost_total=p.cost_total,
+            )
+            if p.price:
+                holding.apply_price(Price(value=p.price, date=price_date, source=p.price_source))
+            portfolio.holdings.append(holding)
+            return {"ok": True, "id": holding.id}
+        target = next((h for h in portfolio.holdings if h.id == p.id), None)
+        if target is None:
+            return {"error": f"id {p.id} の銘柄が見つかりません"}
+        if p.action == "delete":
+            portfolio.holdings.remove(target)
+        else:
+            for field in ("account", "kind", "code", "name", "quantity", "cost_total"):
+                value = getattr(p, field)
+                if value is not None:
+                    setattr(target, field, value)
+            if p.price:
+                target.apply_price(Price(value=p.price, date=price_date, source=p.price_source))
+        return {"ok": True, "id": target.id}
+
+
+def build_tools(ctx: AppContext) -> list[ToolSpec]:
+    @define_tool(
+        name="get_portfolio",
+        description="保有銘柄、口座区分ごとの評価額・含み損益・資産配分、価格の日付と出どころを返す。",
+        skip_permission=True,
+    )
+    def get_portfolio(params: EmptyParams) -> dict:
+        portfolio = portfolio_store(ctx).load()
+        return summarize(portfolio) | {"nisa": nisa_status(ctx, portfolio, date.today().year)}
+
+    @define_tool(
+        name="get_stock_price",
+        description="国内株・ETF・REIT の前日終値を Stooq から取得する（当日取得済みならキャッシュを使う）。",
+    )
+    async def get_stock_price(params: StockPriceParams) -> dict:
+        try:
+            return await stock_price(ctx, params.code)
+        except ConnectorError as e:
+            return {"error": str(e)}
+
+    @define_tool(
+        name="refresh_stock_prices",
+        description="保有している国内株・ETF・REIT の価格を Stooq の前日終値で更新する"
+        "（証券会社 CSV より新しい場合のみ）。",
+    )
+    async def refresh_prices(params: EmptyParams) -> dict:
+        return await refresh_stock_prices(ctx)
+
+    @define_tool(
+        name="check_nisa_allowance",
+        description="NISA の年間投資枠・生涯投資枠の使用状況と残りを計算する。",
+        skip_permission=True,
+    )
+    def check_nisa_allowance(params: NisaParams) -> dict:
+        return nisa_status(ctx, portfolio_store(ctx).load(), params.year)
+
+    @define_tool(
+        name="simulate_investment",
+        description="積立投資の将来シミュレーション（期待値とモンテカルロ法の幅、NISA と課税口座の税引後比較）。",
+        skip_permission=True,
+    )
+    def simulate_investment_tool(params: InvestmentSimParams) -> dict:
+        return simulate_investment(params)
+
+    @define_tool(
+        name="estimate_capital_gains_tax",
+        description="課税口座の売却益・配当の税額の目安を計算する（損益通算を含む）。",
+        skip_permission=True,
+    )
+    def estimate_tax(params: CapitalGainsParams) -> dict:
+        return estimate_capital_gains_tax(params)
+
+    @define_tool(
+        name="update_holding",
+        description="保有銘柄を追加・更新・削除する。利用者が明確に頼んだときだけ使う。",
+    )
+    def update_holding(params: UpdateHoldingParams) -> dict:
+        return apply_holding_update(ctx, params)
+
+    return [
+        ToolSpec(get_portfolio),
+        ToolSpec(get_stock_price, connector="stooq"),
+        ToolSpec(refresh_prices, writes=True, connector="stooq"),
+        ToolSpec(check_nisa_allowance),
+        ToolSpec(simulate_investment_tool),
+        ToolSpec(estimate_tax),
+        ToolSpec(update_holding, writes=True),
+    ]
