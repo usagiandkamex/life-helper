@@ -18,6 +18,8 @@ from .base import Connector, ConnectorError, ConnectorInfo
 
 MAX_CANDIDATES = 20
 MIN_SCORE = 0.6
+# A NAV per price unit above this is not a real fund price; refusing it keeps unusable numbers out of the file.
+MAX_NAV = 100_000_000
 MUFG_API = "https://developer.am.mufg.jp"
 # The fund code shape tells the API which code was given; guessing is not possible, so it is derived here.
 MUFG_CODE_TYPES = (("isin_cd", 12), ("association_fund_cd", 8), ("fund_cd", 6))
@@ -50,7 +52,7 @@ def nav_amount(raw: object, *, label: str = "基準価額") -> float:
         value = float(str(raw).replace(",", "").strip())
     except (TypeError, ValueError):
         raise ConnectorError(f"取得した{label}が不正です") from None
-    if not math.isfinite(value) or value <= 0:
+    if not math.isfinite(value) or value <= 0 or value > MAX_NAV:
         raise ConnectorError(f"取得した{label}が不正です")
     return value
 
@@ -102,22 +104,28 @@ class MufgFundApiConnector(FundNavConnector):
     min_interval_seconds = 1.0
 
     @staticmethod
-    def code_path(fund_code: str) -> str:
-        """``0331418A`` -> ``association_fund_cd/0331418A``. Also keeps the code out of the URL path if invalid."""
+    def code_field(fund_code: str) -> tuple[str, str]:
+        """``0331418A`` -> ``("association_fund_cd", "0331418A")``. Also keeps an invalid code out of the URL."""
         code = fund_code.strip().upper()
         if not re.fullmatch(r"[0-9A-Z]+", code):
             raise ConnectorError(f"ファンドコードの形式が正しくありません: {fund_code}")
         for code_type, length in MUFG_CODE_TYPES:
             if len(code) == length and (code_type != "fund_cd" or code.isdigit()):
-                return f"{code_type}/{code}"
+                return code_type, code
         raise ConnectorError(f"ファンドコードの形式が正しくありません: {fund_code}")
 
+    @classmethod
+    def code_path(cls, fund_code: str) -> str:
+        code_type, code = cls.code_field(fund_code)
+        return f"{code_type}/{code}"
+
     async def fund_nav(self, fund_code: str, *, today: date | None = None) -> dict:
-        path = f"/fund_information_latest/{self.code_path(fund_code)}"
+        code_type, code = self.code_field(fund_code)
+        path = f"/fund_information_latest/{code_type}/{code}"
         datasets = await self._datasets(path)
         if not datasets:
             raise FundNotFoundError(f"{fund_code} のファンド情報が見つかりませんでした")
-        return self._nav(datasets[0], fund_code, MUFG_API + path, today or date.today())
+        return self._nav(datasets[0], (code_type, code), MUFG_API + path, today or date.today())
 
     async def search_funds(self, name: str) -> list[dict]:
         candidates = []
@@ -151,11 +159,11 @@ class MufgFundApiConnector(FundNavConnector):
                 return code
         return ""
 
-    def _nav(self, data: dict, requested: str, source_url: str, today: date) -> dict:
-        known = {str(data.get(k) or "").strip().upper() for k in ("fund_cd", "isin_cd", "association_fund_cd")}
-        if requested.strip().upper() not in known:
-            # Never value a holding with another fund's NAV, whatever the API answered.
-            raise ConnectorError(f"照会した {requested} とは別のファンドの情報が返りました")
+    def _nav(self, data: dict, requested: tuple[str, str], source_url: str, today: date) -> dict:
+        code_type, code = requested
+        # Never value a holding with another fund's NAV: the code must come back in the field it was asked for.
+        if str(data.get(code_type) or "").strip().upper() != code:
+            raise ConnectorError(f"照会した {code} とは別のファンドの情報が返りました")
         return {
             "fund_code": self._code(data),
             "name": str(data.get("fund_name") or "").strip(),
@@ -181,9 +189,11 @@ class MufgFundApiConnector(FundNavConnector):
             payload = response.json()
         except ValueError:
             raise ConnectorError(f"{self.manager} から想定外の応答が返りました（JSON ではありません）") from None
-        if not isinstance(payload, dict) or not isinstance(payload.get("datasets"), list):
-            errors = payload.get("errors") if isinstance(payload, dict) else None
-            if isinstance(errors, dict) and errors.get("count"):
-                raise ConnectorError(f"{self.manager} の API がエラーを返しました")
+        if not isinstance(payload, dict):
+            raise ConnectorError(f"{self.manager} から想定外の応答が返りました（JSON ではありません）")
+        errors = payload.get("errors")
+        if isinstance(errors, dict) and errors.get("count"):
+            raise ConnectorError(f"{self.manager} の API がエラーを返しました")
+        if not isinstance(payload.get("datasets"), list):
             raise ConnectorError(f"{self.manager} から想定外の応答が返りました（datasets がありません）")
         return [d for d in payload["datasets"] if isinstance(d, dict)]

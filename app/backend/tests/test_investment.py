@@ -11,7 +11,7 @@ from pydantic import SecretStr
 
 from life_helper.connectors.registry import get_connectors
 from life_helper.market.broker_csv import BrokerCsvError, load_mapping, parse_broker_csv
-from life_helper.market.funds import refresh_fund_navs
+from life_helper.market.funds import link_fund, refresh_fund_navs
 from life_helper.market.portfolio import (
     CapitalGainsParams,
     FundRef,
@@ -522,3 +522,54 @@ def test_refresh_prices_updates_stocks_and_funds_independently(client, ctx, sett
     # 100 x 3,000 + 500,000 / 10,000 x 25,341 + 300,000 / 10,000 x 30,000
     assert view["total_value"] == 300_000 + 1_267_050 + 900_000
     assert view["missing_prices"] == [] and view["stale_prices"] == []
+
+
+async def test_relinking_a_fund_drops_the_price_of_the_previous_one(ctx):
+    holding = _fund(500_000)
+    holding.apply_price(Price(value=25_000, date=NAV_DAY.isoformat(), source="mufg_api"))
+    with portfolio_store(ctx).transaction() as portfolio:
+        portfolio.holdings = [holding]
+    _mufg_ready(ctx)
+    with respx.mock:
+        # The NAV of the fund now picked is older than the one already stored for the fund picked before.
+        mock_mufg({"0331C180": (30_000, OLDER_DAY.strftime("%Y%m%d"))})
+        result = await link_fund(ctx, holding.id, "mufg_api", "0331C180")
+    assert result["fund"]["fund_code"] == "0331C180"
+    # The holding is another fund now, so it is valued with that fund's NAV instead of keeping the previous one.
+    relinked = portfolio_store(ctx).load().holdings[0]
+    assert (relinked.price.value, relinked.price.date) == (30_000, OLDER_DAY.isoformat())
+    assert relinked.market_value() == 1_500_000
+
+
+async def test_manual_fallback_can_use_another_price_unit(ctx):
+    holding = Holding(account="ideco", kind="fund", name="1 口単位のファンド", quantity=1_200, cost_total=1_000)
+    with portfolio_store(ctx).transaction() as portfolio:
+        portfolio.holdings = [holding]
+    assert (await link_fund(ctx, holding.id, "manual", "", 1))["fund"]["price_unit"] == 1
+    with portfolio_store(ctx).transaction() as portfolio:
+        portfolio.holdings[0].apply_price(Price(value=2.5, date=NAV_DAY.isoformat(), source="manual"))
+    assert portfolio_store(ctx).load().holdings[0].market_value() == Decimal("3000")
+
+
+def test_csv_reimport_keeps_the_confirmed_fund_link(client, ctx):
+    csrf = sign_in(client, ctx)
+    headers = {"x-csrf-token": csrf}
+
+    def upload(csv: str) -> dict:
+        return client.post(
+            "/api/portfolio/import",
+            data={"broker": "rakuten"},
+            files={"file": ("a.csv", csv.encode("utf-8-sig"))},
+            headers=headers,
+        ).json()
+
+    upload(RAKUTEN_CSV)
+    with portfolio_store(ctx).transaction() as portfolio:
+        fund = next(h for h in portfolio.holdings if h.kind == "fund")
+        fund.fund = FundRef(provider="mufg_api", fund_code="0331418A", manager="三菱UFJアセットマネジメント")
+    # A CSV import replaces the holdings, but the fund the user already confirmed stays linked.
+    again = [h for h in upload(RAKUTEN_CSV)["holdings"] if h["kind"] == "fund"]
+    assert again[0]["fund"]["fund_code"] == "0331418A" and again[0]["auto_nav"] is True
+    # A fund the user never confirmed is not linked just because its name looks similar.
+    renamed = [h for h in upload(RAKUTEN_CSV.replace("楽天・全米株式", "楽天・全米株式インデックス"))["holdings"]]
+    assert [h["fund"] for h in renamed if h["kind"] == "fund"] == [None]

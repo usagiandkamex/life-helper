@@ -9,8 +9,8 @@ from ..auth import CurrentUser, require_user
 from ..context import AppContext, get_ctx
 from ..tools.portfolio_tools import UpdateHoldingParams, apply_holding_update
 from .broker_csv import BrokerCsvError, list_brokers, load_mapping, parse_broker_csv
-from .funds import fund_providers, link_fund, refresh_fund_navs, suggest_funds
-from .portfolio import InvestmentSimParams, simulate_investment, summarize
+from .funds import fund_providers, keep_fund_links, link_fund, refresh_fund_navs, suggest_funds
+from .portfolio import DEFAULT_PRICE_UNIT, InvestmentSimParams, simulate_investment, summarize
 from .service import portfolio_store, refresh_stock_prices
 
 router = APIRouter(prefix="/api/portfolio")
@@ -20,6 +20,9 @@ class FundLinkParams(BaseModel):
     id: str = Field(description="保有銘柄の ID")
     provider: str = Field(description="データ提供元（manual は手入力のまま）")
     fund_code: str = Field(default="", max_length=32, description="提供元のファンドコード")
+    price_unit: float = Field(
+        default=DEFAULT_PRICE_UNIT, gt=0, le=1_000_000, description="手入力のときの価格単位（通常は 1 万口）"
+    )
 
 
 def _view(ctx: AppContext) -> dict:
@@ -62,6 +65,7 @@ async def import_csv(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
     # The CSV is a full snapshot from the broker, so it replaces the holdings.
     with portfolio_store(ctx).transaction() as portfolio:
+        keep_fund_links(portfolio.holdings, holdings)
         portfolio.holdings = holdings
     return _view(ctx) | {"imported": len(holdings)}
 
@@ -87,7 +91,7 @@ async def fund_candidates(
 async def set_fund_link(
     body: FundLinkParams, user: CurrentUser = Depends(require_user), ctx: AppContext = Depends(get_ctx)
 ) -> dict:
-    result = await link_fund(ctx, body.id, body.provider, body.fund_code)
+    result = await link_fund(ctx, body.id, body.provider, body.fund_code, body.price_unit)
     if "error" in result:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, result["error"])
     return _view(ctx) | {"link": result}

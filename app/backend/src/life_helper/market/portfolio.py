@@ -199,13 +199,14 @@ def is_stale(price: Price | None, *, today: date | None = None) -> bool:
 def summarize(portfolio: Portfolio, *, today: date | None = None) -> dict:
     today = today or date.today()
     by_account: dict[str, dict] = {}
-    by_kind: dict[str, Decimal] = {}
+    by_kind: dict[str, int] = {}
     items = []
-    total_value = total_cost = Decimal(0)
+    total_value = total_cost = 0
     for h in portfolio.holdings:
-        value = h.market_value()
-        cost = Decimal(str(h.cost_total))
-        gain = (value - cost) if value is not None else None
+        exact = h.market_value()
+        # Each holding is rounded to yen once and the totals add those, so the rows and the total always agree.
+        value = yen(exact) if exact is not None else None
+        cost = yen(Decimal(str(h.cost_total)))
         items.append(
             {
                 "id": h.id,
@@ -215,9 +216,9 @@ def summarize(portfolio: Portfolio, *, today: date | None = None) -> dict:
                 "code": h.code,
                 "name": h.name,
                 "quantity": h.quantity,
-                "cost_total": yen(cost),
-                "value": yen(value) if value is not None else None,
-                "gain": yen(gain) if gain is not None else None,
+                "cost_total": cost,
+                "value": value,
+                "gain": (value - cost) if value is not None else None,
                 "price": h.price.model_dump() if h.price else None,
                 "fund": h.fund.model_dump() if h.fund else None,
                 "price_unit": float(h.price_unit),
@@ -225,24 +226,22 @@ def summarize(portfolio: Portfolio, *, today: date | None = None) -> dict:
                 "stale": is_stale(h.price, today=today),
             }
         )
-        acc = by_account.setdefault(
-            h.account, {"label": ACCOUNT_LABELS[h.account], "value": Decimal(0), "cost": Decimal(0)}
-        )
+        acc = by_account.setdefault(h.account, {"label": ACCOUNT_LABELS[h.account], "value": 0, "cost": 0})
         acc["cost"] += cost
         if value is not None:
             acc["value"] += value
             total_value += value
-            by_kind[h.kind] = by_kind.get(h.kind, Decimal(0)) + value
+            by_kind[h.kind] = by_kind.get(h.kind, 0) + value
         total_cost += cost
     missing = [i["name"] for i in items if i["value"] is None]
     dates = sorted({i["price"]["date"] for i in items if i["price"]})
     return {
         "holdings": items,
-        "accounts": {k: {**v, "value": yen(v["value"]), "cost": yen(v["cost"])} for k, v in by_account.items()},
-        "allocation": ({k: round(float(v / total_value), 4) for k, v in by_kind.items()} if total_value else {}),
-        "total_value": yen(total_value),
-        "total_cost": yen(total_cost),
-        "total_gain": yen(total_value - total_cost),
+        "accounts": by_account,
+        "allocation": ({k: round(v / total_value, 4) for k, v in by_kind.items()} if total_value else {}),
+        "total_value": total_value,
+        "total_cost": total_cost,
+        "total_gain": total_value - total_cost,
         "oldest_price_date": dates[0] if dates else None,
         "missing_prices": missing,
         "stale_prices": [i["name"] for i in items if i["stale"]],

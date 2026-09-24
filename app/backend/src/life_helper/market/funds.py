@@ -75,7 +75,24 @@ async def suggest_funds(ctx: AppContext, name: str) -> dict:
     }
 
 
-async def link_fund(ctx: AppContext, holding_id: str, provider: str, fund_code: str = "") -> dict:
+def keep_fund_links(previous: list[Holding], imported: list[Holding]) -> None:
+    """Carries confirmed fund links over a CSV import, which replaces the holdings.
+
+    Only an identical fund name is carried over. A name that merely looks similar is left for the user to
+    confirm again, so a re-import can never move a link to another fund.
+    """
+    links: dict[str, FundRef] = {}
+    for h in previous:
+        if h.kind == "fund" and h.fund:
+            links.setdefault(h.name, h.fund)
+    for h in imported:
+        if h.kind == "fund" and h.fund is None and h.name in links:
+            h.fund = links[h.name].model_copy(deep=True)
+
+
+async def link_fund(
+    ctx: AppContext, holding_id: str, provider: str, fund_code: str = "", price_unit: float = DEFAULT_PRICE_UNIT
+) -> dict:
     """Ties a holding to an official fund after the user picked it. ``manual`` keeps the hand-entered NAV."""
     holding = _holding(ctx, holding_id)
     if holding is None:
@@ -84,13 +101,14 @@ async def link_fund(ctx: AppContext, holding_id: str, provider: str, fund_code: 
         return {"error": "基準価額の取得元は投資信託にだけ設定できます"}
     quote = None
     if provider == MANUAL_PROVIDER:
-        fund = FundRef(provider=MANUAL_PROVIDER, price_unit=float(holding.price_unit))
+        fund = FundRef(provider=MANUAL_PROVIDER, price_unit=price_unit)
     else:
         connector = fund_connectors(ctx).get(provider)
         if connector is None:
             return {"error": f"対応していないデータ提供元です: {provider}"}
         try:
             quote = await connector.fund_nav(fund_code)
+            price = nav_price(quote)
         except ConnectorError as e:
             return {"error": str(e)}
         fund = FundRef(
@@ -104,11 +122,22 @@ async def link_fund(ctx: AppContext, holding_id: str, provider: str, fund_code: 
         )
     with portfolio_store(ctx).transaction() as portfolio:
         target = next((h for h in portfolio.holdings if h.id == holding_id), None)
-        if target is None:
-            return {"error": f"id {holding_id} の銘柄が見つかりません"}
+        if target is None or target.kind != "fund":
+            return {"error": f"id {holding_id} の投資信託が見つかりません"}
+        # A price kept from another fund, or quoted for another number of units, would value this holding wrongly.
+        relinked = target.fund is not None and (target.fund.provider, target.fund.fund_code) != (
+            fund.provider,
+            fund.fund_code,
+        )
+        unit_changed = float(target.price_unit) != fund.price_unit
         target.fund = fund
         if quote:
-            target.apply_price(nav_price(quote))
+            if relinked or unit_changed:
+                target.price, target.valuation_yen = price, None
+            else:
+                target.apply_price(price)
+        elif unit_changed:
+            target.price, target.valuation_yen = None, None
     official = quote["name"] if quote else None
     return {"ok": True, "id": holding_id, "fund": fund.model_dump(mode="json"), "official_name": official}
 
@@ -120,16 +149,18 @@ async def refresh_fund_navs(ctx: AppContext) -> dict:
     connectors = fund_connectors(ctx)
     holdings = [h for h in store.load().holdings if h.kind == "fund"]
     wanted = sorted({(h.fund.provider, h.fund.fund_code) for h in holdings if h.fund and h.fund.automatic})
-    quotes: dict[tuple[str, str], dict] = {}
+    quotes: dict[tuple[str, str], tuple[dict, Price]] = {}
     errors = []
-    # Fetch first, then apply under the file lock, so the lock is never held across network calls.
+    # Fetch and validate first, then apply under the file lock: the lock is never held across network calls,
+    # and a malformed answer is turned into an error for that fund instead of aborting every other update.
     for provider, code in wanted:
         connector = connectors.get(provider)
         if connector is None:
             errors.append({"code": code, "error": f"対応していないデータ提供元です（{provider}）"})
             continue
         try:
-            quotes[(provider, code)] = await connector.fund_nav(code, today=today)
+            quote = await connector.fund_nav(code, today=today)
+            quotes[(provider, code)] = (quote, nav_price(quote))
         except ConnectorError as e:
             errors.append({"code": code, "error": str(e)})
         except (ValueError, KeyError, TypeError):
@@ -140,10 +171,11 @@ async def refresh_fund_navs(ctx: AppContext) -> dict:
         for holding in portfolio.holdings:
             if holding.kind != "fund" or not holding.fund or not holding.fund.automatic:
                 continue
-            quote = quotes.get((holding.fund.provider, holding.fund.fund_code))
+            found = quotes.get((holding.fund.provider, holding.fund.fund_code))
             # apply_price keeps the newer NAV, so a provider replaying an old date never overwrites a newer one.
-            if not quote or not holding.apply_price(nav_price(quote)):
+            if not found or not holding.apply_price(found[1]):
                 continue
+            quote = found[0]
             holding.fund.price_unit = quote["price_unit"]
             holding.fund.source_url = quote["source_url"]
             updated.append(

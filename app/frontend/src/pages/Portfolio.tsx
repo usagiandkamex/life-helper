@@ -147,12 +147,12 @@ export function PortfolioPage() {
   }
 
   // Linking always needs this click: a similar name alone never decides which fund a holding is.
-  const linkFund = async (target: Holding, provider: string, fundCode: string) => {
+  const linkFund = async (target: Holding, provider: string, fundCode: string, priceUnit = 10000) => {
     const ok = await run(
       () =>
         api<PortfolioView>('/api/portfolio/fund-link', {
           method: 'POST',
-          body: json({ id: target.id, provider, fund_code: fundCode }),
+          body: json({ id: target.id, provider, fund_code: fundCode, price_unit: priceUnit }),
         }),
       () =>
         provider === 'manual'
@@ -453,9 +453,21 @@ export function PortfolioPage() {
           <p className="hint">
             候補は名前が似ているだけのファンドを含みます。公式名称とファンドコードを確認してから選んでください。
           </p>
-          <button className="button small" disabled={busy} onClick={() => linkFund(fundTarget, 'manual', '')}>
-            自動取得を使わず手入力にする
-          </button>
+          <form
+            className="row wrap"
+            onSubmit={(e) => {
+              e.preventDefault()
+              linkFund(fundTarget, 'manual', '', Number(new FormData(e.currentTarget).get('price_unit')))
+            }}
+          >
+            <label>
+              価格単位（口）
+              <input name="price_unit" type="number" min="1" step="1" defaultValue={fundTarget.price_unit} required />
+            </label>
+            <button className="button small" disabled={busy}>
+              自動取得を使わず手入力にする
+            </button>
+          </form>
         </section>
       )}
 

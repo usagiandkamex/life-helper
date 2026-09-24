@@ -316,11 +316,16 @@ async def test_mufg_search_offers_candidates(mufg):
 
 @respx.mock
 async def test_mufg_never_values_a_holding_with_another_fund(mufg):
-    respx.get(url__startswith="https://developer.am.mufg.jp").mock(
-        return_value=httpx.Response(200, json=mufg_payload(SP500 | {"nav": 30_000, "base_date": "20260924"}))
-    )
+    mufg.min_interval_seconds = 0
+    route = respx.get(url__startswith="https://developer.am.mufg.jp")
+    route.mock(return_value=httpx.Response(200, json=mufg_payload(SP500 | {"nav": 30_000, "base_date": "20260924"})))
     with pytest.raises(ConnectorError, match="別のファンド"):
         await mufg.fund_nav("0331418A", today=date(2026, 9, 25))
+    # The code has to come back in the field it was asked for: another fund's ISIN is not an association code.
+    mixed = ALL_COUNTRY | {"isin_cd": "JP90C000FYT1", "association_fund_cd": "JP90C000H1T1", "nav": 1}
+    route.mock(return_value=httpx.Response(200, json=mufg_payload(mixed | {"base_date": "20260924"})))
+    with pytest.raises(ConnectorError, match="別のファンド"):
+        await mufg.fund_nav("JP90C000H1T1", today=date(2026, 9, 25))
 
 
 @respx.mock
@@ -332,10 +337,23 @@ async def test_mufg_failures_are_distinguished(mufg):
         (httpx.Response(503, text=""), "HTTP 503"),
         (httpx.Response(200, text="<html>maintenance</html>"), "JSON ではありません"),
         (httpx.Response(200, json={"result": {"status": 400}, "errors": {"count": 1}}), "エラーを返しました"),
+        # An error next to a dataset is still an error: the dataset is not used.
+        (
+            httpx.Response(
+                200,
+                json=mufg_payload(ALL_COUNTRY | {"nav": 1, "base_date": "20260924"}) | {"errors": {"count": 1}},
+            ),
+            "エラーを返しました",
+        ),
         (httpx.Response(200, json={"result": {"status": 200}}), "datasets がありません"),
         (httpx.Response(200, json=mufg_payload()), "見つかりませんでした"),
         (httpx.Response(200, json=mufg_payload(ALL_COUNTRY | {"nav": 0, "base_date": "20260924"})), "基準価額が不正"),
         (httpx.Response(200, json=mufg_payload(ALL_COUNTRY | {"base_date": "20260924"})), "基準価額が不正"),
+        # A number too large to be a NAV is refused here, so it never reaches the portfolio file.
+        (
+            httpx.Response(200, json=mufg_payload(ALL_COUNTRY | {"nav": 1e100, "base_date": "20260924"})),
+            "基準価額が不正",
+        ),
         (httpx.Response(200, json=mufg_payload(ALL_COUNTRY | {"nav": 1, "base_date": "2026-99-99"})), "基準日が不正"),
         (httpx.Response(200, json=mufg_payload(ALL_COUNTRY | {"nav": 1, "base_date": "20261005"})), "未来の日付"),
     ):
