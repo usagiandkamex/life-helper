@@ -1,4 +1,4 @@
-"""Portfolio model and storage (money/portfolio.yaml), valuation, NISA allowance, simulations and tax estimates."""
+"""Portfolio model and storage (money/portfolio.yaml), valuation, simulations and tax estimates."""
 
 from __future__ import annotations
 
@@ -70,15 +70,8 @@ class Holding(BaseModel):
         return True
 
 
-class NisaUsage(BaseModel):
-    tsumitate: float = 0
-    growth: float = 0
-
-
 class Portfolio(BaseModel):
     holdings: list[Holding] = Field(default_factory=list)
-    # Purchases made in NISA per year (簿価). Entered by the user or taken from the broker's annual report.
-    nisa_annual_used: dict[str, NisaUsage] = Field(default_factory=dict)
     updated_at: str | None = None
 
 
@@ -181,38 +174,6 @@ def summarize(portfolio: Portfolio) -> dict:
         "oldest_price_date": dates[0] if dates else None,
         "missing_prices": missing,
         "note": "評価額は価格の日付時点の目安です。正確な評価額は証券会社の画面で確認してください。",
-    }
-
-
-def nisa_allowance(portfolio: Portfolio, year: int, limits: dict) -> dict:
-    used = portfolio.nisa_annual_used.get(str(year), NisaUsage())
-    lifetime_growth = sum(h.cost_total for h in portfolio.holdings if h.account == "nisa_growth")
-    lifetime_total = lifetime_growth + sum(h.cost_total for h in portfolio.holdings if h.account == "nisa_tsumitate")
-    lifetime_growth_left = max(0.0, limits["lifetime_growth"] - lifetime_growth)
-    lifetime_left = max(0.0, limits["lifetime_total"] - lifetime_total)
-    return {
-        "year": year,
-        "annual": {
-            "tsumitate": {"limit": limits["tsumitate_annual"], "used": round(used.tsumitate)},
-            "growth": {"limit": limits["growth_annual"], "used": round(used.growth)},
-        },
-        "annual_remaining": {
-            "tsumitate": round(max(0.0, min(limits["tsumitate_annual"] - used.tsumitate, lifetime_left))),
-            "growth": round(max(0.0, min(limits["growth_annual"] - used.growth, lifetime_growth_left, lifetime_left))),
-        },
-        "lifetime": {
-            "limit": limits["lifetime_total"],
-            "used_book_value": round(lifetime_total),
-            "remaining": round(lifetime_left),
-            "growth_limit": limits["lifetime_growth"],
-            "growth_used_book_value": round(lifetime_growth),
-            "growth_remaining": round(lifetime_growth_left),
-        },
-        "notes": [
-            "生涯投資枠は現在保有している NISA 銘柄の簿価（取得金額）で計算しています。"
-            "売却した分の枠は翌年に復活します。",
-            "年間の使用額は、画面で入力した今年の買付額（簿価）を使っています。",
-        ],
     }
 
 

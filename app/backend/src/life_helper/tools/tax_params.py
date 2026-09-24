@@ -1,4 +1,4 @@
-"""Year-specific tax and NISA parameters loaded from YAML (kept separate from code so they can be updated yearly)."""
+"""Year-specific tax parameters loaded from YAML (kept separate from code so they can be updated yearly)."""
 
 from __future__ import annotations
 

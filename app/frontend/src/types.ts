@@ -56,14 +56,6 @@ export type PortfolioView = {
   oldest_price_date: string | null
   missing_prices: string[]
   note: string
-  nisa: {
-    year: number
-    annual: Record<'tsumitate' | 'growth', { limit: number; used: number }>
-    annual_remaining: Record<'tsumitate' | 'growth', number>
-    lifetime: { limit: number; used_book_value: number; remaining: number; growth_remaining: number }
-    notes: string[]
-    warnings: string[]
-  }
   brokers: { name: string; label: string }[]
   updated_at: string | null
   imported?: number

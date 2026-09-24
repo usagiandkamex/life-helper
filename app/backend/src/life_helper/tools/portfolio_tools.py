@@ -1,4 +1,4 @@
-"""Copilot tools for NISA, funds and stocks."""
+"""Copilot tools for the portfolio, funds and stocks."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from ..market.portfolio import (
     simulate_investment,
     summarize,
 )
-from ..market.service import nisa_status, portfolio_store, refresh_stock_prices, stock_price
+from ..market.service import portfolio_store, refresh_stock_prices, stock_price
 from .registry import ToolSpec
 
 if TYPE_CHECKING:
@@ -33,10 +33,6 @@ class EmptyParams(BaseModel):
 
 class StockPriceParams(BaseModel):
     code: str = Field(description="証券コード（例: 7203、1306）")
-
-
-class NisaParams(BaseModel):
-    year: int = Field(description="対象の年（西暦）")
 
 
 class UpdateHoldingParams(BaseModel):
@@ -93,8 +89,7 @@ def build_tools(ctx: AppContext) -> list[ToolSpec]:
         skip_permission=True,
     )
     def get_portfolio(params: EmptyParams) -> dict:
-        portfolio = portfolio_store(ctx).load()
-        return summarize(portfolio) | {"nisa": nisa_status(ctx, portfolio, date.today().year)}
+        return summarize(portfolio_store(ctx).load())
 
     @define_tool(
         name="get_stock_price",
@@ -113,14 +108,6 @@ def build_tools(ctx: AppContext) -> list[ToolSpec]:
     )
     async def refresh_prices(params: EmptyParams) -> dict:
         return await refresh_stock_prices(ctx)
-
-    @define_tool(
-        name="check_nisa_allowance",
-        description="NISA の年間投資枠・生涯投資枠の使用状況と残りを計算する。",
-        skip_permission=True,
-    )
-    def check_nisa_allowance(params: NisaParams) -> dict:
-        return nisa_status(ctx, portfolio_store(ctx).load(), params.year)
 
     @define_tool(
         name="simulate_investment",
@@ -149,7 +136,6 @@ def build_tools(ctx: AppContext) -> list[ToolSpec]:
         ToolSpec(get_portfolio),
         ToolSpec(get_stock_price, connector="stooq"),
         ToolSpec(refresh_prices, writes=True, connector="stooq"),
-        ToolSpec(check_nisa_allowance),
         ToolSpec(simulate_investment_tool),
         ToolSpec(estimate_tax),
         ToolSpec(update_holding, writes=True),

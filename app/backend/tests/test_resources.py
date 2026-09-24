@@ -23,7 +23,8 @@ def test_seed_and_params_present():
     assert (RESOURCES / "seed" / "profile" / "about-me.md").exists()
     for year in ("2025", "2026"):
         params = yaml.safe_load((RESOURCES / "tax_params" / f"{year}.yaml").read_text(encoding="utf-8"))
-        assert params["year"] == int(year) and params["sources"] and params["nisa"]["lifetime_total"] == 18_000_000
+        assert params["year"] == int(year) and params["sources"] and params["capital_gains_tax_rate"] == 0.20315
+        assert "nisa" not in params
     for broker in ("sbi", "rakuten"):
         mapping = yaml.safe_load((RESOURCES / "broker_csv" / f"{broker}.yaml").read_text(encoding="utf-8"))
         assert set(mapping["required"]) <= set(mapping["columns"])

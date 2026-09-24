@@ -7,7 +7,6 @@ sources:
   - https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1199.htm   # 基礎控除
   - https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/2260.htm   # 所得税の税率
   - https://www.soumu.go.jp/main_sosiki/jichi_zeisei/czaisei/czaisei_seido/furusato/mechanism/deduction.html  # ふるさと納税の控除
-  - https://www.fsa.go.jp/policy/nisa2/about/index.html                  # NISA
 
 # 給与所得控除: 収入が upto 以下の区間で rate * 収入 + add（min があれば下限）
 employment_income_deduction:
@@ -54,11 +53,5 @@ personal_deductions:
   basic_diff: 50000
 
 life_insurance_deduction_max: { income_tax: 120000, resident_tax: 70000 }
-
-nisa:
-  tsumitate_annual: 1200000
-  growth_annual: 2400000
-  lifetime_total: 18000000
-  lifetime_growth: 12000000
 
 capital_gains_tax_rate: 0.20315
