@@ -169,6 +169,10 @@ export function PortfolioPage() {
 
   // The manual fallback also has to set the NAV: switching the source alone would leave the old price in place.
   const setManualNav = async (target: Holding, priceUnit: number, nav: number) => {
+    if (!(nav > 0) || !(priceUnit > 0)) {
+      setError('基準価額と価格単位には 0 より大きい数値を入力してください')
+      return
+    }
     const ok = await run(
       async () => {
         await api<PortfolioView>('/api/portfolio/fund-link', {
@@ -526,7 +530,7 @@ export function PortfolioPage() {
           </form>
           <p className="hint">
             公式サイトに載っている基準価額と、その口数単位（通常 1 万口）を入力してください。評価額は「保有口数 ÷ 価格単位 ×
-            基準価額」で計算します。エラーが出たときは基準価額が反映されていないので、入力し直してください。
+            基準価額」で計算します。エラーが出たときは基準価額が反映されていない場合があるので、表示されている基準価額を確認し、必要なら入力し直してください。
           </p>
         </section>
       )}
