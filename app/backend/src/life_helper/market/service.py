@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 from typing import TYPE_CHECKING
 
@@ -12,7 +13,13 @@ from .portfolio import PortfolioStore, Price
 if TYPE_CHECKING:
     from ..context import AppContext
 
+logger = logging.getLogger(__name__)
+
 PRICED_BY_STOOQ = ("stock", "etf", "reit")
+# Six characters, so it can never clash with a security code in the per-day price cache.
+FX_CACHE_CODE = "USDJPY"
+QUOTE_KEYS = frozenset({"code", "symbol", "market", "currency", "close", "close_jpy", "date", "source"})
+FX_KEYS = frozenset({"pair", "symbol", "date", "rate", "source"})
 
 
 def portfolio_store(ctx: AppContext) -> PortfolioStore:
@@ -23,39 +30,119 @@ def portfolio_store(ctx: AppContext) -> PortfolioStore:
     return store
 
 
-async def stock_price(ctx: AppContext, code: str, *, today: date | None = None) -> dict:
+def _cached(store: PortfolioStore, code: str, on: date, keys: frozenset[str]) -> dict | None:
+    """Same-day cache entry, ignored when it was written before the current fields existed."""
+    cached = store.cached_price(code, on)
+    return cached if isinstance(cached, dict) and keys <= cached.keys() else None
+
+
+async def usd_jpy_rate(ctx: AppContext, *, today: date | None = None, memo: dict | None = None) -> dict:
+    """USD/JPY previous close. Cached for the day; ``memo`` also avoids repeating a failure within one refresh."""
     today = today or date.today()
+    if memo is not None and "error" in memo:
+        raise memo["error"]
     store = portfolio_store(ctx)
-    cached = store.cached_price(code, today)
+    cached = _cached(store, FX_CACHE_CODE, today, FX_KEYS)
+    if cached:
+        return cached
+    try:
+        rate = await get_connectors(ctx)["stooq"].usd_jpy(today=today)
+    except ConnectorError as e:
+        if memo is not None:
+            memo["error"] = e
+        raise
+    store.cache_price(FX_CACHE_CODE, today, rate)
+    return rate
+
+
+async def _in_yen(ctx: AppContext, quote: dict, *, today: date, fx_memo: dict | None) -> dict:
+    """Adds the yen value. US closes are converted with USD/JPY; without a rate the quote is not usable."""
+    if quote["market"] != "us":
+        return quote | {"close_jpy": quote["close"], "fx_rate": None, "fx_date": None, "fx_source": None}
+    try:
+        fx = await usd_jpy_rate(ctx, today=today, memo=fx_memo)
+    except ConnectorError as e:
+        raise ConnectorError(
+            f"米国株の価格（{quote['close']} {quote['currency']}）は取得できましたが、"
+            f"USD/JPY を取得できなかったため円換算できませんでした（{e}）"
+        ) from None
+    return quote | {
+        "close_jpy": quote["close"] * fx["rate"],
+        "fx_rate": fx["rate"],
+        "fx_date": fx["date"],
+        "fx_source": fx["source"],
+    }
+
+
+async def stock_price(ctx: AppContext, code: str, *, today: date | None = None, fx_memo: dict | None = None) -> dict:
+    """Previous close of a Japanese or US stock, in its own currency and in yen (cached per day)."""
+    today = today or date.today()
+    key = code.strip().upper()
+    store = portfolio_store(ctx)
+    cached = _cached(store, key, today, QUOTE_KEYS)
     if cached:
         return cached | {"cached": True}
-    result = await get_connectors(ctx)["stooq"].previous_close(code, today=today)
-    store.cache_price(code, today, result)
-    return result | {"cached": False}
+    quote = await get_connectors(ctx)["stooq"].previous_close(code, today=today)
+    quote = await _in_yen(ctx, quote, today=today, fx_memo=fx_memo)
+    store.cache_price(key, today, quote)
+    return quote | {"cached": False}
+
+
+def _price(quote: dict) -> Price:
+    return Price(
+        value=quote["close_jpy"],
+        date=quote["date"],
+        source="stooq",
+        market=quote["market"],
+        symbol=quote["symbol"],
+        local_currency=quote["currency"],
+        local_value=quote["close"],
+        fx_rate=quote["fx_rate"],
+        fx_date=quote["fx_date"],
+        fx_source=quote["fx_source"],
+    )
 
 
 async def refresh_stock_prices(ctx: AppContext) -> dict:
     store = portfolio_store(ctx)
+    today = date.today()
     codes = sorted({h.code for h in store.load().holdings if h.kind in PRICED_BY_STOOQ and h.code})
-    prices: dict[str, dict] = {}
+    prices: dict[str, Price] = {}
     errors = []
+    fx_memo: dict = {}
     # Fetch first, then apply under the file lock, so the lock is never held across network calls.
+    # A failure for one code only removes that code from the update.
     for code in codes:
         try:
-            prices[code] = await stock_price(ctx, code)
+            prices[code] = _price(await stock_price(ctx, code, today=today, fx_memo=fx_memo))
         except ConnectorError as e:
             errors.append({"code": code, "error": str(e)})
+        except (ValueError, KeyError, TypeError):
+            logger.warning("could not build a price for %s", code, exc_info=True)
+            errors.append({"code": code, "error": "取得した株価を取り込めませんでした（データの形式が不正です）"})
     updated = []
     with store.transaction() as portfolio:
         for holding in portfolio.holdings:
-            result = prices.get(holding.code) if holding.kind in PRICED_BY_STOOQ else None
-            if result and holding.apply_price(Price(value=result["close"], date=result["date"], source="stooq")):
+            price = prices.get(holding.code) if holding.kind in PRICED_BY_STOOQ else None
+            if price and holding.apply_price(price.model_copy()):
                 updated.append(
-                    {"code": holding.code, "name": holding.name, "close": result["close"], "date": result["date"]}
+                    {
+                        "code": holding.code,
+                        "name": holding.name,
+                        "market": price.market,
+                        "symbol": price.symbol,
+                        "currency": price.local_currency,
+                        "close": price.local_value,
+                        "close_jpy": price.value,
+                        "date": price.date,
+                        "fx_rate": price.fx_rate,
+                        "fx_date": price.fx_date,
+                    }
                 )
     return {
         "updated": updated,
         "errors": errors,
-        "note": "投資信託は Stooq の対象外です。"
+        "note": "株価は Stooq の前日終値（日本株・米国株）です。米国株は USD/JPY で円換算しています。"
+        "投資信託は Stooq の対象外です。"
         "基準価額はチャットで運用会社のサイトから取得するか、手入力してください。",
     }

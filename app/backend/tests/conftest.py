@@ -60,3 +60,21 @@ def sign_in(client: TestClient, ctx, login: str = "usagiandkamex") -> str:
         resp = client.post("/auth/dev-login")
     assert resp.status_code == 200, resp.text
     return client.get("/api/me").json()["csrf_token"]
+
+
+def stooq_csv(close: float, day: str = "2026-09-24") -> str:
+    return f"Date,Open,High,Low,Close,Volume\n{day},1,1,1,{close},1\n"
+
+
+def mock_stooq(bodies: dict[str, float | str]):
+    """Mocks the Stooq CSV endpoint per symbol. Unknown symbols answer "No data", like Stooq does."""
+    import httpx
+    import respx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = bodies.get(request.url.params["s"])
+        if body is None:
+            return httpx.Response(200, text="No data")
+        return httpx.Response(200, text=body if isinstance(body, str) else stooq_csv(body))
+
+    return respx.get("https://stooq.com/q/d/l/").mock(side_effect=handler)

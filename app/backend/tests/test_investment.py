@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 import httpx
@@ -7,6 +8,7 @@ import pytest
 import respx
 from pydantic import SecretStr
 
+from life_helper.connectors.registry import get_connectors
 from life_helper.market.broker_csv import BrokerCsvError, load_mapping, parse_broker_csv
 from life_helper.market.portfolio import (
     CapitalGainsParams,
@@ -20,8 +22,9 @@ from life_helper.market.portfolio import (
     simulate_investment,
     summarize,
 )
+from life_helper.market.service import portfolio_store, refresh_stock_prices, stock_price
 
-from .conftest import sign_in
+from .conftest import mock_stooq, sign_in
 
 BROKER_DIR = Path(__file__).resolve().parents[1] / "src" / "life_helper" / "resources" / "broker_csv"
 
@@ -62,6 +65,21 @@ def test_legacy_nisa_usage_in_saved_yaml_is_dropped(tmp_path):
     saved = store.save(store.load())
     assert [(h.id, h.account, h.cost_total) for h in saved.holdings] == [("abc", "nisa_growth", 100_000)]
     assert "nisa_annual_used" not in store.path.read_text(encoding="utf-8")
+
+
+def test_legacy_price_without_market_loads(tmp_path):
+    """Prices saved before US stocks were supported have no market, symbol or currency and are yen prices."""
+    store = PortfolioStore(tmp_path)
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text(
+        "holdings:\n"
+        "  - {id: abc, account: tokutei, kind: stock, code: '7203', name: トヨタ, quantity: 100,"
+        " cost_total: 250000, price: {value: 3000, date: '2026-09-20', source: stooq}}\n",
+        encoding="utf-8",
+    )
+    holding = store.load().holdings[0]
+    assert (holding.price.market, holding.price.symbol, holding.price.local_value) == (None, None, None)
+    assert holding.price.local_currency == "JPY" and holding.market_value() == 300_000
 
 
 def test_simulate_investment_zero_return_and_percentiles():
@@ -195,6 +213,84 @@ def test_portfolio_api_import_refresh_and_holdings(client, ctx, settings):
     ).json()
     assert any(x["account"] == "ideco" for x in added["holdings"])
     assert client.post("/api/portfolio/holdings", json={"action": "delete", "id": "nope"}, headers=h).status_code == 400
+
+
+def _stooq_ready(ctx, settings) -> None:
+    settings.stooq_api_key = SecretStr("stooqkey-ABCDEF123456")
+    ctx.extras.pop("connectors", None)
+    get_connectors(ctx)["stooq"].min_interval_seconds = 0
+
+
+def test_refresh_prices_values_japanese_and_us_stocks(client, ctx, settings):
+    csrf = sign_in(client, ctx)
+    with portfolio_store(ctx).transaction() as portfolio:
+        portfolio.holdings = [
+            Holding(account="tokutei", kind="stock", code="7203", name="トヨタ", quantity=100, cost_total=250_000),
+            Holding(account="tokutei", kind="stock", code="MSFT", name="Microsoft", quantity=10, cost_total=400_000),
+            Holding(account="nisa_growth", kind="stock", code="AAPL", name="Apple", quantity=5, cost_total=100_000),
+            Holding(account="ippan", kind="stock", code="NOPE", name="謎の銘柄", quantity=1, cost_total=1_000),
+        ]
+    _stooq_ready(ctx, settings)
+    with respx.mock:
+        route = mock_stooq({"7203.jp": 3_000, "msft.us": 100, "aapl.us": 200, "usdjpy": 150})
+        view = client.post("/api/portfolio/refresh-prices", headers={"x-csrf-token": csrf}).json()
+
+    updated = {u["code"]: u for u in view["refresh"]["updated"]}
+    assert (updated["7203"]["market"], updated["7203"]["symbol"], updated["7203"]["currency"]) == (
+        "jp",
+        "7203.jp",
+        "JPY",
+    )
+    assert updated["7203"]["close"] == 3_000 and updated["7203"]["close_jpy"] == 3_000
+    assert (updated["MSFT"]["market"], updated["MSFT"]["symbol"], updated["MSFT"]["currency"]) == (
+        "us",
+        "msft.us",
+        "USD",
+    )
+    # 100 USD x 150 JPY/USD = 15,000 JPY
+    assert updated["MSFT"]["close"] == 100 and updated["MSFT"]["close_jpy"] == 15_000
+    assert (updated["MSFT"]["fx_rate"], updated["MSFT"]["fx_date"]) == (150, "2026-09-24")
+    assert view["total_value"] == 100 * 3_000 + 10 * 15_000 + 5 * 30_000
+    # One code failing does not stop the others, and the reason names the symbols that were tried.
+    assert view["missing_prices"] == ["謎の銘柄"]
+    assert view["refresh"]["errors"] == [
+        {"code": "NOPE", "error": "nope.us と nope.jp を照会しましたが、価格データが見つかりませんでした"}
+    ]
+    # USD/JPY is fetched once for the whole refresh.
+    assert [c.request.url.params["s"] for c in route.calls].count("usdjpy") == 1
+
+    msft = next(h for h in view["holdings"] if h["code"] == "MSFT")
+    assert msft["price"]["local_value"] == 100 and msft["price"]["local_currency"] == "USD"
+    assert msft["price"]["value"] == 15_000 and msft["price"]["fx_source"] == "stooq"
+
+
+async def test_us_price_is_not_stored_as_yen_without_fx(ctx, settings):
+    with portfolio_store(ctx).transaction() as portfolio:
+        portfolio.holdings = [
+            Holding(account="tokutei", kind="stock", code="MSFT", name="Microsoft", quantity=10, cost_total=400_000)
+        ]
+    _stooq_ready(ctx, settings)
+    with respx.mock:
+        mock_stooq({"msft.us": 100})  # USD/JPY is unavailable
+        result = await refresh_stock_prices(ctx)
+    assert result["updated"] == []
+    assert result["errors"][0]["code"] == "MSFT"
+    assert "100.0 USD" in result["errors"][0]["error"] and "円換算できませんでした" in result["errors"][0]["error"]
+    assert portfolio_store(ctx).load().holdings[0].price is None
+
+
+async def test_price_cache_without_market_is_refetched(ctx, settings):
+    """Entries cached before US stocks were supported have no market or yen value, so they are fetched again."""
+    today = date.today()
+    portfolio_store(ctx).cache_price(
+        "7203", today, {"code": "7203", "symbol": "7203.jp", "date": "2026-09-20", "close": 2_000, "source": "stooq"}
+    )
+    _stooq_ready(ctx, settings)
+    with respx.mock:
+        mock_stooq({"7203.jp": 3_000})
+        quote = await stock_price(ctx, "7203", today=today)
+        assert (quote["market"], quote["close"], quote["close_jpy"], quote["cached"]) == ("jp", 3_000, 3_000, False)
+        assert (await stock_price(ctx, "7203", today=today))["cached"] is True
 
 
 def test_investment_tools_registered(ctx):

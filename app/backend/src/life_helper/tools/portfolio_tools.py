@@ -32,7 +32,7 @@ class EmptyParams(BaseModel):
 
 
 class StockPriceParams(BaseModel):
-    code: str = Field(description="証券コード（例: 7203、1306）")
+    code: str = Field(description="証券コードまたはティッカー（例: 7203、1306、MSFT）")
 
 
 class UpdateHoldingParams(BaseModel):
@@ -93,7 +93,8 @@ def build_tools(ctx: AppContext) -> list[ToolSpec]:
 
     @define_tool(
         name="get_stock_price",
-        description="国内株・ETF・REIT の前日終値を Stooq から取得する（当日取得済みならキャッシュを使う）。",
+        description="日本株・米国株・ETF・REIT の前日終値を Stooq から取得する"
+        "（米国株は USD/JPY で円換算。当日取得済みならキャッシュを使う）。",
     )
     async def get_stock_price(params: StockPriceParams) -> dict:
         try:
@@ -103,8 +104,8 @@ def build_tools(ctx: AppContext) -> list[ToolSpec]:
 
     @define_tool(
         name="refresh_stock_prices",
-        description="保有している国内株・ETF・REIT の価格を Stooq の前日終値で更新する"
-        "（証券会社 CSV より新しい場合のみ）。",
+        description="保有している日本株・米国株・ETF・REIT の価格を Stooq の前日終値で更新する"
+        "（証券会社 CSV より新しい場合のみ。米国株は USD/JPY で円換算）。",
     )
     async def refresh_prices(params: EmptyParams) -> dict:
         return await refresh_stock_prices(ctx)
