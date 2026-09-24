@@ -64,12 +64,25 @@ jobs:
         run: az extension add --name containerapp --upgrade --yes
       - name: Preserve the currently deployed image
         run: |
-          APP_NAME=$(az containerapp list \
+          # The Azure CLI occasionally fails with transient network errors, which would
+          # otherwise drop the current image and redeploy the placeholder one.
+          retry_az() {
+            for attempt in 1 2 3; do
+              if OUTPUT=$(az "$@"); then
+                printf '%s' "$OUTPUT"
+                return 0
+              fi
+              echo "az $* failed (attempt $attempt), retrying..." >&2
+              sleep $((attempt * 10))
+            done
+            return 1
+          }
+          APP_NAME=$(retry_az containerapp list \
             --resource-group "rg-${AZURE_ENV_NAME}" \
             --query "[?tags.\"azd-service-name\"=='app'].name | [0]" \
             --output tsv)
           if [ -n "$APP_NAME" ]; then
-            CURRENT_IMAGE=$(az containerapp show \
+            CURRENT_IMAGE=$(retry_az containerapp show \
               --resource-group "rg-${AZURE_ENV_NAME}" \
               --name "$APP_NAME" \
               --query "properties.template.containers[0].image" \
