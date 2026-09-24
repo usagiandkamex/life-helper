@@ -23,6 +23,8 @@ from ..knowledge.store import atomic_write
 Account = Literal["nisa_tsumitate", "nisa_growth", "tokutei", "ippan", "ideco"]
 Kind = Literal["stock", "etf", "reit", "fund"]
 PriceSource = Literal["broker_csv", "stooq", "nav_site", "manual"]
+Market = Literal["jp", "us"]
+Currency = Literal["JPY", "USD"]
 
 ACCOUNT_LABELS = {
     "nisa_tsumitate": "NISA つみたて投資枠",
@@ -36,9 +38,19 @@ TAXABLE_ACCOUNTS = ("tokutei", "ippan")
 
 
 class Price(BaseModel):
-    value: float = Field(description="株価（円）。投資信託は 1 万口あたりの基準価額")
+    """A price in yen. US stocks also keep the local (USD) price and the rate used to convert it."""
+
+    value: float = Field(description="円換算後の価格。投資信託は 1 万口あたりの基準価額")
     date: str = Field(description="価格の日付（YYYY-MM-DD）")
     source: PriceSource
+    # Optional, so that portfolios saved before US stocks were supported still load.
+    market: Market | None = Field(default=None, description="日本株（jp）か米国株（us）か")
+    symbol: str | None = Field(default=None, description="取得に使った Stooq のシンボル（例: msft.us）")
+    local_currency: Currency = Field(default="JPY", description="現地通貨（米国株は USD）")
+    local_value: float | None = Field(default=None, description="現地通貨建ての価格（米国株は USD）")
+    fx_rate: float | None = Field(default=None, description="円換算に使った USD/JPY")
+    fx_date: str | None = Field(default=None, description="為替レートの日付（YYYY-MM-DD）")
+    fx_source: PriceSource | None = Field(default=None, description="為替レートの取得元")
 
 
 class Holding(BaseModel):

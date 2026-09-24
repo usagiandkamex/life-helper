@@ -9,10 +9,10 @@ import respx
 
 from life_helper.connectors.base import ConnectorError
 from life_helper.connectors.rakuten_travel import RakutenTravelConnector, parse_vacancies
-from life_helper.connectors.stooq import StooqConnector, to_stooq_symbol
+from life_helper.connectors.stooq import StooqConnector, symbol_candidates, to_stooq_symbol
 from life_helper.security import SecretMasker
 
-from .conftest import sign_in
+from .conftest import mock_stooq, sign_in, stooq_csv
 
 STOOQ_KEY = "stooqkey-ABCDEF123456"
 APP_ID = "e5e2671a-b454-4e6f-aaaa-bbbbccccdddd"
@@ -43,8 +43,17 @@ def test_symbol_conversion():
     assert to_stooq_symbol("7203") == "7203.jp"
     assert to_stooq_symbol("130a") == "130a.jp"
     assert to_stooq_symbol("7203.T") == "7203.jp"
-    with pytest.raises(ConnectorError):
-        to_stooq_symbol("../x")
+    assert to_stooq_symbol("7203.JP") == "7203.jp"
+    assert to_stooq_symbol("MSFT") == "msft.us"
+    assert to_stooq_symbol("aapl") == "aapl.us"
+    assert to_stooq_symbol("MSFT.US") == "msft.us"
+    # The code shape only picks the market to try first; the other one stays available as a fallback.
+    assert symbol_candidates("7203") == [("jp", "7203.jp"), ("us", "7203.us")]
+    assert symbol_candidates("MSFT") == [("us", "msft.us"), ("jp", "msft.jp")]
+    assert symbol_candidates("MSFT.JP") == [("jp", "msft.jp"), ("us", "msft.us")]
+    for bad in ("../x", "", "1", "TOOLONG", "７２０３"):
+        with pytest.raises(ConnectorError):
+            to_stooq_symbol(bad)
 
 
 @respx.mock
@@ -54,13 +63,83 @@ async def test_stooq_previous_close(stooq, masker):
     )
     route = respx.get("https://stooq.com/q/d/l/").mock(return_value=httpx.Response(200, text=csv_body))
     result = await stooq.previous_close("7203", today=date(2026, 9, 25))
-    assert result == {"code": "7203", "symbol": "7203.jp", "date": "2026-09-24", "close": 3080.0, "source": "stooq"}
+    assert result == {
+        "code": "7203",
+        "symbol": "7203.jp",
+        "market": "jp",
+        "currency": "JPY",
+        "date": "2026-09-24",
+        "close": 3080.0,
+        "source": "stooq",
+    }
     sent = route.calls.last.request.url
     assert sent.params["apikey"] == STOOQ_KEY and sent.params["s"] == "7203.jp"
     assert STOOQ_KEY not in str(result)
     # The key is registered with the masker as soon as the connector is created.
     assert masker.mask_text(f"x?apikey={STOOQ_KEY}") == "x?apikey=***"
     assert stooq.last_used() is not None
+
+
+@respx.mock
+async def test_stooq_previous_close_us_ticker(stooq):
+    route = mock_stooq({"msft.us": 517.93})
+    result = await stooq.previous_close("MSFT", today=date(2026, 9, 25))
+    assert (result["market"], result["symbol"], result["currency"], result["close"]) == ("us", "msft.us", "USD", 517.93)
+    assert [c.request.url.params["s"] for c in route.calls] == ["msft.us"]
+
+
+@respx.mock
+async def test_stooq_falls_back_to_the_other_market(stooq):
+    stooq.min_interval_seconds = 0
+    route = mock_stooq({"7203.us": 12.5})
+    result = await stooq.previous_close("7203", today=date(2026, 9, 25))
+    assert (result["market"], result["symbol"], result["currency"]) == ("us", "7203.us", "USD")
+    assert [c.request.url.params["s"] for c in route.calls] == ["7203.jp", "7203.us"]
+
+
+@respx.mock
+async def test_stooq_reports_the_symbols_it_tried(stooq):
+    stooq.min_interval_seconds = 0
+    mock_stooq({})
+    with pytest.raises(ConnectorError) as e:
+        await stooq.previous_close("MSFT", today=date(2026, 9, 25))
+    assert "msft.us と msft.jp を照会しました" in str(e.value)
+
+
+@respx.mock
+async def test_stooq_usd_jpy(stooq):
+    mock_stooq({"usdjpy": 150.25})
+    assert await stooq.usd_jpy(today=date(2026, 9, 25)) == {
+        "pair": "USDJPY",
+        "symbol": "usdjpy",
+        "date": "2026-09-24",
+        "rate": 150.25,
+        "source": "stooq",
+    }
+
+
+@respx.mock
+async def test_stooq_failures_are_distinguished(stooq):
+    stooq.min_interval_seconds = 0
+    route = respx.get("https://stooq.com/q/d/l/")
+    for body, message in (
+        ("Exceeded the daily hits limit", "利用上限"),
+        ("<html>get your apikey</html>", "API キーが無効"),
+        ("<html>maintenance</html>", "想定外の応答"),
+        ("", "想定外の応答"),
+        ("Date,Open,High,Low\n2026-09-24,1,1,1\n", "想定外の応答"),
+        (stooq_csv(0), "株価が不正"),
+        ("Date,Open,High,Low,Close,Volume\n2026-99-99,1,1,1,10,1\n", "日付が不正"),
+        (stooq_csv(10, "2026-10-05"), "日付が不正"),
+    ):
+        route.mock(return_value=httpx.Response(200, text=body))
+        with pytest.raises(ConnectorError, match=message):
+            await stooq.previous_close("7203", today=date(2026, 9, 25))
+    route.mock(return_value=httpx.Response(503, text=""))
+    with pytest.raises(ConnectorError, match="HTTP 503"):
+        await stooq.previous_close("7203", today=date(2026, 9, 25))
+    # A bad key or a broken answer must not be retried on the other market.
+    assert all(call.request.url.params["s"] == "7203.jp" for call in route.calls)
 
 
 @respx.mock

@@ -7,7 +7,7 @@ description: NISA・iDeCo・投資信託・株の保有状況の確認、積立�
 
 ## できること
 - `get_portfolio`: 保有銘柄、口座区分（NISA つみたて / 成長・特定・一般・iDeCo）ごとの評価額・含み損益・資産配分
-- `get_stock_price`: 国内株・ETF・REIT の前日終値（Stooq。キャッシュ優先）
+- `get_stock_price`: 日本株・米国株・ETF・REIT の前日終値（Stooq。キャッシュ優先。米国株は USD/JPY で円換算）
 - `simulate_investment`: 積立の将来シミュレーション（幅のある結果、NISA と課税口座の税引後比較）
 - `estimate_capital_gains_tax`: 課税口座の売却益・配当の税額の目安
 - `update_holding`: 保有銘柄の追加・更新・削除（利用者が明確に頼んだときだけ使う）

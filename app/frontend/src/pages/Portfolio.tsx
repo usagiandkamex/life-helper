@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { api, formatDate, json, yen } from '../api'
 import { LazyChart } from '../components/LazyChart'
 import { Disclaimer } from '../components/Markdown'
-import type { ChartData, PortfolioView } from '../types'
+import type { ChartData, PortfolioView, Price } from '../types'
 
 const ACCOUNTS = [
   ['nisa_tsumitate', 'NISA つみたて投資枠'],
@@ -18,6 +18,35 @@ const KINDS = [
   ['reit', 'REIT'],
 ] as const
 const SOURCE_LABELS: Record<string, string> = { broker_csv: '証券会社 CSV', stooq: 'Stooq', nav_site: '基準価額サイト', manual: '手入力' }
+const MARKET_LABELS: Record<string, string> = { jp: '日本株', us: '米国株' }
+
+const amount = (value: number) => value.toLocaleString('ja-JP', { maximumFractionDigits: 2 })
+const label = (labels: Record<string, string>, key: string | null | undefined) => (key ? labels[key] ?? key : '')
+
+function PriceCell({ price }: { price: Price | null }) {
+  if (!price) return <>—</>
+  const market = [label(MARKET_LABELS, price.market), price.symbol].filter(Boolean).join(' ')
+  const converted = price.local_currency === 'USD' && price.local_value !== null && price.local_value !== undefined
+  return (
+    <>
+      <div>{amount(price.value)} 円</div>
+      <small>
+        {market && `${market}・`}
+        {price.date}・{label(SOURCE_LABELS, price.source)}
+      </small>
+      {converted && (
+        <div>
+          <small>
+            {amount(price.local_value as number)} USD
+            {price.fx_rate
+              ? ` × ${amount(price.fx_rate)} 円/USD（${price.fx_date ?? '—'}・${label(SOURCE_LABELS, price.fx_source)}）`
+              : '（円換算前）'}
+          </small>
+        </div>
+      )}
+    </>
+  )
+}
 
 export function PortfolioPage() {
   const [view, setView] = useState<PortfolioView | null>(null)
@@ -65,7 +94,7 @@ export function PortfolioPage() {
         () => api<PortfolioView>('/api/portfolio/refresh-prices', { method: 'POST' }),
         (v) =>
           `評価額を計算しました: 合計 ${yen(v.total_value)}（株価を ${v.refresh?.updated.length ?? 0} 件反映）。` +
-          `${v.refresh?.errors.length ? `取得できなかった銘柄: ${v.refresh.errors.map((e) => e.code).join('、')}。` : ''}` +
+          `${v.refresh?.errors.length ? `${v.refresh.errors.length} 件は株価を取得できませんでした（理由は下に表示しています）。` : ''}` +
           `${v.missing_prices.length ? `価格が未登録の ${v.missing_prices.length} 件は合計に含めていません。` : ''}` +
           `${v.refresh?.note ?? ''}`,
       )
@@ -148,9 +177,22 @@ export function PortfolioPage() {
           {calculating ? '計算中…' : '評価額を計算'}
         </button>
         <span className="hint">
-          株式・ETF・REIT は Stooq の前日終値を取り込んでから計算します。投資信託の基準価額は手入力かチャットで更新してください。
+          株式・ETF・REIT の株価を更新（日本株・米国株／Stooq 前日終値）してから計算します。米国株は USD/JPY で円換算します。
+          投資信託の基準価額は手入力かチャットで更新してください。
         </span>
       </div>
+      {view.refresh && view.refresh.errors.length > 0 && (
+        <div className="banner error">
+          株価を取得できなかった銘柄:
+          <ul>
+            {view.refresh.errors.map((e) => (
+              <li key={e.code}>
+                {e.code}: {e.error}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       <p className="hint">
         {view.note} 最も古い価格の日付: {view.oldest_price_date ?? '—'}
         {view.missing_prices.length > 0 && ` / 価格未登録: ${view.missing_prices.join('、')}`}
@@ -186,7 +228,7 @@ export function PortfolioPage() {
                 <th>取得額</th>
                 <th>評価額</th>
                 <th>損益</th>
-                <th>価格（日付・出どころ）</th>
+                <th>価格（市場・日付・出どころ）</th>
                 <th />
               </tr>
             </thead>
@@ -202,7 +244,9 @@ export function PortfolioPage() {
                   <td>{yen(h.cost_total)}</td>
                   <td>{yen(h.value)}</td>
                   <td className={h.gain !== null && h.gain < 0 ? 'neg' : 'pos'}>{yen(h.gain)}</td>
-                  <td>{h.price ? `${h.price.value.toLocaleString('ja-JP')}（${h.price.date}・${SOURCE_LABELS[h.price.source] ?? h.price.source}）` : '—'}</td>
+                  <td>
+                    <PriceCell price={h.price} />
+                  </td>
                   <td>
                     <button className="link danger" onClick={() => removeHolding(h.id)}>
                       削除
@@ -222,7 +266,7 @@ export function PortfolioPage() {
         >
           <select name="account">{ACCOUNTS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select>
           <select name="kind">{KINDS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select>
-          <input name="code" placeholder="証券コード（任意）" />
+          <input name="code" placeholder="証券コード・ティッカー（任意）" />
           <input name="name" placeholder="銘柄名" required />
           <input name="quantity" type="number" step="any" min="0" placeholder="数量（株・口）" required />
           <input name="cost_total" type="number" min="0" placeholder="取得額（円）" required />

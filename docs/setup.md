@@ -60,7 +60,7 @@ cd life-helper
 
 | サービス | 用途 | 取得 |
 |---|---|---|
-| Stooq | 国内株・ETF の前日終値 | ブラウザで CAPTCHA を解いて API キーを取得 |
+| Stooq | 日本株・米国株・ETF の前日終値と USD/JPY | ブラウザで CAPTCHA を解いて API キーを取得 |
 | 楽天ウェブサービス | 楽天トラベルの空室検索 | アプリ登録で `applicationId` と `accessKey` を取得 |
 
 ## ステップ 2: Azure の初回構築（1 回だけ・手元から）
