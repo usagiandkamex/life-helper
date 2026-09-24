@@ -42,8 +42,8 @@ GitHub Actions ── PR で CI ──> main にマージ ──> CI 合格後�
 | `app/backend` | Python 3.12 + FastAPI + `github-copilot-sdk` |
 | `app/frontend` | React + Vite + TypeScript（ビルド成果物を FastAPI が配信） |
 | `infra` | Bicep（Container Apps とスケジュールジョブ、Azure Files、ACR Basic、マネージド ID、Log Analytics、予算アラート） |
-| `scripts` | GitHub リポジトリの設定、CI/CD の設定 |
-| `.github` | CI / Deploy ワークフロー、main のルールセット、PR テンプレート、Dependabot |
+| `scripts` | CI/CD の設定 |
+| `.github` | CI / Deploy ワークフロー、PR テンプレート、Dependabot |
 
 使わないもの: Azure OpenAI、Cosmos DB、ベクトル検索、Key Vault、Entra ID によるアプリのログイン。
 
@@ -56,4 +56,4 @@ GitHub Actions ── PR で CI ──> main にマージ ──> CI 合格後�
 - マイナンバー・口座番号・カード番号・パスワードはファイルに保存しない。
 - API キー・トークンはツール結果・エラー・ログから自動でマスク。
 - ログアウトするとサーバー側でセッションを失効（コピーされた Cookie も無効）。
-- `main` はルールセットで保護（PR 必須・CI 合格必須）。デプロイは OIDC で、Azure の資格情報を GitHub に保存しない。
+- `main` への直接 push・force push は行わず、PR の CI 合格後に squash マージする。デプロイは OIDC で、Azure の資格情報を GitHub に保存しない。

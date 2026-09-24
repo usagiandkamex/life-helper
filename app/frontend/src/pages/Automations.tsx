@@ -143,7 +143,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
         <p className="hint">
           今月の実行 {usage.runs_this_month} / 上限 {usage.monthly_limit} 回・推定 {usage.estimated_runs_per_month} 回/月（1 回の実行で Copilot のリクエストを 1 回以上使います）
         </p>
-        {!list.github_notify_configured && <p className="hint">GitHub 通知は未設定です（docs/setup.md のステップ 1-4 と 2-3 で GitHub App を設定すると使えます）。</p>}
+        {!list.github_notify_configured && <p className="hint">GitHub 通知は未設定です（docs/setup.md のステップ 1-2 と 2-3 で GitHub App を設定すると使えます）。</p>}
         <div className="table-wrap">
           <table>
             <thead>
