@@ -167,6 +167,27 @@ export function PortfolioPage() {
     }
   }
 
+  // The manual fallback also has to set the NAV: switching the source alone would leave the old price in place.
+  const setManualNav = async (target: Holding, priceUnit: number, nav: number) => {
+    const ok = await run(
+      async () => {
+        await api<PortfolioView>('/api/portfolio/fund-link', {
+          method: 'POST',
+          body: json({ id: target.id, provider: 'manual', fund_code: '', price_unit: priceUnit }),
+        })
+        return api<PortfolioView>('/api/portfolio/holdings', {
+          method: 'POST',
+          body: json({ action: 'update', id: target.id, price: nav, price_source: 'manual' }),
+        })
+      },
+      () => `${target.name} の基準価額を手入力しました（${amount(nav)} 円 / ${amount(priceUnit)} 口）`,
+    )
+    if (ok) {
+      setFundTarget(null)
+      setCandidates(null)
+    }
+  }
+
   const addHolding = (form: HTMLFormElement) => {
     const data = new FormData(form)
     const price = Number(data.get('price'))
@@ -241,7 +262,7 @@ export function PortfolioPage() {
           {calculating ? '計算中…' : '評価額を計算'}
         </button>
         <span className="hint">
-          株式・ETF・REIT は株価（日本株・米国株／Stooq 前日終値）、投資信託は基準価額（運用会社の公式 API）を、
+          株式・ETF・REIT は株価（日本株・米国株／Stooq 前日終値）、投資信託は基準価額（運用会社の公式 API・公式 CSV）を、
           それぞれ別に更新してから計算します。米国株は USD/JPY で円換算します。
           自動取得に対応していない投資信託は、公式サイトの基準価額を手入力してください。
         </span>
@@ -487,9 +508,14 @@ export function PortfolioPage() {
             className="row wrap"
             onSubmit={(e) => {
               e.preventDefault()
-              linkFund(fundTarget, 'manual', '', Number(new FormData(e.currentTarget).get('price_unit')))
+              const data = new FormData(e.currentTarget)
+              setManualNav(fundTarget, Number(data.get('price_unit')), Number(data.get('nav')))
             }}
           >
+            <label>
+              基準価額（円）
+              <input name="nav" type="number" step="any" min="0.0001" defaultValue={fundTarget.price?.value} required />
+            </label>
             <label>
               価格単位（口）
               <input name="price_unit" type="number" min="1" step="1" defaultValue={fundTarget.price_unit} required />
@@ -498,6 +524,10 @@ export function PortfolioPage() {
               自動取得を使わず手入力にする
             </button>
           </form>
+          <p className="hint">
+            公式サイトに載っている基準価額と、その口数単位（通常 1 万口）を入力してください。評価額は「保有口数 ÷ 価格単位 ×
+            基準価額」で計算します。
+          </p>
         </section>
       )}
 

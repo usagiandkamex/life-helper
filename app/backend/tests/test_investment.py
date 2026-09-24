@@ -645,7 +645,7 @@ def test_csv_reimport_keeps_the_confirmed_fund_link(client, ctx):
 
 
 def test_renaming_a_holding_clears_the_confirmed_fund_link(ctx):
-    holding = _fund(500_000)
+    holding = _fund(500_000, price=Price(value=20_000, date="2024-05-01", source="mufg_api"), valuation_yen=1_000_000)
     with portfolio_store(ctx).transaction() as portfolio:
         portfolio.holdings = [holding]
     kept = UpdateHoldingParams(action="update", id=holding.id, quantity=600_000)
@@ -654,4 +654,16 @@ def test_renaming_a_holding_clears_the_confirmed_fund_link(ctx):
     # The row may now be a different fund, so the link has to be confirmed again instead of being reused.
     renamed = UpdateHoldingParams(action="update", id=holding.id, name="ひふみプラス")
     apply_holding_update(ctx, renamed)
-    assert portfolio_store(ctx).load().holdings[0].fund is None
+    stored = portfolio_store(ctx).load().holdings[0]
+    # The NAV of the previous fund must not value the new one, so the price and the stored valuation go too.
+    assert (stored.fund, stored.price, stored.valuation_yen, stored.market_value()) == (None, None, None, None)
+
+
+def test_changing_the_kind_of_a_holding_keeps_a_price_given_in_the_same_update(ctx):
+    holding = _fund(500_000, price=Price(value=20_000, date="2024-05-01", source="mufg_api"))
+    with portfolio_store(ctx).transaction() as portfolio:
+        portfolio.holdings = [holding]
+    retyped = UpdateHoldingParams(action="update", id=holding.id, kind="stock", quantity=100, price=3_000)
+    apply_holding_update(ctx, retyped)
+    stored = portfolio_store(ctx).load().holdings[0]
+    assert (stored.fund, stored.price.value, stored.market_value()) == (None, 3_000, Decimal("300000"))
