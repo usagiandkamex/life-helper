@@ -47,7 +47,7 @@ jobs:
       LH_BUDGET_EMAIL: ${{ vars.LH_BUDGET_EMAIL }}
       LH_BUDGET_START_DATE: ${{ vars.LH_BUDGET_START_DATE }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Deploy exactly the commit that CI tested.
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
@@ -55,7 +55,7 @@ jobs:
       - name: Sign in to Azure with azd (OIDC)
         run: azd auth login --client-id "$AZURE_CLIENT_ID" --federated-credential-provider github --tenant-id "$AZURE_TENANT_ID"
       - name: Sign in to Azure CLI (OIDC, used by the postdeploy hook)
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
