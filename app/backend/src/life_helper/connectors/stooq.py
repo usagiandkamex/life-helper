@@ -68,8 +68,7 @@ def _day(raw: str | None, label: str, latest: date) -> str:
         day = date.fromisoformat((raw or "").strip())
     except ValueError:
         raise ConnectorError(f"Stooq から取得した{label}の日付が不正です") from None
-    # A date past the requested range means a broken answer; one day of slack covers the exchange time zones.
-    if day > latest + timedelta(days=1):
+    if day > latest:
         raise ConnectorError(f"Stooq から取得した{label}の日付が不正です")
     return day.isoformat()
 
