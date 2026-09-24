@@ -32,6 +32,19 @@ export type HistoryMessage =
 
 export type FileEntry = { path: string; size: number; modified: string; writable: boolean }
 
+export type Price = {
+  value: number
+  date: string
+  source: string
+  market?: string | null
+  symbol?: string | null
+  local_currency?: string
+  local_value?: number | null
+  fx_rate?: number | null
+  fx_date?: string | null
+  fx_source?: string | null
+}
+
 export type Holding = {
   id: string
   account: string
@@ -43,7 +56,20 @@ export type Holding = {
   cost_total: number
   value: number | null
   gain: number | null
-  price: { value: number; date: string; source: string } | null
+  price: Price | null
+}
+
+export type RefreshedPrice = {
+  code: string
+  name: string
+  market: string | null
+  symbol: string | null
+  currency: string
+  close: number | null
+  close_jpy: number
+  date: string
+  fx_rate: number | null
+  fx_date: string | null
 }
 
 export type PortfolioView = {
@@ -59,7 +85,7 @@ export type PortfolioView = {
   brokers: { name: string; label: string }[]
   updated_at: string | null
   imported?: number
-  refresh?: { updated: { code: string; name: string; close: number; date: string }[]; errors: { code: string; error: string }[]; note: string }
+  refresh?: { updated: RefreshedPrice[]; errors: { code: string; error: string }[]; note: string }
 }
 
 export type Schedule = {
