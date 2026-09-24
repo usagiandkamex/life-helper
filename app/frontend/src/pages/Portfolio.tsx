@@ -514,7 +514,7 @@ export function PortfolioPage() {
           >
             <label>
               基準価額（円）
-              <input name="nav" type="number" step="any" min="0.0001" defaultValue={fundTarget.price?.value} required />
+              <input name="nav" type="number" step="any" min="0" defaultValue={fundTarget.price?.value} required />
             </label>
             <label>
               価格単位（口）
@@ -526,7 +526,7 @@ export function PortfolioPage() {
           </form>
           <p className="hint">
             公式サイトに載っている基準価額と、その口数単位（通常 1 万口）を入力してください。評価額は「保有口数 ÷ 価格単位 ×
-            基準価額」で計算します。
+            基準価額」で計算します。エラーが出たときは基準価額が反映されていないので、入力し直してください。
           </p>
         </section>
       )}
