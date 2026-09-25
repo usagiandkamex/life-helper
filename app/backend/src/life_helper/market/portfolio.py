@@ -60,6 +60,47 @@ ACCOUNT_LABELS = {
 NISA_ACCOUNTS = ("nisa_tsumitate", "nisa_growth")
 TAXABLE_ACCOUNTS = ("tokutei", "ippan")
 
+# Far above any real holding, but small enough that quantity × price still rounds to yen with Decimal's precision.
+# The paths that write a holding (手入力ツールと証券会社 CSV の取り込み) check these, so a value they store cannot
+# make ``summarize()`` fail when it rounds to yen.
+MAX_QUANTITY = 1_000_000_000_000
+MAX_YEN = 1_000_000_000_000_000
+MAX_PRICE = 10_000_000_000
+# A NAV is quoted per 1 unit (a few funds) up to 1 万口, and the valuation divides by it, so a unit below 1 would
+# turn an ordinary NAV into an astronomic valuation.
+MIN_PRICE_UNIT = 1
+MAX_PRICE_UNIT = 1_000_000
+
+
+def price_within_range(value: object) -> bool:
+    """True when ``value`` can be stored as a price in yen (``Price.value``).
+
+    Every path that writes a newly fetched or hand-entered price checks this, because ``summarize()`` rounds
+    quantity × price to yen and a value outside this range makes that fail for the whole portfolio. A price that
+    is already saved is not checked again, so a portfolio written before this check still loads and can be fixed.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return False
+    # Comparing is enough: NaN compares false both ways, and infinity is above the limit. ``math.isfinite`` is
+    # not used because it converts to float first, which raises OverflowError for an absurdly large integer.
+    return 0 < value <= MAX_PRICE
+
+
+def price_unit_within_range(value: object) -> bool:
+    """True when ``value`` can be stored as the units a NAV is quoted for (``FundRef.price_unit``).
+
+    Every path that links a fund checks this, because ``market_value()`` divides by the unit: a unit below 1 口
+    makes the valuation of an ordinary NAV far larger than any real holding.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return False
+    return MIN_PRICE_UNIT <= value <= MAX_PRICE_UNIT
+
+
+def _shown(value: float | None) -> bool:
+    """True when a saved number can be rounded to yen and put in JSON. ``None`` is nothing to show, so it can."""
+    return value is None or math.isfinite(value)
+
 
 class Price(BaseModel):
     """A price in yen. US stocks also keep the local (USD) price and the rate used to convert it."""
@@ -107,6 +148,34 @@ class Holding(BaseModel):
     price: Price | None = None
     valuation_yen: float | None = Field(default=None, description="評価額（円）。証券会社 CSV の値など")
     fund: FundRef | None = Field(default=None, description="投資信託の公式データとの紐付け")
+
+    @model_validator(mode="after")
+    def _drop_numbers_that_cannot_be_shown(self) -> Holding:
+        """Clears a saved value that is not a finite number, so the portfolio still opens and the row can be fixed.
+
+        A portfolio imported before the writing paths checked their values can hold one: a CSV cell such as
+        ``inf`` or ``1e400`` became a float of its own. Rounding it to yen raises, and it is not valid JSON
+        either, so a single holding would make the whole screen fail and there would be no way to repair it.
+        Only a value that cannot be shown is cleared; an oversized but finite one is kept and stays visible.
+        """
+        if not math.isfinite(self.quantity):
+            self.quantity = 0.0
+        if not math.isfinite(self.cost_total):
+            self.cost_total = 0.0
+        if not _shown(self.valuation_yen):
+            self.valuation_yen = None
+        if self.fund is not None and not math.isfinite(self.fund.price_unit):
+            # The NAV was quoted for a number of units this cannot tell, so the price goes with the unit rather
+            # than being valued on a guess. The default only stands in until the next refresh saves the unit
+            # its provider quotes. ``model_copy`` because the link may be shared with another holding.
+            self.fund = self.fund.model_copy(update={"price_unit": DEFAULT_PRICE_UNIT})
+            self.price = None
+        if self.price is not None and not math.isfinite(self.price.value):
+            self.price = None
+        if self.price is not None and not (_shown(self.price.local_value) and _shown(self.price.fx_rate)):
+            # The price in yen is still usable; only the pair it was converted from is dropped.
+            self.price = self.price.model_copy(update={"local_value": None, "fx_rate": None})
+        return self
 
     @model_validator(mode="after")
     def _retire_mufg_link(self) -> Holding:
@@ -234,8 +303,15 @@ class PortfolioStore:
 
 
 def yen(value: Decimal) -> int:
-    """Rounds a money amount to whole yen explicitly, instead of relying on float rounding."""
-    return int(value.quantize(Decimal(1), rounding=ROUND_HALF_UP))
+    """Rounds a money amount to whole yen explicitly, instead of relying on float rounding.
+
+    ``to_integral_value`` rather than ``quantize``: quantize refuses a number with more digits than the decimal
+    context keeps, so a single holding with an oversized value (from a file written before the paths that save
+    one checked it) would make the whole portfolio screen fail instead of only looking wrong. Rounding it anyway
+    keeps that holding visible, and therefore repairable from the screen. A value that is not a finite number
+    never reaches here: ``Holding`` clears one when it loads the file.
+    """
+    return int(value.to_integral_value(rounding=ROUND_HALF_UP))
 
 
 def previous_business_day(today: date) -> date:
@@ -274,6 +350,8 @@ def summarize(portfolio: Portfolio, *, today: date | None = None) -> dict:
                 "name": h.name,
                 "quantity": h.quantity,
                 "cost_total": cost,
+                # Unrounded, so that an edit based on it keeps the fraction of yen a CSV import may have left.
+                "cost_total_exact": h.cost_total,
                 "value": value,
                 "gain": (value - cost) if value is not None else None,
                 "price": h.price.model_dump() if h.price else None,

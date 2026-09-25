@@ -158,8 +158,8 @@ class TurnManager:
                 await self.manager.close_session(turn.conversation_id)
             self._emit(turn, {"type": "error", "message": self.masker.mask_text(str(exc)) or "エラーが発生しました"})
         finally:
-            if turn.active is not None and turn.active.policy is not None:
-                turn.active.policy.release_all()
+            if turn.active is not None:
+                await turn.active.release()
             turn.done = True
             turn.finished_at = time.monotonic()
             self._busy.pop(turn.conversation_id, None)

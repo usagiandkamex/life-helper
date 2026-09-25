@@ -13,7 +13,14 @@ from ..context import AppContext, get_ctx
 from ..tools.portfolio_tools import UpdateHoldingParams, apply_holding_update
 from .broker_csv import BrokerCsvError, list_brokers, load_mapping, parse_broker_csv
 from .funds import fund_providers, keep_fund_links, link_fund, refresh_fund_navs, suggest_funds
-from .portfolio import DEFAULT_PRICE_UNIT, InvestmentSimParams, simulate_investment, summarize
+from .portfolio import (
+    DEFAULT_PRICE_UNIT,
+    MAX_PRICE_UNIT,
+    MIN_PRICE_UNIT,
+    InvestmentSimParams,
+    simulate_investment,
+    summarize,
+)
 from .service import portfolio_store, refresh_stock_prices
 
 router = APIRouter(prefix="/api/portfolio")
@@ -24,9 +31,13 @@ class FundLinkParams(BaseModel):
     provider: str = Field(description="データ提供元（manual は手入力のまま）")
     fund_code: str = Field(default="", max_length=32, description="提供元のファンドコード")
     price_unit: float = Field(
-        default=DEFAULT_PRICE_UNIT, gt=0, le=1_000_000, description="手入力のときの価格単位（通常は 1 万口）"
+        default=DEFAULT_PRICE_UNIT,
+        ge=MIN_PRICE_UNIT,
+        le=MAX_PRICE_UNIT,
+        allow_inf_nan=False,
+        description="手入力のときの価格単位（通常は 1 万口）",
     )
-    nav: float | None = Field(default=None, gt=0, le=MAX_NAV, description="手入力する基準価額")
+    nav: float | None = Field(default=None, gt=0, le=MAX_NAV, allow_inf_nan=False, description="手入力する基準価額")
     price_date: date | None = Field(default=None, description="手入力する基準価額の基準日")
 
 
@@ -50,7 +61,8 @@ def change_holding(
 ) -> dict:
     result = apply_holding_update(ctx, body)
     if "error" in result:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, result["error"])
+        code = status.HTTP_409_CONFLICT if result.get("conflict") else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(code, result["error"])
     return _view(ctx)
 
 

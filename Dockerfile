@@ -17,6 +17,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     UV_PROJECT_ENVIRONMENT=/app/.venv \
     PATH="/app/.venv/bin:$PATH" \
     HOME=/home/app \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright \
     LH_DATA_DIR=/data \
     LH_STATIC_DIR=/app/static
 
@@ -27,11 +28,21 @@ RUN useradd --create-home --home-dir /home/app --uid 10001 app \
 
 WORKDIR /app/backend
 COPY --chown=app:app app/backend/pyproject.toml ./
-COPY --chown=app:app app/backend/src ./src
 USER app
-RUN uv sync --no-dev --no-editable \
+# Dependencies first (without the app) so source changes do not reinstall them or Chromium.
+RUN uv sync --no-dev --no-install-project \
     # Pre-download the Copilot runtime so containers start without network downloads.
     && python -m copilot download-runtime
+
+USER root
+# Headless Chromium for the browser_* tools with its system libraries, plus a Japanese font for screenshots.
+RUN playwright install --with-deps --only-shell chromium \
+    && apt-get install -y --no-install-recommends fonts-ipafont-gothic \
+    && rm -rf /var/lib/apt/lists/*
+
+USER app
+COPY --chown=app:app app/backend/src ./src
+RUN uv sync --no-dev --no-editable
 
 COPY --from=frontend --chown=app:app /src/dist /app/static
 

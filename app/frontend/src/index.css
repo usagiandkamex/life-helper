@@ -124,6 +124,8 @@ td.actions { white-space: nowrap; display: flex; gap: 0.5rem; }
 .msg-note { align-self: center; }
 .chart { margin: 0.5rem 0; }
 .chart figcaption { font-size: 0.85rem; color: var(--muted); }
+.screenshot { margin: 0.5rem 0; }
+.screenshot img { display: block; max-width: 100%; max-height: 480px; border: 1px solid var(--border); border-radius: 6px; }
 .mobile-only { display: none; }
 
 @media (max-width: 760px) {

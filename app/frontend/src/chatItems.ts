@@ -1,9 +1,18 @@
-import type { ChartData, HistoryMessage, TurnEvent } from './types'
+import type { ChartData, HistoryMessage, Screenshot, TurnEvent } from './types'
 
 export type Item =
   | { kind: 'user'; text: string }
   | { kind: 'assistant'; text: string; streaming?: boolean }
-  | { kind: 'tool'; id?: string; name: string; args: string; success?: boolean; error?: string; chart?: ChartData }
+  | {
+      kind: 'tool'
+      id?: string
+      name: string
+      args: string
+      success?: boolean
+      error?: string
+      chart?: ChartData
+      screenshot?: Screenshot
+    }
   | { kind: 'file_write'; path: string; diff: string }
   | { kind: 'error'; message: string }
   | { kind: 'note'; text: string }
@@ -29,7 +38,14 @@ export function applyEvent(items: Item[], ev: TurnEvent): Item[] {
       return next
     case 'tool_end': {
       const idx = next.findIndex((i) => i.kind === 'tool' && i.id === ev.id)
-      if (idx >= 0) next[idx] = { ...(next[idx] as Extract<Item, { kind: 'tool' }>), success: ev.success, error: ev.error, chart: ev.chart }
+      if (idx >= 0)
+        next[idx] = {
+          ...(next[idx] as Extract<Item, { kind: 'tool' }>),
+          success: ev.success,
+          error: ev.error,
+          chart: ev.chart,
+          screenshot: ev.screenshot,
+        }
       return next
     }
     case 'file_write':
@@ -66,6 +82,12 @@ export const TOOL_LABELS: Record<string, string> = {
   glob: 'ファイルを探す',
   create: 'ファイルを作成',
   edit: 'ファイルを編集',
-  web_fetch: '公式サイトを参照',
+  web_fetch: 'Web ページを参照',
   skill: 'スキルを使用',
+  browser_open: 'ブラウザで開く',
+  browser_read: 'ページを読む',
+  browser_click: 'ページをクリック',
+  browser_fill: 'フォームに入力',
+  browser_scroll: 'ページをスクロール',
+  browser_screenshot: 'スクリーンショット',
 }

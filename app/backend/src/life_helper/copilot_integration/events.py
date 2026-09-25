@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from copilot.session_events import (
@@ -19,6 +20,7 @@ from ..security import SecretMasker
 
 ARG_PREVIEW_LIMIT = 600
 RESULT_PREVIEW_LIMIT = 1200
+SCREENSHOT_ID = re.compile(r"[0-9a-f]{32}")
 
 
 def _preview(value: Any, limit: int, masker: SecretMasker) -> str:
@@ -31,13 +33,8 @@ def _preview(value: Any, limit: int, masker: SecretMasker) -> str:
 
 def extract_chart(result: Any) -> dict | None:
     """Pulls compact chart data (only the x and series columns) out of a simulation tool result."""
-    data = result
-    if isinstance(result, str):
-        try:
-            data = json.loads(result)
-        except ValueError:
-            return None
-    if not isinstance(data, dict) or not isinstance(data.get("chart"), dict):
+    data = _as_dict(result)
+    if data is None or not isinstance(data.get("chart"), dict):
         return None
     spec = data["chart"]
     rows = data.get("rows") or data.get("yearly") or []
@@ -46,6 +43,26 @@ def extract_chart(result: Any) -> dict | None:
         return None
     points = [{k: row.get(k) for k in [x, *series]} for row in rows[:200] if isinstance(row, dict)]
     return {"type": spec.get("type"), "x": x, "series": series, "data": points}
+
+
+def extract_screenshot(result: Any) -> dict | None:
+    """Turns a browser_screenshot result into the image URL the chat shows."""
+    data = _as_dict(result)
+    shot = data.get("screenshot") if data is not None else None
+    shot_id = shot.get("id") if isinstance(shot, dict) else None
+    if not isinstance(shot_id, str) or not SCREENSHOT_ID.fullmatch(shot_id):
+        return None
+    return {"url": f"/api/browser/screenshots/{shot_id}"}
+
+
+def _as_dict(result: Any) -> dict | None:
+    data = result
+    if isinstance(result, str):
+        try:
+            data = json.loads(result)
+        except ValueError:
+            return None
+    return data if isinstance(data, dict) else None
 
 
 def map_event(event: Any, masker: SecretMasker) -> dict | None:
@@ -74,6 +91,9 @@ def map_event(event: Any, masker: SecretMasker) -> dict | None:
             chart = extract_chart(result)
             if chart:
                 event["chart"] = chart
+            screenshot = extract_screenshot(result)
+            if screenshot:
+                event["screenshot"] = screenshot
             return event
         case SessionErrorData():
             return {"type": "error", "message": masker.mask_text(data.message or "エラーが発生しました")}

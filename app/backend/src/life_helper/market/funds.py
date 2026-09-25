@@ -21,7 +21,15 @@ from ..connectors.fund_nav import (
 )
 from ..connectors.registry import get_connectors
 from .clock import market_today
-from .portfolio import DEFAULT_PRICE_UNIT, FundRef, Holding, Price
+from .portfolio import (
+    DEFAULT_PRICE_UNIT,
+    MAX_PRICE_UNIT,
+    MIN_PRICE_UNIT,
+    FundRef,
+    Holding,
+    Price,
+    price_unit_within_range,
+)
 from .service import portfolio_store
 
 if TYPE_CHECKING:
@@ -64,6 +72,18 @@ def nav_price(quote: dict) -> Price:
         source_url=quote["source_url"],
         fetched_at=datetime.now(UTC).isoformat(),
     )
+
+
+def checked_quote(quote: dict) -> dict:
+    """Refuses a quote whose price unit a holding cannot be valued with.
+
+    The NAV itself is bounded by ``nav_amount()``, but the unit it is quoted for is divided by, so it is checked
+    here, before a link or a refresh saves it. Every quote that reaches a ``FundRef`` passes through this.
+    """
+    unit = quote["price_unit"]
+    if not price_unit_within_range(unit):
+        raise ConnectorError(f"取得した価格単位（{unit}）が想定の範囲を超えているため取り込めませんでした")
+    return quote
 
 
 def _holding(ctx: AppContext, holding_id: str) -> Holding | None:
@@ -113,7 +133,7 @@ async def _verified_quote(ctx: AppContext, candidate: dict, fetched: dict[tuple[
         raise ConnectorError("検索結果とファンドページで協会コードが一致しないため、紐付けませんでした")
     if normalize_name(quote["name"]) != normalize_name(candidate["name"]):
         raise ConnectorError("検索結果とファンドページでファンド名が一致しないため、紐付けませんでした")
-    return quote
+    return checked_quote(quote)
 
 
 async def auto_link_funds(ctx: AppContext, *, quotes: dict[tuple[str, str], dict] | None = None) -> dict:
@@ -229,6 +249,8 @@ async def link_fund(
         return {"error": "基準価額の取得元は投資信託にだけ設定できます"}
     quote = None
     if provider == MANUAL_PROVIDER:
+        if not price_unit_within_range(price_unit):
+            return {"error": f"価格単位は {MIN_PRICE_UNIT} 以上 {MAX_PRICE_UNIT:,} 以下で指定してください"}
         if (manual_nav is None) != (price_date is None):
             return {"error": "手入力する基準価額と基準日を両方指定してください"}
         if manual_nav is not None:
@@ -245,7 +267,7 @@ async def link_fund(
         if connector is None:
             return {"error": f"対応していないデータ提供元です: {provider}"}
         try:
-            quote = await connector.fund_nav(fund_code, today=market_today())
+            quote = checked_quote(await connector.fund_nav(fund_code, today=market_today()))
             price = nav_price(quote)
         except ConnectorError as e:
             return {"error": str(e)}
@@ -309,7 +331,7 @@ async def refresh_fund_navs(ctx: AppContext) -> dict:
             continue
         try:
             # A fund linked a moment ago already had its NAV fetched to confirm the link.
-            quote = fetched.get((provider, code)) or await connector.fund_nav(code, today=today)
+            quote = checked_quote(fetched.get((provider, code)) or await connector.fund_nav(code, today=today))
             quotes[(provider, code)] = (quote, nav_price(quote))
         except ConnectorError as e:
             errors.append({"code": code, "error": str(e)})

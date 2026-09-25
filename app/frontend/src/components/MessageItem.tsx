@@ -33,6 +33,13 @@ export function MessageItem({ item, onSchedule }: { item: Item; onSchedule?: (te
             {item.error && <p className="error-text">{item.error}</p>}
           </details>
           {item.chart && <LazyChart chart={item.chart} />}
+          {item.screenshot && (
+            <figure className="screenshot">
+              <a href={item.screenshot.url} target="_blank" rel="noreferrer">
+                <img src={item.screenshot.url} alt="ブラウザのスクリーンショット" loading="lazy" />
+              </a>
+            </figure>
+          )}
         </div>
       )
     case 'file_write':
