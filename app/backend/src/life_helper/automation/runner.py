@@ -324,14 +324,16 @@ class AutomationRunner:
             remaining = deadline - loop.time()
             if run_ctx.report is None and remaining > 30:
                 # The report carries the result the user reads in the run history (and the notify decision),
-                # so ask once more within the same session.
+                # so ask once more within the same session. The work itself is already done, so this extra
+                # request is best effort: failing it must not turn a finished run into a failed one.
                 run_ctx.events.append({"type": "follow_up"})
-                await asyncio.wait_for(active.session.send_and_wait(REPORT_FOLLOW_UP, timeout=remaining), remaining)
+                try:
+                    await asyncio.wait_for(active.session.send_and_wait(REPORT_FOLLOW_UP, timeout=remaining), remaining)
+                except Exception:  # noqa: BLE001
+                    logger.warning("automation %s did not report after the follow-up request", automation.id)
+                    await self._abort(active.session)
         except TimeoutError:
-            try:
-                await active.session.abort()
-            except Exception:  # noqa: BLE001
-                logger.debug("abort failed")
+            await self._abort(active.session)
             raise
         finally:
             unsubscribe()
@@ -345,6 +347,13 @@ class AutomationRunner:
                     await self.manager.delete_session(session_id)
                 except Exception:  # noqa: BLE001
                     logger.warning("could not delete automation session state")
+
+    @staticmethod
+    async def _abort(session: Any) -> None:
+        try:
+            await session.abort()
+        except Exception:  # noqa: BLE001
+            logger.debug("abort failed")
 
     @staticmethod
     def _condition_met(automation: Automation, run_ctx: RunContext) -> bool | None:

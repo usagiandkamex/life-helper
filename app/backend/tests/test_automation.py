@@ -124,7 +124,7 @@ class FakeAutoSession:
     async def send_and_wait(self, prompt: str, timeout: float = 60):
         m = self.manager
         m.prompts.append(prompt)
-        if m.fail:
+        if m.fail and m.fail_on_call in (None, len(m.prompts)):
             raise m.fail
         if m.signal is not None:
             m.active.policy.on_tool_result(
@@ -149,6 +149,7 @@ class FakeAutoManager:
         self.closed: list = []
         self.deleted: list = []
         self.fail: Exception | None = None
+        self.fail_on_call: int | None = None  # None fails every call
         self.signal: dict | None = None
         self.report_notify = False
         self.report_on_call = 1
@@ -283,6 +284,17 @@ async def test_missing_report_triggers_one_follow_up(auto_env):
     manager.report_on_call = 1
     await runner.run(b.id)
     assert len(manager.prompts) == 1
+
+
+async def test_follow_up_failure_keeps_the_finished_run_successful(auto_env):
+    ctx, runner, manager = auto_env
+    manager.report_on_call = 2  # the model does not report on the first call
+    manager.fail, manager.fail_on_call = TimeoutError(), 2  # and the extra request runs out of time
+    a = ctx.automations.upsert(Automation(name="x", prompt="y"))
+    record = await runner.run(a.id)
+    # The work was already done when the report was asked for again, so the answer is kept instead of failing the run.
+    assert len(manager.prompts) == 2 and record["status"] == "success" and record["report"] is None
+    assert record["summary"] == "空室を確認しました"
 
 
 @respx.mock
