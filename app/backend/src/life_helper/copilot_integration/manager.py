@@ -124,7 +124,6 @@ class CopilotManager:
         return ToolPolicy(
             knowledge_root=s.knowledge_dir,
             skills_root=s.skills_dir,
-            fetch_domains=s.fetch_domains,
             masker=self.ctx.masker,
             custom_tools={spec.tool.name for spec in specs},
             write_custom_tools={spec.tool.name for spec in specs if spec.writes},

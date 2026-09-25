@@ -46,7 +46,7 @@
 
 1. `app/backend/src/life_helper/connectors/` に `Connector` を継承したクラスを作る（接続先ホスト・必要なシークレット名・呼び出し間隔）。
 2. `connectors/registry.py` でツールとして登録する（`ToolSpec(..., connector="名前")`）。
-3. キーを URL に含める API は、`copilot_integration/policy.py` の `CONNECTOR_HOSTS` に追加して `web_fetch` から直接呼べないようにする。
+3. キーを URL に含める API は、`netguard.py` の `CONNECTOR_HOSTS` に追加して `web_fetch` やブラウザから直接呼べないようにする。
 4. `config.py` の `Settings`、`infra/*.bicep` のシークレット、`infra/main.parameters.json`、`scripts/setup-cicd.ps1` のシークレット一覧に追加する。
 5. 有料のサービスは、使う前に費用を判断する。
 

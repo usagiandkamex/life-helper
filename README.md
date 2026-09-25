@@ -51,8 +51,9 @@ GitHub Actions ── PR で CI ──> main にマージ ──> CI 合格後�
 
 - ログインできるのは GitHub ユーザー ID `134019422`（`usagiandkamex`）だけ。GitHub トークンは Cookie に入れず、暗号化して Azure Files に保存（ジョブと共有）。
 - Copilot の組み込みツールは `view` / `grep` / `glob` / `create` / `edit` / `web_fetch` / `skill` だけを許可（シェルは不可）。
-  権限ハンドラと `pre_tool_use` フックの二重チェックで、読み取りは知識ベース内、書き込みは `memories/`・`notes/`・`plans/`・`INDEX.md` だけ、
-  `web_fetch` は許可ドメイン（go.jp / lg.jp / 投資信託協会・運用会社）だけに制限。
+  権限ハンドラと `pre_tool_use` フックの二重チェックで、読み取りは知識ベース内、書き込みは `memories/`・`notes/`・`plans/`・`INDEX.md` だけ。
+- `web_fetch` は外部の http/https ならドメインを問わず参照できる。内部宛先（localhost・プライベート IP・メタデータなど、DNS の解決先も確認）、
+  API キーを URL に含むサービス（コネクタ専用）、機微情報・秘密情報を含む URL は拒否（`netguard.py`）。
 - マイナンバー・口座番号・カード番号・パスワードはファイルに保存しない。
 - API キー・トークンはツール結果・エラー・ログから自動でマスク。
 - ログアウトするとサーバー側でセッションを失効（コピーされた Cookie も無効）。

@@ -65,7 +65,7 @@ const TOOL_LABELS: Record<string, string> = {
   glob: 'ファイルを探す',
   create: 'ファイルを作成',
   edit: 'ファイルを編集',
-  web_fetch: '公式サイトを参照',
+  web_fetch: 'Web ページを参照',
   skill: 'スキルを使用',
 }
 
