@@ -36,6 +36,7 @@ TOOL_TIMEOUT_SECONDS = 60
 NAV_TIMEOUT_MS = 30_000
 ACTION_TIMEOUT_MS = 10_000
 IDLE_WAIT_MS = 3_000
+POPUP_WAIT_MS = 500
 VIEWPORT = {"width": 1280, "height": 800}
 MAX_SCREENSHOT_HEIGHT = 4000
 SCREENSHOT_RETENTION_SECONDS = 3 * 24 * 60 * 60
@@ -122,8 +123,11 @@ FIELD_SELECTORS = {
     # Login and sign-up forms: the field sits in a form that also holds a password box.
     "password_form": "form:has(input[type=password]) *",
     "password_form_root": "form:has(input[type=password])",
+    # A password box may sit outside its form and name the owner with the form attribute.
+    "detached_password": "input[type=password][form]",
+    "owner_form": "xpath=ancestor::form[1]",
 }
-MAX_CHECKED_FORMS = 50
+MAX_CHECKED_ELEMENTS = 50
 
 
 class BrowserError(RuntimeError):
@@ -308,7 +312,8 @@ class BrowserSession:
         return self._page
 
     def _adopt(self, page: Page) -> None:
-        # Links with target=_blank open a new tab: continue on it, like a person would.
+        # Links with target=_blank open a new tab: continue on it, like a person would. The page it came from and
+        # any extra popups are closed by _close_others, so one session never holds more than one page.
         self._page = page
 
     def _current(self) -> Page:
@@ -318,8 +323,18 @@ class BrowserSession:
 
     async def _active(self) -> Page:
         page = self._current()
+        await self._close_others(page)
         await self._guard_url(page)
         return page
+
+    async def _close_others(self, keep: Page) -> None:
+        """Keeps one page only: an adopted popup replaces the page it came from, so nothing piles up in memory."""
+        if self._context is None:
+            return
+        for page in list(self._context.pages):
+            if page is not keep:
+                with contextlib.suppress(PlaywrightError):
+                    await page.close()
 
     async def _guard_url(self, page: Page) -> None:
         """Checks the URL the page actually shows: a redirect, a click or a popup may have left the allowed sites."""
@@ -346,10 +361,11 @@ class BrowserSession:
                 tag = name
                 break
         form_has_password = await self._matches(page, target, FIELD_SELECTORS["password_form"])
-        form_id = await target.get_attribute("form")
-        if form_id and not form_has_password:
-            # The form attribute names the owner, which may hold the password box and sit anywhere on the page.
-            form_has_password = await self._owned_by_login_form(page, form_id)
+        if not form_has_password:
+            # The password box may sit outside the form and name its owner with the form attribute.
+            owner_id = await self._owner_form_id(target)
+            if owner_id:
+                form_has_password = await self._owned_by_login_form(page, owner_id)
         return {
             "tag": tag,
             "type": (await target.get_attribute("type")) or "",
@@ -359,14 +375,30 @@ class BrowserSession:
         }
 
     @staticmethod
-    async def _owned_by_login_form(page: Page, form_id: str) -> bool:
+    async def _owner_form_id(target: Locator) -> str | None:
+        """The form the field belongs to: the form attribute wins, otherwise the closest enclosing form."""
+        form_id = await target.get_attribute("form")
+        if form_id:
+            return form_id
+        owner = target.locator(FIELD_SELECTORS["owner_form"]).first
+        return await owner.get_attribute("id") if await owner.count() else None
+
+    @classmethod
+    async def _owned_by_login_form(cls, page: Page, form_id: str) -> bool:
+        """Looks for a password box owned by that form, inside it or attached from elsewhere by the form attribute."""
+        if await cls._attr_equals(page, FIELD_SELECTORS["password_form_root"], "id", form_id):
+            return True
+        return await cls._attr_equals(page, FIELD_SELECTORS["detached_password"], "form", form_id)
+
+    @staticmethod
+    async def _attr_equals(page: Page, css: str, attribute: str, value: str) -> bool:
         """Compares the ids in Python: an id may hold characters that cannot be put into a CSS selector safely."""
-        forms = page.locator(FIELD_SELECTORS["password_form_root"])
-        total = await forms.count()
-        if total > MAX_CHECKED_FORMS:
+        elements = page.locator(css)
+        total = await elements.count()
+        if total > MAX_CHECKED_ELEMENTS:
             return True  # too many to look at one by one: refuse rather than guess
         for index in range(total):
-            if await forms.nth(index).get_attribute("id") == form_id:
+            if await elements.nth(index).get_attribute(attribute) == value:
                 return True
         return False
 
@@ -384,7 +416,17 @@ class BrowserSession:
         with contextlib.suppress(PlaywrightError):
             await page.wait_for_load_state("networkidle", timeout=IDLE_WAIT_MS)
 
+    async def _settle_after_action(self, opener: Page) -> Page:
+        """Gives a new tab a moment to arrive, then settles the page actually in use."""
+        if self._context is not None and self._page is opener and len(self._context.pages) <= 1:
+            with contextlib.suppress(PlaywrightError):
+                await self._context.wait_for_event("page", timeout=POPUP_WAIT_MS)
+        page = self._current()
+        await self._settle(page)
+        return page
+
     async def _snapshot(self, page: Page, selector: str | None = None, *, status: int | None = None) -> dict:
+        await self._close_others(page)
         await self._guard_url(page)
         data = await page.evaluate(SNAPSHOT_JS, {**LIMITS, "selector": selector})
         if data is None:
@@ -430,8 +472,7 @@ class BrowserSession:
         else:
             raise BrowserError("selector か text のどちらかを指定してください")
         await target.click()
-        await self._settle(self._current())
-        return await self._snapshot(self._current())
+        return await self._snapshot(await self._settle_after_action(page))
 
     async def fill(self, selector: str, value: str, submit: bool = False) -> dict:
         page = await self._active()
@@ -449,8 +490,8 @@ class BrowserSession:
             await target.fill(value)
         if submit:
             await target.press("Enter")
-            await self._settle(self._current())
-        return await self._snapshot(self._current())
+            page = await self._settle_after_action(page)
+        return await self._snapshot(page)
 
     async def scroll(self, times: int = 1, wait_for_selector: str | None = None) -> dict:
         page = await self._active()
@@ -466,8 +507,9 @@ class BrowserSession:
         page = await self._active()
         if full_page:
             height = int(await page.evaluate("() => document.documentElement.scrollHeight") or VIEWPORT["height"])
+            # clip and full_page cannot be given together: the clip alone reaches past the viewport, up to the limit.
             clip = {"x": 0, "y": 0, "width": VIEWPORT["width"], "height": min(height, MAX_SCREENSHOT_HEIGHT)}
-            png = await page.screenshot(type="png", full_page=True, clip=clip)
+            png = await page.screenshot(type="png", clip=clip)
         else:
             png = await page.screenshot(type="png")
         # The page may have navigated while it was captured: a rejected destination is not kept or shown.

@@ -342,6 +342,7 @@ def _chromium_installed() -> bool:
 PAGE = """<!doctype html><html><head><title>テストのページ</title></head><body>
 <h1>ふるさと納税</h1><p>上限の目安を調べます。</p>
 <a href="https://site.test/next">次のページ</a>
+<a href="https://site.test/popup" target="_blank">別のタブで開く</a>
 <table><caption>控除</caption><tr><th>収入</th><th>控除額</th></tr><tr><td>200万円</td><td>68万円</td></tr></table>
 <form action="https://site.test/search"><label for="q">検索</label><input id="q" name="q" type="search"></form>
 <form><input name="user"><input name="pw" type="password"></form>
@@ -386,6 +387,10 @@ async def test_browser_session_end_to_end(tmp_path, monkeypatch):
         assert "ログイン" in refused["error"]
         assert "error" not in await session.run(lambda: session.scroll(2))
 
+        popped = await session.run(lambda: session.click(text="別のタブで開く"))
+        assert popped["url"] == "https://site.test/popup", popped
+        assert len(session._context.pages) == 1  # the page it came from is closed, so nothing piles up
+
         shot = await session.run(lambda: session.screenshot(full_page=True))
         assert (tmp_path / "shots" / f"{shot['screenshot']['id']}.png").stat().st_size > 0
 
@@ -415,6 +420,8 @@ Object.defineProperty(HTMLInputElement.prototype, 'form', {get() { return null; 
 <form><input id="u" name="user"><input id="pw" name="pw" type="password"></form>
 <form id="ログイン"><input type="password" name="pw2"></form>
 <input id="outside" name="other" form="ログイン">
+<form id="署名"><input id="inside" name="account"></form>
+<input id="pw3" name="pw3" type="password" form="署名">
 </body></html>"""
 
 
@@ -436,6 +443,8 @@ async def test_form_checks_survive_a_page_that_rewrites_dom_apis(tmp_path, monke
         assert "ログイン" in (await session.run(lambda: session.fill("#u", "taro")))["error"]
         # The owner form is named by the form attribute, and its id is not safe to put into a selector.
         assert "ログイン" in (await session.run(lambda: session.fill("#outside", "taro")))["error"]
+        # The password box sits outside the form and is attached to it by its own form attribute.
+        assert "ログイン" in (await session.run(lambda: session.fill("#inside", "taro")))["error"]
     finally:
         await session.close()
 
