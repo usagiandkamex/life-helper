@@ -290,7 +290,7 @@ class AutomationRunner:
             raise
         finally:
             unsubscribe()
-            active.policy.release_all()
+            await active.release()
             # Always close: report_result is bound to this run's context, so a cached session would report into a
             # previous run. "continue" mode resumes the stored history from disk next time; "new" mode sessions are
             # deleted so per-run session state does not pile up on the volume.

@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     default_model: str = "auto"
     utility_model: str = "gpt-5-mini"
 
+    # Headless Chromium tools (browser_*). Turn off to save memory or when Chromium is not installed.
+    browser_enabled: bool = True
+
     # External API connectors (values come from ACA secrets; never stored in files).
     rakuten_application_id: SecretStr = SecretStr("")
     rakuten_access_key: SecretStr = SecretStr("")
