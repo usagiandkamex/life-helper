@@ -53,7 +53,8 @@ export const json = (body: unknown) => JSON.stringify(body)
 
 export function yen(value: number | null | undefined): string {
   if (value === null || value === undefined) return '—'
-  return `${Math.round(value).toLocaleString('ja-JP')} 円`
+  // 数字と「円」の間は改行しないように nbsp でつなぐ。
+  return `${Math.round(value).toLocaleString('ja-JP')}\u00a0円`
 }
 
 export function formatDate(iso: string | null | undefined): string {

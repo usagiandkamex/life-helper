@@ -41,6 +41,8 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   const [params, setParams] = useSearchParams()
   const [list, setList] = useState<AutomationList | null>(null)
   const [draft, setDraft] = useState<Draft | null>(null)
+  // null は「まだ読めていない」。読めたかどうかで、保存済みモデルが一覧にないときの書き方を変える。
+  const [models, setModels] = useState<{ id: string; name: string }[] | null>(null)
   const [runs, setRuns] = useState<RunRecord[]>([])
   const [run, setRun] = useState<RunRecord | null>(null)
   const [error, setError] = useState('')
@@ -67,6 +69,10 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
 
   useEffect(() => {
     load().catch((e) => setError(e.message))
+    // The list is only used to fill the model dropdown, so a failure (e.g. an expired token) is not shown here.
+    api<{ models: { id: string; name: string }[] }>('/api/models')
+      .then((d) => setModels(d.models))
+      .catch(() => undefined)
   }, [load])
 
   useEffect(() => {
@@ -83,7 +89,8 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   const save = async () => {
     if (!draft) return
     setError('')
-    const body = json(draft)
+    // 旧 UI では空のモデルも保存できたので、編集したら既定値に正規化しておく。
+    const body = json({ ...draft, model: draft.model || 'auto' })
     try {
       if (draft.id) await api(`/api/automations/${draft.id}`, { method: 'PUT', body })
       else await api('/api/automations', { method: 'POST', body })
@@ -176,7 +183,16 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
         </div>
       </section>
 
-      {draft && <Editor draft={draft} setDraft={setDraft} list={list} onSave={() => save()} onCancel={() => setDraft(null)} />}
+      {draft && (
+        <Editor
+          draft={draft}
+          setDraft={setDraft}
+          list={list}
+          models={models}
+          onSave={() => save()}
+          onCancel={() => setDraft(null)}
+        />
+      )}
 
       <section className="panel">
         <h2>実行履歴</h2>
@@ -230,12 +246,14 @@ function Editor({
   draft,
   setDraft,
   list,
+  models,
   onSave,
   onCancel,
 }: {
   draft: Draft
   setDraft: (d: Draft) => void
   list: AutomationList
+  models: { id: string; name: string }[] | null
   onSave: () => void
   onCancel: () => void
 }) {
@@ -244,6 +262,18 @@ function Editor({
   const setNotify = (patch: Partial<NotifySettings>) => set('notify', { ...draft.notify, ...patch })
   const s = draft.schedule
   const n = draft.notify
+  // The saved model stays selectable even when the list is unavailable or no longer offers it, so opening the
+  // editor never switches an automation to another model by itself. An empty model behaves like the default.
+  const model = draft.model || 'auto'
+  const available = models ?? []
+  const modelOptions = [
+    { id: 'auto', name: '自動（おまかせ）' },
+    ...available.filter((m) => m.id !== 'auto'),
+    // Only a loaded list can tell that a model is gone; an unreachable /api/models says nothing about it.
+    ...(model !== 'auto' && !available.some((m) => m.id === model)
+      ? [{ id: model, name: models ? `${model}（一覧にありません）` : model }]
+      : []),
+  ]
   return (
     <section className="panel editor-panel">
       <h2>{draft.id ? 'オートメーションの編集' : '新しいオートメーション'}</h2>
@@ -312,7 +342,13 @@ function Editor({
         </label>
         <label>
           モデル
-          <input value={draft.model} onChange={(e) => set('model', e.target.value)} />
+          <select value={model} onChange={(e) => set('model', e.target.value)}>
+            {modelOptions.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.name}
+              </option>
+            ))}
+          </select>
         </label>
         <label>
           最大実行時間（分、20 まで）
