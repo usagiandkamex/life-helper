@@ -13,6 +13,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 JST = ZoneInfo("Asia/Tokyo")
 MAX_RUNTIME_MINUTES = 20
+# Connectors that were replaced, and the connector that now does their job, so saved automations keep working.
+RETIRED_CONNECTORS = {"mufg_api": "toushin_lib"}
 
 
 class Schedule(BaseModel):
@@ -116,6 +118,11 @@ class Automation(BaseModel):
     notify: NotifySettings = Field(default_factory=NotifySettings)
     max_runtime_minutes: int = Field(default=MAX_RUNTIME_MINUTES, ge=1, le=MAX_RUNTIME_MINUTES)
     state: AutomationState = Field(default_factory=AutomationState)
+
+    @field_validator("connectors")
+    @classmethod
+    def _current_connectors(cls, v: list[str]) -> list[str]:
+        return list(dict.fromkeys(RETIRED_CONNECTORS.get(c, c) for c in v))
 
     def is_due(self, now: datetime) -> bool:
         if not self.enabled or not self.state.next_run_at:

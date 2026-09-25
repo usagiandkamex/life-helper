@@ -107,10 +107,14 @@ export type FundCandidate = {
   manager: string
   fund_code: string
   name: string
+  nickname?: string
   isin: string | null
   association_code: string | null
   price_unit: number
   score: number
+  exact?: boolean
+  nav?: number | null
+  date?: string | null
 }
 
 export type FundCandidates = {
@@ -118,6 +122,13 @@ export type FundCandidates = {
   candidates: FundCandidate[]
   errors: { code: string; error: string }[]
   note: string
+}
+
+export type FundAutoLink = {
+  linked: { id: string; name: string; official_name: string; code: string }[]
+  ambiguous: { id: string; name: string; reason: string }[]
+  unmatched: { id: string; name: string }[]
+  errors: { id: string; name: string; error: string }[]
 }
 
 export type PortfolioView = {
@@ -140,6 +151,7 @@ export type PortfolioView = {
   refresh_funds?: {
     updated: RefreshedNav[]
     errors: { code: string; error: string }[]
+    auto_link?: FundAutoLink
     manual: { id: string; name: string }[]
     note: string
   }

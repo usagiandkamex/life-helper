@@ -1,7 +1,7 @@
 """Fund NAV lookup: linking a holding to an official fund and refreshing 基準価額.
 
-Kept apart from the Stooq stock refresh on purpose: funds are not traded on an exchange, so their prices come
-from the fund manager instead, and a failure on one side never blocks the other.
+Kept apart from the stock price refresh on purpose: funds are not traded on an exchange, so their prices come
+from the fund library and the managers instead, and a failure on one side never blocks the other.
 """
 
 from __future__ import annotations
@@ -11,7 +11,14 @@ from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 
 from ..connectors.base import ConnectorError
-from ..connectors.fund_nav import MAX_CANDIDATES, FundNavConnector, nav_amount, nav_date
+from ..connectors.fund_nav import (
+    MAX_CANDIDATES,
+    FundNavConnector,
+    TooManyFundsError,
+    nav_amount,
+    nav_date,
+    normalize_name,
+)
 from ..connectors.registry import get_connectors
 from .clock import market_today
 from .portfolio import DEFAULT_PRICE_UNIT, FundRef, Holding, Price
@@ -24,9 +31,13 @@ logger = logging.getLogger(__name__)
 
 MANUAL_PROVIDER = "manual"
 NOTE = (
-    "基準価額は運用会社の公式 API・公式 CSV から取得しています（株価の Stooq 更新とは別処理です）。"
-    "自動取得に対応していないファンドは、公式サイトで確認して手入力してください。"
+    "基準価額は投資信託協会の投信総合検索ライブラリー（予備として運用会社の公式 CSV）から取得しています"
+    "（株価の更新とは別処理です）。取得元が未設定の投資信託は、ファンド名が一致する公式ファンドが 1 つだけなら"
+    "自動で紐付けます。紐付けられなかったファンドは「取得元を設定」から選ぶか、公式サイトで確認して手入力してください。"
 )
+# A fund linked by name is checked against the NAV the holding already has (from the broker CSV): a candidate
+# quoting a very different NAV is another fund, or quotes another number of units, so it is left to the user.
+AUTO_LINK_NAV_RATIO = (0.5, 2.0)
 
 
 def fund_connectors(ctx: AppContext) -> dict[str, FundNavConnector]:
@@ -74,6 +85,99 @@ async def suggest_funds(ctx: AppContext, name: str) -> dict:
         "errors": errors,
         "note": "名前が似ているだけの別ファンドがあります。公式名称を確認してから紐付けてください。",
     }
+
+
+def _plausible(holding: Holding, nav: float | None) -> bool:
+    """False when the holding's current NAV and the official one are too far apart to be the same fund."""
+    if holding.price is None or holding.price.value <= 0 or not nav:
+        return True
+    low, high = AUTO_LINK_NAV_RATIO
+    return low <= nav / holding.price.value <= high
+
+
+async def _verified_quote(ctx: AppContext, candidate: dict) -> dict:
+    """The NAV of ``candidate``, fetched through its fund page, and checked to be the fund the search named."""
+    quote = await fund_connectors(ctx)[candidate["provider"]].fund_nav(candidate["fund_code"], today=market_today())
+    listed = candidate.get("association_code")
+    if quote["fund_code"] != candidate["fund_code"] or (listed and quote["association_code"] != listed):
+        raise ConnectorError("検索結果とファンドページで協会コードが一致しないため、紐付けませんでした")
+    return quote
+
+
+async def auto_link_funds(ctx: AppContext, *, quotes: dict[tuple[str, str], dict] | None = None) -> dict:
+    """Links every fund without a source to the one official fund with the same name, if there is exactly one.
+
+    A name that matches no fund, or more than one, is left for the user to choose, and a failed search is
+    reported as an error rather than as "no match". Funds the user set to manual entry are never touched.
+    A fund is only linked once its NAV was fetched through the ISIN's own fund page; the NAVs fetched on the way
+    are put in ``quotes`` (keyed like the links, by provider and fund code) so a refresh need not fetch them again.
+    """
+    store = portfolio_store(ctx)
+    report: dict[str, list[dict]] = {"linked": [], "ambiguous": [], "unmatched": [], "errors": []}
+    pending = [h for h in store.load().holdings if h.kind == "fund" and h.fund is None and h.name.strip()]
+    by_name: dict[str, list[Holding]] = {}
+    for h in pending:
+        by_name.setdefault(normalize_name(h.name), []).append(h)
+    chosen: dict[str, tuple[dict, dict]] = {}
+    # Search and fetch outside the file lock, then apply under it: the lock is never held across network calls.
+    for group in by_name.values():
+        rows = [{"id": h.id, "name": h.name} for h in group]
+        try:
+            candidates = [
+                c
+                for connector in fund_connectors(ctx).values()
+                for c in await connector.search_funds(group[0].name, exhaustive=True)
+            ]
+            exact = {(c["provider"], c["fund_code"]): c for c in candidates if c["exact"]}
+            if len(exact) != 1:
+                if exact:
+                    reason = f"同じ名前の公式ファンドが {len(exact)} 件あります"
+                    report["ambiguous"] += [r | {"reason": reason} for r in rows]
+                else:
+                    report["unmatched"] += rows
+                continue
+            (candidate,) = exact.values()
+            quote = await _verified_quote(ctx, candidate)
+        except TooManyFundsError as e:
+            report["ambiguous"] += [r | {"reason": str(e)} for r in rows]
+            continue
+        except ConnectorError as e:
+            report["errors"] += [r | {"error": str(e)} for r in rows]
+            continue
+        if quotes is not None:
+            quotes[(candidate["provider"], quote["fund_code"])] = quote
+        for h, row in zip(group, rows, strict=True):
+            if _plausible(h, quote["nav"]):
+                chosen[h.id] = (candidate, quote)
+            else:
+                report["ambiguous"] += [row | {"reason": "保有中の基準価額と公式の基準価額が大きく違います"}]
+    before = {h.id: (h.kind, h.name, h.code) for h in pending}
+    with store.transaction() as portfolio:
+        for target in portfolio.holdings:
+            if target.id not in chosen:
+                continue
+            # The holding may have been edited, relinked or set to manual entry while the search was running.
+            if target.fund is not None or (target.kind, target.name, target.code) != before[target.id]:
+                continue
+            candidate, quote = chosen[target.id]
+            target.fund = FundRef(
+                provider=candidate["provider"],
+                fund_code=quote["fund_code"],
+                manager=candidate["manager"],
+                isin=quote["isin"],
+                association_code=quote["association_code"],
+                price_unit=quote["price_unit"],
+                source_url=quote["source_url"],
+            )
+            report["linked"].append(
+                {
+                    "id": target.id,
+                    "name": target.name,
+                    "official_name": candidate["name"],
+                    "code": quote["fund_code"],
+                }
+            )
+    return report
 
 
 def keep_fund_links(previous: list[Holding], imported: list[Holding]) -> None:
@@ -169,7 +273,12 @@ async def link_fund(
 
 
 async def refresh_fund_navs(ctx: AppContext) -> dict:
-    """Updates the NAV of every linked fund. One fund failing leaves the others, and its own NAV, untouched."""
+    """Links unlinked funds by name, then updates the NAV of every linked fund.
+
+    One fund failing leaves the others, and its own NAV, untouched.
+    """
+    fetched: dict[tuple[str, str], dict] = {}
+    links = await auto_link_funds(ctx, quotes=fetched)
     store = portfolio_store(ctx)
     today = market_today()
     connectors = fund_connectors(ctx)
@@ -185,7 +294,8 @@ async def refresh_fund_navs(ctx: AppContext) -> dict:
             errors.append({"code": code, "error": f"対応していないデータ提供元です（{provider}）"})
             continue
         try:
-            quote = await connector.fund_nav(code, today=today)
+            # A fund linked a moment ago already had its NAV fetched to confirm the link.
+            quote = fetched.get((provider, code)) or await connector.fund_nav(code, today=today)
             quotes[(provider, code)] = (quote, nav_price(quote))
         except ConnectorError as e:
             errors.append({"code": code, "error": str(e)})
@@ -198,10 +308,15 @@ async def refresh_fund_navs(ctx: AppContext) -> dict:
             if holding.kind != "fund" or not holding.fund or not holding.fund.automatic:
                 continue
             found = quotes.get((holding.fund.provider, holding.fund.fund_code))
-            # apply_price keeps the newer NAV, so a provider replaying an old date never overwrites a newer one.
-            if not found or not holding.apply_price(found[1]):
+            if not found:
                 continue
             quote = found[0]
+            # The codes the source confirmed replace whatever the link was saved with (a migrated link, say).
+            holding.fund.isin = quote["isin"] or holding.fund.isin
+            holding.fund.association_code = quote["association_code"] or holding.fund.association_code
+            # apply_price keeps the newer NAV, so a provider replaying an old date never overwrites a newer one.
+            if not holding.apply_price(found[1]):
+                continue
             holding.fund.price_unit = quote["price_unit"]
             holding.fund.source_url = quote["source_url"]
             updated.append(
@@ -219,6 +334,7 @@ async def refresh_fund_navs(ctx: AppContext) -> dict:
     return {
         "updated": updated,
         "errors": errors,
+        "auto_link": links,
         "manual": [{"id": h.id, "name": h.name} for h in holdings if not (h.fund and h.fund.automatic)],
         "note": NOTE,
     }

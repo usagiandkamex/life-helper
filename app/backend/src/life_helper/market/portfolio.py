@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import random
+import re
 import threading
 import time
 import uuid
@@ -16,7 +17,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from ..automation.locks import FileLock
 from ..knowledge.store import atomic_write
@@ -25,8 +26,16 @@ from .clock import market_today
 Account = Literal["nisa_tsumitate", "nisa_growth", "tokutei", "ippan", "ideco"]
 Kind = Literal["stock", "etf", "reit", "fund"]
 # Fund NAV providers double as price sources, so the screen can show where a NAV came from.
-FundProvider = Literal["mufg_api", "rakuten_csv", "daiwa_csv", "manual"]
-PriceSource = Literal["broker_csv", "stooq", "nav_site", "manual", "mufg_api", "rakuten_csv", "daiwa_csv"]
+# mufg_api is retired (its API refuses every request); it stays only so that saved portfolios still load.
+FundProvider = Literal["toushin_lib", "rakuten_csv", "daiwa_csv", "manual", "mufg_api"]
+PriceSource = Literal[
+    "broker_csv", "stooq", "nav_site", "manual", "toushin_lib", "rakuten_csv", "daiwa_csv", "mufg_api"
+]
+OFFICIAL_NAV_SOURCES = frozenset({"toushin_lib", "rakuten_csv", "daiwa_csv", "mufg_api"})
+# A broker CSV is dated with the day it was imported, not with the 基準日 of the NAV inside it, which is up to a
+# week older around Japanese holidays. An official NAV that much older than the import is still the newer one.
+BROKER_NAV_GRACE_DAYS = 10
+ISIN_SHAPE = re.compile(r"JP[0-9A-Z]{9}[0-9]")
 Market = Literal["jp", "us"]
 Currency = Literal["JPY", "USD"]
 # Japanese funds quote the NAV per 10,000 units, but the unit is kept per fund because it can differ.
@@ -62,7 +71,7 @@ class Price(BaseModel):
 
 
 class FundRef(BaseModel):
-    """Links a holding to an official fund. Only set after the user confirmed the match, never by name alone."""
+    """Links a holding to an official fund: chosen by the user, or set when exactly one fund has the same name."""
 
     provider: FundProvider = Field(description="基準価額のデータ提供元")
     fund_code: str = Field(default="", description="提供元のファンドコード")
@@ -88,7 +97,32 @@ class Holding(BaseModel):
     cost_total: float = Field(ge=0, description="取得金額の合計（円、簿価）")
     price: Price | None = None
     valuation_yen: float | None = Field(default=None, description="評価額（円）。証券会社 CSV の値など")
-    fund: FundRef | None = Field(default=None, description="投資信託の公式データとの紐付け（利用者が確認して設定）")
+    fund: FundRef | None = Field(default=None, description="投資信託の公式データとの紐付け")
+
+    @model_validator(mode="after")
+    def _retire_mufg_link(self) -> Holding:
+        """Moves a link to the retired MUFG API over to the fund library, which knows the fund by its ISIN.
+
+        A link without a valid ISIN is dropped, so the fund is matched again by name instead of failing forever.
+        The price it already has is kept.
+        """
+        if self.fund is None or self.fund.provider != "mufg_api":
+            return self
+        codes = (str(c or "").strip().upper() for c in (self.fund.isin, self.fund.fund_code))
+        isin = next((c for c in codes if ISIN_SHAPE.fullmatch(c)), None)
+        self.fund = (
+            FundRef(
+                provider="toushin_lib",
+                fund_code=isin,
+                manager=self.fund.manager,
+                isin=isin,
+                association_code=self.fund.association_code,
+                price_unit=self.fund.price_unit,
+            )
+            if isin
+            else None
+        )
+        return self
 
     @property
     def price_unit(self) -> Decimal:
@@ -108,11 +142,24 @@ class Holding(BaseModel):
 
     def apply_price(self, price: Price) -> bool:
         """Uses ``price`` if it is at least as new as the current one. Returns True when applied."""
-        if self.price is not None and self.price.date > price.date:
+        if self.price is not None and self.price.date > price.date and not self._replaces_broker_nav(price):
             return False
         self.price = price
         self.valuation_yen = None
         return True
+
+    def _replaces_broker_nav(self, price: Price) -> bool:
+        """An official NAV replaces a broker CSV one dated up to ``BROKER_NAV_GRACE_DAYS`` later (the import date)."""
+        current = self.price
+        if self.kind != "fund" or current is None or current.source != "broker_csv":
+            return False
+        if price.source not in OFFICIAL_NAV_SOURCES:
+            return False
+        try:
+            oldest = date.fromisoformat(current.date) - timedelta(days=BROKER_NAV_GRACE_DAYS)
+            return date.fromisoformat(price.date) >= oldest
+        except ValueError:
+            return False
 
 
 class Portfolio(BaseModel):
