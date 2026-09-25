@@ -392,7 +392,7 @@ class BrowserSession:
 
     @staticmethod
     async def _attr_equals(page: Page, css: str, attribute: str, value: str) -> bool:
-        """Compares the ids in Python: an id may hold characters that cannot be put into a CSS selector safely."""
+        """Compares the values in Python: an id may hold characters that cannot be put into a CSS selector safely."""
         elements = page.locator(css)
         total = await elements.count()
         if total > MAX_CHECKED_ELEMENTS:
