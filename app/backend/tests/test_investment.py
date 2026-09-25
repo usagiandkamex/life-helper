@@ -666,7 +666,7 @@ def test_manual_nav_rejects_an_excessive_value_or_future_basis_date(client, ctx)
 
 
 def test_market_today_is_the_japanese_date_even_when_utc_is_still_yesterday(monkeypatch):
-    """The container runs on UTC, so 09:00 JST would otherwise look like tomorrow and reject a NAV of today."""
+    """The container runs on UTC, so between 00:00 and 09:00 JST today would look like tomorrow to it."""
 
     class _Clock(datetime):
         @classmethod

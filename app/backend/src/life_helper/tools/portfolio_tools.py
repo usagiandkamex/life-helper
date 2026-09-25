@@ -141,7 +141,7 @@ def build_tools(ctx: AppContext) -> list[ToolSpec]:
         if connector is None:
             return {"error": f"対応していないデータ提供元です: {params.provider}"}
         try:
-            return await connector.fund_nav(params.fund_code)
+            return await connector.fund_nav(params.fund_code, today=market_today())
         except ConnectorError as e:
             return {"error": str(e)}
 
