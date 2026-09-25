@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import os
 import sys
 from pathlib import Path
@@ -179,6 +181,122 @@ async def test_proxy_blocks_credentials_and_sensitive_data_in_http_urls(egress):
     finally:
         origin.close()
     assert requests == []
+
+
+@pytest.fixture
+async def websocket_origin():
+    requests: list[bytes] = []
+    messages: list[bytes] = []
+
+    async def handle(reader, writer):
+        try:
+            head = await reader.readuntil(b"\r\n\r\n")
+            requests.append(head)
+            headers = dict(line.lower().split(b":", 1) for line in head.split(b"\r\n")[1:] if b":" in line)
+            if b"upgrade" not in headers.get(b"connection", b""):
+                writer.write(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+                await writer.drain()
+                return
+            key = next(
+                line.split(b":", 1)[1].strip()
+                for line in head.split(b"\r\n")
+                if line.lower().startswith(b"sec-websocket-key:")
+            )
+            accept = base64.b64encode(
+                hashlib.sha1(key + b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11", usedforsecurity=False).digest()
+            )
+            writer.write(
+                b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: "
+                + accept
+                + b"\r\n\r\n"
+            )
+            await writer.drain()
+            # Echo one small masked text frame, enough to exercise both directions of the upgraded connection.
+            opcode, length = await reader.readexactly(2)
+            assert opcode == 0x81 and 0x80 <= length < 0xFE
+            mask = await reader.readexactly(4)
+            data = await reader.readexactly(length & 0x7F)
+            message = bytes(byte ^ mask[index % 4] for index, byte in enumerate(data))
+            messages.append(message)
+            writer.write(bytes([0x81, len(message)]) + message)
+            await writer.drain()
+        finally:
+            writer.close()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    yield server.sockets[0].getsockname()[1], requests, messages
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.parametrize("scheme", ["http", "ws"])
+async def test_proxy_relays_websocket_upgrade_and_frames(egress, websocket_origin, monkeypatch, scheme):
+    port, requests, messages = websocket_origin
+
+    async def vetted(host):
+        assert host == "public.example.com"
+        return ["127.0.0.1"], None
+
+    monkeypatch.setattr(proxy_module, "resolve_public", vetted)
+    reader, writer = await asyncio.open_connection("127.0.0.1", egress.port)
+    try:
+        writer.write(
+            f"GET {scheme}://public.example.com:{port}/socket?q=test HTTP/1.1\r\nHost: public.example.com\r\n"
+            "Connection: keep-alive, UpGrAdE\r\nUpgrade: WebSocket\r\nSec-WebSocket-Version: 13\r\n"
+            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n".encode()
+        )
+        await writer.drain()
+        head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 5)
+        assert head.startswith(b"HTTP/1.1 101")
+        assert b"Connection: Upgrade\r\n" in head and b"Connection: close" not in head
+        writer.write(b"\x81\x82\x00\x00\x00\x00hi")
+        await writer.drain()
+        assert await asyncio.wait_for(reader.readexactly(4), 5) == b"\x81\x02hi"
+        assert messages == [b"hi"]
+        assert requests[0].startswith(b"GET /socket?q=test HTTP/1.1")
+        assert b"Connection: Upgrade\r\n" in requests[0] and b"keep-alive" not in requests[0]
+    finally:
+        writer.close()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ws://127.0.0.1/",
+        "ws://api.github.com/",
+        "ws://internal.example.com/",
+        "ws://public.example.com/?k=SUPER%53ECRETKEY",
+        "ws://public.example.com/?card=4111111111111111",
+    ],
+)
+async def test_proxy_checks_websocket_urls_before_connecting(egress, fake_dns, monkeypatch, url):
+    fake_dns["internal.example.com"] = ["10.0.0.8"]
+
+    async def unexpected_connect(*args):
+        raise AssertionError("blocked WebSockets must not connect upstream")
+
+    monkeypatch.setattr(egress, "_connect", unexpected_connect)
+    head = f"GET {url} HTTP/1.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n".encode()
+    assert (await exchange(egress.port, head)).startswith(b"HTTP/1.1 403")
+
+
+async def test_failed_websocket_upgrade_still_closes_http_connection(egress, monkeypatch):
+    requests = []
+    origin, port = await start_origin(requests)
+
+    async def vetted(host):
+        return ["127.0.0.1"], None
+
+    monkeypatch.setattr(proxy_module, "resolve_public", vetted)
+    try:
+        answer = await exchange(
+            egress.port,
+            f"GET http://public.example.com:{port}/ HTTP/1.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n".encode(),
+        )
+        assert answer.startswith(b"HTTP/1.1 200")
+        assert b"Connection: close\r\n" in answer and b"Upgrade:" not in answer
+    finally:
+        origin.close()
 
 
 # -- session without Chromium -----------------------------------------------------------------------------
@@ -366,6 +484,40 @@ PAGE = """<!doctype html><html><head><title>テストのページ</title></head>
 <form><input name="user"><input name="pw" type="password"></form>
 <div id="more"></div><button onclick="document.getElementById('more').textContent='続きの内容'">もっと見る</button>
 </body></html>"""
+
+
+@pytest.mark.skipif(not _chromium_installed(), reason="Chromium for Playwright is not installed")
+async def test_chromium_websocket_uses_egress_proxy(tmp_path, websocket_origin, monkeypatch):
+    port, requests, messages = websocket_origin
+
+    async def vetted(host):
+        assert host == "public.example.com"
+        return ["127.0.0.1"], None
+
+    async def site(route):
+        await route.fulfill(content_type="text/html", body="<html><body>WebSocket</body></html>")
+
+    monkeypatch.setattr(proxy_module, "resolve_public", vetted)
+    monkeypatch.setattr(BrowserSession, "_route", staticmethod(site))
+    session = BrowserSession(BrowserService(), MASKER, tmp_path)
+    try:
+        result = await session.run(lambda: session.open("http://public.example.com/"))
+        assert "error" not in result, result
+        echo = await asyncio.wait_for(
+            session._current().evaluate(
+                """url => new Promise((resolve, reject) => {
+                    const socket = new WebSocket(url);
+                    socket.onopen = () => socket.send('hi');
+                    socket.onmessage = event => { resolve(event.data); socket.close(); };
+                    socket.onerror = () => reject(new Error('WebSocket failed'));
+                })""",
+                f"ws://public.example.com:{port}/socket",
+            ),
+            10,
+        )
+        assert echo == "hi" and messages == [b"hi"] and len(requests) == 1
+    finally:
+        await session.close()
 
 
 @pytest.mark.skipif(not _chromium_installed(), reason="Chromium for Playwright is not installed")

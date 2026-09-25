@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 HEAD_TIMEOUT_SECONDS = 30
 CONNECT_TIMEOUT_SECONDS = 15
 CHUNK = 64 * 1024
-HOP_BY_HOP = {b"connection", b"keep-alive", b"proxy-connection", b"proxy-authorization"}
+HOP_BY_HOP = {b"connection", b"keep-alive", b"proxy-connection", b"proxy-authorization", b"upgrade"}
 BLOCKED_BODY = "life-helper によりブロックされました: {reason}"
 REASON_PHRASES = {400: "Bad Request", 403: "Forbidden", 502: "Bad Gateway"}
 
@@ -44,6 +44,19 @@ def _without_hop_by_hop(head: bytes) -> list[bytes]:
     return [lines[0]] + [h for h in lines[1:] if h and h.split(b":", 1)[0].strip().lower() not in HOP_BY_HOP]
 
 
+def _header_tokens(head: bytes, name: bytes) -> set[bytes]:
+    tokens: set[bytes] = set()
+    for line in head.split(b"\r\n")[1:]:
+        key, _, value = line.partition(b":")
+        if key.strip().lower() == name:
+            tokens.update(token.strip().lower() for token in value.split(b","))
+    return tokens
+
+
+def _websocket_upgrade(head: bytes) -> bool:
+    return b"upgrade" in _header_tokens(head, b"connection") and _header_tokens(head, b"upgrade") == {b"websocket"}
+
+
 async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     try:
         while data := await reader.read(CHUNK):
@@ -56,13 +69,23 @@ async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> N
             writer.close()
 
 
-async def _relay_response(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    """Marks a plain-HTTP response as closing, so Chromium never reuses this upstream for a request to another host."""
+async def _relay_response(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter, *, websocket: bool = False
+) -> None:
+    """Only a requested WebSocket upgrade may keep the connection; ordinary HTTP responses always close it."""
     try:
         head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), HEAD_TIMEOUT_SECONDS)
         lines = _without_hop_by_hop(head)
-        closing = b"Connection: close\r\nProxy-Connection: close\r\n\r\n"
-        writer.write(b"".join(line + b"\r\n" for line in lines) + closing)
+        switched = lines[0].split(b" ")[1] == b"101"
+        if switched and not (websocket and _websocket_upgrade(head)):
+            writer.close()
+            return
+        connection = (
+            b"Connection: Upgrade\r\nUpgrade: websocket\r\n\r\n"
+            if switched
+            else b"Connection: close\r\nProxy-Connection: close\r\n\r\n"
+        )
+        writer.write(b"".join(line + b"\r\n" for line in lines) + connection)
         await writer.drain()
     except (OSError, TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError):
         with contextlib.suppress(Exception):
@@ -111,18 +134,19 @@ class EgressProxy:
         lines = head.split(b"\r\n")
         method, target, version = lines[0].decode("latin-1").split(" ")
         tunnel = method.upper() == "CONNECT"
+        websocket = method.upper() == "GET" and _websocket_upgrade(head)
         if tunnel:
             host, port = _split_authority(target)
             # Only the authority is visible on CONNECT: the request line inside the tunnel is encrypted.
             reason = host_rejection(host)
         else:
             parts = urlsplit(target)
-            if parts.scheme != "http" or not parts.hostname:
+            if (parts.scheme != "http" and not (parts.scheme == "ws" and websocket)) or not parts.hostname:
                 await self._reply(writer, 400, "http の URL だけ中継できます")
                 return
             host, port = parts.hostname, parts.port or 80
             # The whole URL is visible here, so it gets the same check as browser_open (never echoed back).
-            reason = url_rejection(target, self._masker)
+            reason = url_rejection("http" + target[2:] if parts.scheme == "ws" else target, self._masker)
 
         addresses: list[str] = []
         if reason is None:
@@ -144,10 +168,12 @@ class EgressProxy:
             return
         path = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
         headers = _without_hop_by_hop(head)[1:]
-        # One request per upstream connection: the next request may target another host and must be vetted.
+        # Only WebSocket upgrades keep a connection; another HTTP request must go through the checks again.
         request = f"{method} {path} {version}\r\n".encode("latin-1") + b"".join(h + b"\r\n" for h in headers)
-        up_writer.write(request + b"Connection: close\r\n\r\n")
-        await asyncio.gather(_pipe(reader, up_writer), _relay_response(up_reader, writer))
+        connection = b"Connection: Upgrade\r\nUpgrade: websocket\r\n\r\n" if websocket else b"Connection: close\r\n\r\n"
+        up_writer.write(request + connection)
+        await up_writer.drain()
+        await asyncio.gather(_pipe(reader, up_writer), _relay_response(up_reader, writer, websocket=websocket))
 
     @staticmethod
     async def _connect(addresses: list[str], port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter] | None:
