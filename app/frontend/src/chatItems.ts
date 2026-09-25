@@ -1,4 +1,14 @@
-import type { ChartData, HistoryMessage, Screenshot, TurnEvent } from './types'
+import type { ApprovalStatus, ChartData, HistoryMessage, Screenshot, TurnEvent } from './types'
+
+export type ApprovalItem = {
+  kind: 'approval'
+  id: string
+  turnId: string
+  path: string
+  diff: string
+  status: ApprovalStatus
+  written?: boolean
+}
 
 export type Item =
   | { kind: 'user'; text: string }
@@ -14,15 +24,18 @@ export type Item =
       screenshot?: Screenshot
     }
   | { kind: 'file_write'; path: string; diff: string }
+  | ApprovalItem
   | { kind: 'error'; message: string }
   | { kind: 'note'; text: string }
 
-export function applyEvent(items: Item[], ev: TurnEvent): Item[] {
+// turnId is the chat turn the events belong to; approval cards post their decision to it.
+export function applyEvent(items: Item[], ev: TurnEvent, turnId = ''): Item[] {
   const next = [...items]
   const last = next[next.length - 1]
   const closeStreaming = () => {
     if (last?.kind === 'assistant' && last.streaming) next[next.length - 1] = { ...last, streaming: false }
   }
+  const approvalIndex = (id: string) => next.findIndex((i) => i.kind === 'approval' && i.id === id)
   switch (ev.type) {
     case 'delta':
       if (last?.kind === 'assistant' && last.streaming) next[next.length - 1] = { ...last, text: last.text + ev.text }
@@ -48,10 +61,27 @@ export function applyEvent(items: Item[], ev: TurnEvent): Item[] {
         }
       return next
     }
-    case 'file_write':
+    case 'file_write': {
+      // A write the user approved on a card is shown on that card instead of a separate line.
+      const idx = ev.approval_id ? approvalIndex(ev.approval_id) : -1
+      if (idx >= 0) {
+        next[idx] = { ...(next[idx] as ApprovalItem), written: true }
+        return next
+      }
       closeStreaming()
       next.push({ kind: 'file_write', path: ev.path, diff: ev.diff })
       return next
+    }
+    case 'approval_request':
+      if (approvalIndex(ev.id) >= 0) return items
+      closeStreaming()
+      next.push({ kind: 'approval', id: ev.id, turnId, path: ev.path, diff: ev.diff, status: 'pending' })
+      return next
+    case 'approval_result': {
+      const idx = approvalIndex(ev.id)
+      if (idx >= 0) next[idx] = { ...(next[idx] as ApprovalItem), status: ev.status }
+      return next
+    }
     case 'error':
       closeStreaming()
       next.push({ kind: 'error', message: ev.message })
@@ -79,9 +109,13 @@ export function fromHistory(messages: HistoryMessage[]): Item[] {
 export const TOOL_LABELS: Record<string, string> = {
   view: 'ファイルを読む',
   grep: '知識を検索',
+  rg: '知識を検索',
   glob: 'ファイルを探す',
+  // create / edit are no longer exposed, but older conversations still show them in their history.
   create: 'ファイルを作成',
   edit: 'ファイルを編集',
+  write_knowledge_file: 'ファイルに保存',
+  edit_knowledge_file: 'ファイルを編集',
   web_fetch: 'Web ページを参照',
   skill: 'スキルを使用',
   browser_open: 'ブラウザで開く',

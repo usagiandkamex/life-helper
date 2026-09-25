@@ -21,16 +21,40 @@ from ..security import SecretMasker
 from .conversations import ConversationStore
 from .events import map_event
 from .manager import ActiveSession, CopilotManager, NoTokenError, SessionStateError
+from .policy import Approval, WriteScope
 
 logger = logging.getLogger(__name__)
 
 HEARTBEAT_SECONDS = 15
 TURN_RETENTION_SECONDS = 15 * 60
 MAX_EVENTS_PER_TURN = 20_000
+APPROVAL_TIMEOUT_SECONDS = 10 * 60
+APPROVAL_DECISIONS = ("approve", "approve_all", "reject")
+APPROVAL_REASONS = {
+    "rejected": "利用者が書き込みを却下しました",
+    "expired": f"{APPROVAL_TIMEOUT_SECONDS // 60} 分以内に承認されなかったため、書き込みませんでした",
+    "cancelled": "回答が中断・終了したため、書き込みませんでした",
+}
 
 
 class TurnBusyError(RuntimeError):
     pass
+
+
+class ApprovalNotFoundError(LookupError):
+    pass
+
+
+class ApprovalResolvedError(RuntimeError):
+    pass
+
+
+@dataclass
+class PendingApproval:
+    id: str
+    path: str
+    future: asyncio.Future
+    status: str = "pending"  # pending → approved / rejected / expired / cancelled
 
 
 @dataclass
@@ -39,10 +63,15 @@ class Turn:
     conversation_id: str
     events: list[dict] = field(default_factory=list)
     done: bool = False
+    # Set as soon as the turn is stopping (中断・タイムアウト・終了), before anything is awaited: no write may go on.
+    stopping: bool = False
     finished_at: float | None = None
     changed: asyncio.Event = field(default_factory=asyncio.Event)
     active: ActiveSession | None = None
     task: asyncio.Task | None = None
+    approvals: dict[str, PendingApproval] = field(default_factory=dict)
+    # "この回答中はすべて承認": the remaining writes of this turn are approved without a card.
+    approve_all: bool = False
 
 
 class TurnManager:
@@ -121,16 +150,18 @@ class TurnManager:
 
     async def _run(self, turn: Turn, prompt: str, model: str) -> None:
         conversation = self.conversations.get(turn.conversation_id)
+        scope = WriteScope(
+            approver=lambda path, diff: self._approve(turn, path, diff),
+            on_write=lambda path, diff, approval_id: self._emit_threadsafe(
+                turn, {"type": "file_write", "path": path, "diff": diff[:4000], "approval_id": approval_id}
+            ),
+            is_active=lambda: not turn.done and not turn.stopping,
+        )
         try:
             if conversation is None:
                 raise LookupError("conversation not found")
             turn.active = await self.manager.open_session(
-                turn.conversation_id,
-                model=model,
-                resume=conversation.started,
-                on_write=lambda path, diff: self._emit_threadsafe(
-                    turn, {"type": "file_write", "path": path, "diff": self.masker.mask_text(diff[:4000])}
-                ),
+                turn.conversation_id, model=model, resume=conversation.started, write_scope=scope
             )
             self.conversations.update(turn.conversation_id, started=True, model=model)
             unsubscribe = turn.active.session.on(lambda ev: self._on_event(turn, ev))
@@ -158,9 +189,17 @@ class TurnManager:
                 await self.manager.close_session(turn.conversation_id)
             self._emit(turn, {"type": "error", "message": self.masker.mask_text(str(exc)) or "エラーが発生しました"})
         finally:
+            # From here on no approval or approved write may go on (the release below awaits); settle the open
+            # cards before "end" so every card receives its result on the stream.
+            turn.stopping = True
+            self._cancel_approvals(turn)
             if turn.active is not None:
                 await turn.active.release()
             turn.done = True
+            policy = turn.active.policy if turn.active is not None else None
+            if policy is not None and policy.write_scope is scope:
+                # Do not keep this turn (and its events) alive through the cached session's policy.
+                policy.write_scope = None
             turn.finished_at = time.monotonic()
             self._busy.pop(turn.conversation_id, None)
             self._emit(turn, {"type": "end"})
@@ -171,7 +210,64 @@ class TurnManager:
         if mapped is not None:
             self._emit_threadsafe(turn, mapped)
 
+    # -- write approvals ---------------------------------------------------------------------------------
+
+    async def _approve(self, turn: Turn, path: str, diff: str) -> Approval:
+        """Shows an approval card for a knowledge-base write and waits for the user's decision."""
+        if turn.done or turn.stopping:
+            return Approval(False, APPROVAL_REASONS["cancelled"])
+        if turn.approve_all:
+            return Approval(True)
+        approval = PendingApproval(id=uuid.uuid4().hex, path=path, future=asyncio.get_running_loop().create_future())
+        turn.approvals[approval.id] = approval
+        self._emit(
+            turn, {"type": "approval_request", "id": approval.id, "path": path, "diff": self.masker.mask_text(diff)}
+        )
+        try:
+            return await asyncio.wait_for(asyncio.shield(approval.future), APPROVAL_TIMEOUT_SECONDS)
+        except TimeoutError:
+            self._settle(turn, approval, "expired")
+            return approval.future.result()
+        except asyncio.CancelledError:
+            self._settle(turn, approval, "cancelled")
+            raise
+
+    def _settle(self, turn: Turn, approval: PendingApproval, status: str) -> None:
+        if approval.status != "pending":
+            return
+        approval.status = status
+        self._emit(turn, {"type": "approval_result", "id": approval.id, "status": status})
+        if not approval.future.done():
+            approved = status == "approved"
+            reason = "" if approved else APPROVAL_REASONS[status]
+            approval.future.set_result(Approval(approved, reason, approval.id))
+
+    def _cancel_approvals(self, turn: Turn) -> None:
+        for approval in list(turn.approvals.values()):
+            self._settle(turn, approval, "cancelled")
+
+    def resolve_approval(self, turn_id: str, approval_id: str, decision: str) -> str:
+        """Applies the user's decision; ``approve_all`` also approves every other open card of the turn."""
+        if decision not in APPROVAL_DECISIONS:
+            raise ValueError(f"unknown decision: {decision}")
+        turn = self._turns.get(turn_id)
+        approval = turn.approvals.get(approval_id) if turn is not None else None
+        if turn is None or approval is None:
+            raise ApprovalNotFoundError(approval_id)
+        if approval.status != "pending":
+            raise ApprovalResolvedError(approval.status)
+        if decision == "approve_all":
+            turn.approve_all = True
+            for pending in list(turn.approvals.values()):
+                self._settle(turn, pending, "approved")
+        else:
+            self._settle(turn, approval, "approved" if decision == "approve" else "rejected")
+        return approval.status
+
     async def _abort_quietly(self, turn: Turn) -> None:
+        # First of all: an already approved write may be waiting for the write lock and must not save any more.
+        turn.stopping = True
+        self._cancel_approvals(turn)
         if turn.active is not None:
             try:
                 await turn.active.session.abort()

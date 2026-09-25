@@ -78,7 +78,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
       source.onmessage = (msg) => {
         if (sourceRef.current !== source) return // another conversation was opened meanwhile
         const ev = JSON.parse(msg.data) as TurnEvent
-        setItems((prev) => applyEvent(prev, ev))
+        setItems((prev) => applyEvent(prev, ev, id))
         if (ev.type === 'end') {
           source.close()
           setTurnId(null)

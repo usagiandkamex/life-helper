@@ -1,4 +1,5 @@
 import { TOOL_LABELS, type Item } from '../chatItems'
+import { ApprovalCard } from './ApprovalCard'
 import { LazyChart } from './LazyChart'
 import { Markdown } from './Markdown'
 
@@ -53,6 +54,8 @@ export function MessageItem({ item, onSchedule }: { item: Item; onSchedule?: (te
       )
     case 'error':
       return <div className="banner error">{item.message}</div>
+    case 'approval':
+      return <ApprovalCard item={item} />
     case 'note':
       return <p className="hint msg-note">{item.text}</p>
   }

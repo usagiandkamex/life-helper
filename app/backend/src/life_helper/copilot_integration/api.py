@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from typing import Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from fastapi.responses import StreamingResponse
@@ -13,7 +14,7 @@ from ..context import AppContext, get_ctx
 from ..security import SENSITIVE_LABELS, detect_sensitive
 from .events import history_from_events
 from .manager import NoTokenError, SessionStateError
-from .turns import TurnBusyError
+from .turns import ApprovalNotFoundError, ApprovalResolvedError, TurnBusyError
 
 router = APIRouter(prefix="/api")
 
@@ -38,6 +39,10 @@ class TurnBody(BaseModel):
     prompt: str = Field(min_length=1, max_length=20000)
     model: str | None = None
     confirm_sensitive: bool = False
+
+
+class ApprovalBody(BaseModel):
+    decision: Literal["approve", "approve_all", "reject"]
 
 
 def _reauth() -> HTTPException:
@@ -184,6 +189,23 @@ async def abort_turn(
     turn_id: str, user: CurrentUser = Depends(require_user), ctx: AppContext = Depends(get_ctx)
 ) -> dict:
     return {"aborted": await ctx.turns.abort(turn_id)}
+
+
+@router.post("/turns/{turn_id}/approvals/{approval_id}")
+async def decide_approval(
+    turn_id: str,
+    approval_id: str,
+    body: ApprovalBody,
+    user: CurrentUser = Depends(require_user),
+    ctx: AppContext = Depends(get_ctx),
+) -> dict:
+    try:
+        result = ctx.turns.resolve_approval(turn_id, approval_id, body.decision)
+    except ApprovalNotFoundError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "approval not found (it may have expired)") from e
+    except ApprovalResolvedError as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, {"code": "resolved", "status": str(e)}) from e
+    return {"status": result}
 
 
 @router.post("/memories/organize")

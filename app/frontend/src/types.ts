@@ -16,12 +16,16 @@ export type ChartData = { type: string; x: string; series: string[]; data: Recor
 
 export type Screenshot = { url: string }
 
+export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'expired' | 'cancelled'
+
 export type TurnEvent =
   | { type: 'delta'; text: string }
   | { type: 'message'; content: string }
   | { type: 'tool_start'; id: string; name: string; args: string }
   | { type: 'tool_end'; id: string; success: boolean; error: string; result: string; chart?: ChartData; screenshot?: Screenshot }
-  | { type: 'file_write'; path: string; diff: string }
+  | { type: 'file_write'; path: string; diff: string; approval_id?: string | null }
+  | { type: 'approval_request'; id: string; path: string; diff: string }
+  | { type: 'approval_result'; id: string; status: Exclude<ApprovalStatus, 'pending'> }
   | { type: 'error'; message: string; code?: string }
   | { type: 'usage'; model: string }
   | { type: 'follow_up' }
