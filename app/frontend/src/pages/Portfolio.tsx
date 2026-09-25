@@ -633,10 +633,10 @@ export function PortfolioPage() {
               <tr>
                 <th>口座</th>
                 <th>銘柄</th>
-                <th>数量</th>
-                <th>取得額</th>
-                <th>評価額</th>
-                <th>損益</th>
+                <th className="num">数量</th>
+                <th className="num">取得額</th>
+                <th className="num">評価額</th>
+                <th className="num">損益</th>
                 <th>価格</th>
                 <th>取得元</th>
                 <th />
@@ -650,10 +650,10 @@ export function PortfolioPage() {
                     {h.name}
                     {h.code && <small> ({h.code})</small>}
                   </td>
-                  <td>{h.quantity.toLocaleString('ja-JP')}</td>
-                  <td>{yen(h.cost_total)}</td>
-                  <td>{yen(h.value)}</td>
-                  <td className={h.gain !== null && h.gain < 0 ? 'neg' : 'pos'}>{yen(h.gain)}</td>
+                  <td className="num">{h.quantity.toLocaleString('ja-JP')}</td>
+                  <td className="num">{yen(h.cost_total)}</td>
+                  <td className="num">{yen(h.value)}</td>
+                  <td className={`num ${h.gain !== null && h.gain < 0 ? 'neg' : 'pos'}`}>{yen(h.gain)}</td>
                   <td>
                     <PriceCell holding={h} />
                   </td>
