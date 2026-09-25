@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from ..connectors.base import ConnectorError
 from ..connectors.fund_nav import MAX_CANDIDATES, FundNavConnector, nav_amount, nav_date
 from ..connectors.registry import get_connectors
+from .clock import market_today
 from .portfolio import DEFAULT_PRICE_UNIT, FundRef, Holding, Price
 from .service import portfolio_store
 
@@ -115,7 +116,7 @@ async def link_fund(
         if manual_nav is not None:
             try:
                 manual_nav = nav_amount(manual_nav)
-                nav_date(price_date, latest=date.today())
+                nav_date(price_date, latest=market_today())
             except ConnectorError as e:
                 return {"error": str(e)}
         fund = FundRef(provider=MANUAL_PROVIDER, price_unit=price_unit)
@@ -126,7 +127,7 @@ async def link_fund(
         if connector is None:
             return {"error": f"対応していないデータ提供元です: {provider}"}
         try:
-            quote = await connector.fund_nav(fund_code)
+            quote = await connector.fund_nav(fund_code, today=market_today())
             price = nav_price(quote)
         except ConnectorError as e:
             return {"error": str(e)}
@@ -170,7 +171,7 @@ async def link_fund(
 async def refresh_fund_navs(ctx: AppContext) -> dict:
     """Updates the NAV of every linked fund. One fund failing leaves the others, and its own NAV, untouched."""
     store = portfolio_store(ctx)
-    today = date.today()
+    today = market_today()
     connectors = fund_connectors(ctx)
     holdings = [h for h in store.load().holdings if h.kind == "fund"]
     wanted = sorted({(h.fund.provider, h.fund.fund_code) for h in holdings if h.fund and h.fund.automatic})

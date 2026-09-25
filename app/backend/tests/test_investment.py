@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -11,7 +11,9 @@ from pydantic import SecretStr
 
 from life_helper.connectors.fund_nav import MAX_NAV
 from life_helper.connectors.registry import get_connectors
+from life_helper.market import clock
 from life_helper.market.broker_csv import BrokerCsvError, load_mapping, parse_broker_csv
+from life_helper.market.clock import market_today
 from life_helper.market.funds import fund_connectors, link_fund, refresh_fund_navs, suggest_funds
 from life_helper.market.portfolio import (
     CapitalGainsParams,
@@ -193,7 +195,7 @@ def test_portfolio_api_import_refresh_and_holdings(client, ctx, settings):
     ctx.extras.pop("connectors", None)
     with respx.mock:
         respx.get("https://stooq.com/q/d/l/").mock(
-            return_value=httpx.Response(200, text=stooq_csv(3_000, date.today().isoformat()))
+            return_value=httpx.Response(200, text=stooq_csv(3_000, market_today().isoformat()))
         )
         refreshed = client.post("/api/portfolio/refresh-prices", headers=h).json()
     assert refreshed["refresh"]["updated"][0]["code"] == "1306"
@@ -355,7 +357,7 @@ def test_investment_tools_registered(ctx):
 
 # -- fund NAVs (投資信託の基準価額) --------------------------------------------------------------------------
 
-NAV_DAY = previous_business_day(date.today())
+NAV_DAY = previous_business_day(market_today())
 OLDER_DAY = previous_business_day(NAV_DAY)
 
 
@@ -645,7 +647,7 @@ def test_manual_nav_rejects_an_excessive_value_or_future_basis_date(client, ctx)
         portfolio.holdings = [holding]
     too_large = client.post(
         "/api/portfolio/fund-link",
-        json={"id": holding.id, "provider": "manual", "nav": MAX_NAV + 1, "price_date": date.today().isoformat()},
+        json={"id": holding.id, "provider": "manual", "nav": MAX_NAV + 1, "price_date": market_today().isoformat()},
         headers={"x-csrf-token": csrf},
     )
     future = client.post(
@@ -654,13 +656,34 @@ def test_manual_nav_rejects_an_excessive_value_or_future_basis_date(client, ctx)
             "id": holding.id,
             "provider": "manual",
             "nav": 2.5,
-            "price_date": (date.today() + timedelta(days=1)).isoformat(),
+            "price_date": (market_today() + timedelta(days=1)).isoformat(),
         },
         headers={"x-csrf-token": csrf},
     )
     assert too_large.status_code == 422
     assert future.status_code == 400
     assert portfolio_store(ctx).load().holdings[0].price is None
+
+
+def test_market_today_is_the_japanese_date_even_when_utc_is_still_yesterday(monkeypatch):
+    """The container runs on UTC, so 09:00 JST would otherwise look like tomorrow and reject a NAV of today."""
+
+    class _Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 9, 24, 15, 30, tzinfo=UTC).astimezone(tz)
+
+    monkeypatch.setattr(clock, "datetime", _Clock)
+    assert clock.market_today() == date(2026, 9, 25)
+
+
+async def test_manual_nav_accepts_the_current_japanese_date(ctx):
+    holding = Holding(account="ideco", kind="fund", name="手入力ファンド", quantity=1_200, cost_total=1_000)
+    with portfolio_store(ctx).transaction() as portfolio:
+        portfolio.holdings = [holding]
+    today = await link_fund(ctx, holding.id, "manual", manual_nav=2.5, price_date=market_today())
+    assert today["ok"] is True
+    assert portfolio_store(ctx).load().holdings[0].price.date == market_today().isoformat()
 
 
 async def test_link_fund_rejects_incomplete_or_non_manual_nav_input(ctx):
@@ -670,7 +693,7 @@ async def test_link_fund_rejects_incomplete_or_non_manual_nav_input(ctx):
     incomplete = await link_fund(ctx, holding.id, "manual", manual_nav=2.5)
     non_manual = await link_fund(ctx, holding.id, "mufg_api", "0331418A", manual_nav=2.5, price_date=NAV_DAY)
     too_large = await link_fund(ctx, holding.id, "manual", manual_nav=MAX_NAV + 1, price_date=NAV_DAY)
-    future = await link_fund(ctx, holding.id, "manual", manual_nav=2.5, price_date=date.today() + timedelta(days=1))
+    future = await link_fund(ctx, holding.id, "manual", manual_nav=2.5, price_date=market_today() + timedelta(days=1))
     assert "両方指定" in incomplete["error"]
     assert "手入力のときだけ" in non_manual["error"]
     assert "基準価額" in too_large["error"]

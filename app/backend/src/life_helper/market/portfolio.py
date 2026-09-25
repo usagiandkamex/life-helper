@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from ..automation.locks import FileLock
 from ..knowledge.store import atomic_write
+from .clock import market_today
 
 Account = Literal["nisa_tsumitate", "nisa_growth", "tokutei", "ippan", "ideco"]
 Kind = Literal["stock", "etf", "reit", "fund"]
@@ -193,11 +194,11 @@ def is_stale(price: Price | None, *, today: date | None = None) -> bool:
     """A fund publishes the NAV of a day in the evening, so the previous business day is still current."""
     if price is None:
         return False
-    return price.date < previous_business_day(today or date.today()).isoformat()
+    return price.date < previous_business_day(today or market_today()).isoformat()
 
 
 def summarize(portfolio: Portfolio, *, today: date | None = None) -> dict:
-    today = today or date.today()
+    today = today or market_today()
     by_account: dict[str, dict] = {}
     by_kind: dict[str, int] = {}
     items = []

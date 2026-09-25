@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from ..connectors.base import ConnectorError
 from ..connectors.registry import get_connectors
+from .clock import market_today
 from .portfolio import PortfolioStore, Price
 
 if TYPE_CHECKING:
@@ -40,7 +41,7 @@ def _cached(store: PortfolioStore, code: str, on: date, keys: frozenset[str]) ->
 
 async def usd_jpy_rate(ctx: AppContext, *, today: date | None = None, memo: dict | None = None) -> dict:
     """USD/JPY previous close. Cached for the day; ``memo`` also avoids repeating a failure within one refresh."""
-    today = today or date.today()
+    today = today or market_today()
     if memo is not None and "error" in memo:
         raise memo["error"]
     store = portfolio_store(ctx)
@@ -78,7 +79,7 @@ async def _in_yen(ctx: AppContext, quote: dict, *, today: date, fx_memo: dict | 
 
 async def stock_price(ctx: AppContext, code: str, *, today: date | None = None, fx_memo: dict | None = None) -> dict:
     """Previous close of a Japanese or US stock, in its own currency and in yen (cached per day)."""
-    today = today or date.today()
+    today = today or market_today()
     key = code.strip().upper()
     store = portfolio_store(ctx)
     cached = _cached(store, key, today, QUOTE_KEYS)
@@ -107,7 +108,7 @@ def _price(quote: dict) -> Price:
 
 async def refresh_stock_prices(ctx: AppContext) -> dict:
     store = portfolio_store(ctx)
-    today = date.today()
+    today = market_today()
     codes = sorted({h.code for h in store.load().holdings if h.kind in PRICED_BY_STOOQ and h.code})
     prices: dict[str, Price] = {}
     errors = []

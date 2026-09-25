@@ -9,6 +9,7 @@ from copilot import define_tool
 from pydantic import BaseModel, Field
 
 from ..connectors.base import ConnectorError
+from ..market.clock import market_today
 from ..market.funds import fund_connectors, refresh_fund_navs
 from ..market.portfolio import (
     Account,
@@ -58,7 +59,7 @@ class UpdateHoldingParams(BaseModel):
 
 
 def apply_holding_update(ctx: AppContext, p: UpdateHoldingParams) -> dict:
-    price_date = (p.price_date or date.today()).isoformat()
+    price_date = (p.price_date or market_today()).isoformat()
     with portfolio_store(ctx).transaction() as portfolio:
         if p.action == "add":
             if not (p.account and p.kind and p.name and p.quantity is not None and p.cost_total is not None):

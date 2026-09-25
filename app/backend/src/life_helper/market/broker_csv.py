@@ -10,6 +10,7 @@ from pathlib import Path
 
 import yaml
 
+from .clock import market_today
 from .portfolio import Holding, Price
 
 
@@ -69,7 +70,7 @@ def parse_broker_csv(data: bytes, mapping: dict, *, as_of: date | None = None) -
     required: list[str] = mapping.get("required", [])
     accounts: dict[str, list[str]] = mapping.get("accounts", {})
     fund_markers: list[str] = mapping.get("fund_markers", [])
-    as_of = as_of or date.today()
+    as_of = as_of or market_today()
 
     header_index: dict[str, int] | None = None
     section_text = ""
