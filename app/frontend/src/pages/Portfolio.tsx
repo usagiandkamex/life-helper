@@ -99,7 +99,7 @@ function SourceCell({ holding, busy, onPick }: { holding: Holding; busy: boolean
   const updater = holding.auto_nav && price?.source !== holding.fund?.provider ? label(SOURCE_LABELS, holding.fund?.provider) : ''
   const code = fund
     ? (holding.fund?.fund_code ?? '')
-    : [label(MARKET_LABELS, price?.market), price?.symbol].filter(Boolean).join(' ')
+    : [label(MARKET_LABELS, price?.market), price?.symbol || holding.code].filter(Boolean).join(' ')
   return (
     <>
       <div>
