@@ -8,10 +8,10 @@ from pathlib import Path
 import httpx
 import pytest
 import respx
-from pydantic import SecretStr
 
 from life_helper.connectors.fund_nav import MAX_NAV
 from life_helper.connectors.registry import get_connectors
+from life_helper.connectors.yahoo_finance import RATE_LIMIT_MESSAGE
 from life_helper.market import clock
 from life_helper.market.broker_csv import BrokerCsvError, load_mapping, parse_broker_csv
 from life_helper.market.clock import market_today
@@ -41,11 +41,12 @@ from .conftest import (
     SP500,
     mock_daiwa,
     mock_rakuten,
-    mock_stooq,
     mock_toushin,
+    mock_yahoo,
     sign_in,
-    stooq_csv,
     toushin_calls,
+    yahoo_chart,
+    yahoo_symbols,
 )
 
 BROKER_DIR = Path(__file__).resolve().parents[1] / "src" / "life_helper" / "resources" / "broker_csv"
@@ -204,11 +205,10 @@ def test_portfolio_api_import_refresh_and_holdings(client, ctx, settings):
     )
     assert bad.status_code == 400
 
-    settings.stooq_api_key = SecretStr("stooqkey-ABCDEF123456")
     ctx.extras.pop("connectors", None)
     with respx.mock:
-        respx.get("https://stooq.com/q/d/l/").mock(
-            return_value=httpx.Response(200, text=stooq_csv(3_000, market_today().isoformat()))
+        respx.get(url__startswith="https://query1.finance.yahoo.com/").mock(
+            return_value=httpx.Response(200, json=yahoo_chart([(market_today().isoformat(), 3_000)]))
         )
         # The imported fund has no source yet, so the refresh looks for it by name (and finds none here).
         mock_toushin({})
@@ -216,7 +216,6 @@ def test_portfolio_api_import_refresh_and_holdings(client, ctx, settings):
     assert refreshed["refresh"]["updated"][0]["code"] == "1306"
     assert refreshed["refresh_funds"]["auto_link"]["unmatched"][0]["name"] == "楽天・全米株式"
     assert refreshed["total_value"] == 30_000 + 180_000
-    assert "stooqkey" not in str(refreshed)
 
     # The NISA allowance endpoint is gone (405 because only the SPA catch-all, which is GET, matches the path).
     removed = client.put(
@@ -240,10 +239,9 @@ def test_portfolio_api_import_refresh_and_holdings(client, ctx, settings):
     assert client.post("/api/portfolio/holdings", json={"action": "delete", "id": "nope"}, headers=h).status_code == 400
 
 
-def _stooq_ready(ctx, settings) -> None:
-    settings.stooq_api_key = SecretStr("stooqkey-ABCDEF123456")
+def _yahoo_ready(ctx) -> None:
     ctx.extras.pop("connectors", None)
-    get_connectors(ctx)["stooq"].min_interval_seconds = 0
+    get_connectors(ctx)["yahoo_finance"].min_interval_seconds = 0
 
 
 def test_refresh_prices_values_japanese_and_us_stocks(client, ctx, settings):
@@ -256,23 +254,23 @@ def test_refresh_prices_values_japanese_and_us_stocks(client, ctx, settings):
             Holding(account="nisa_growth", kind="stock", code="AAPL", name="Apple", quantity=5, cost_total=100_000),
             Holding(account="ippan", kind="stock", code="NOPE", name="謎の銘柄", quantity=1, cost_total=1_000),
         ]
-    _stooq_ready(ctx, settings)
+    _yahoo_ready(ctx)
     with respx.mock:
-        route = mock_stooq({"7203.jp": 3_000, "1306.jp": 2_500, "msft.us": 100, "aapl.us": 200, "usdjpy": 150})
+        route = mock_yahoo({"7203.T": 3_000, "1306.T": 2_500, "MSFT": 100, "AAPL": 200, "JPY=X": 150})
         view = client.post("/api/portfolio/refresh-prices", headers={"x-csrf-token": csrf}).json()
 
     updated = {u["code"]: u for u in view["refresh"]["updated"]}
     assert (updated["7203"]["market"], updated["7203"]["symbol"], updated["7203"]["currency"]) == (
         "jp",
-        "7203.jp",
+        "7203.T",
         "JPY",
     )
     assert updated["7203"]["close"] == 3_000 and updated["7203"]["close_jpy"] == 3_000
     # ETFs and REITs keep going through the Japanese market.
-    assert (updated["1306"]["market"], updated["1306"]["symbol"]) == ("jp", "1306.jp")
+    assert (updated["1306"]["market"], updated["1306"]["symbol"]) == ("jp", "1306.T")
     assert (updated["MSFT"]["market"], updated["MSFT"]["symbol"], updated["MSFT"]["currency"]) == (
         "us",
-        "msft.us",
+        "MSFT",
         "USD",
     )
     # 100 USD x 150 JPY/USD = 15,000 JPY
@@ -282,14 +280,15 @@ def test_refresh_prices_values_japanese_and_us_stocks(client, ctx, settings):
     # One code failing does not stop the others, and the reason names the symbols that were tried.
     assert view["missing_prices"] == ["謎の銘柄"]
     assert view["refresh"]["errors"] == [
-        {"code": "NOPE", "error": "nope.us と nope.jp を照会しましたが、価格データが見つかりませんでした"}
+        {"code": "NOPE", "error": "NOPE と NOPE.T を照会しましたが、価格データが見つかりませんでした"}
     ]
     # USD/JPY is fetched once for the whole refresh.
-    assert [c.request.url.params["s"] for c in route.calls].count("usdjpy") == 1
+    assert yahoo_symbols(route).count("JPY=X") == 1
 
     msft = next(h for h in view["holdings"] if h["code"] == "MSFT")
     assert msft["price"]["local_value"] == 100 and msft["price"]["local_currency"] == "USD"
-    assert msft["price"]["value"] == 15_000 and msft["price"]["fx_source"] == "stooq"
+    assert msft["price"]["value"] == 15_000 and msft["price"]["fx_source"] == "yahoo_finance"
+    assert msft["price"]["source"] == "yahoo_finance"
 
 
 async def test_us_price_is_not_stored_as_yen_without_fx(ctx, settings):
@@ -297,9 +296,9 @@ async def test_us_price_is_not_stored_as_yen_without_fx(ctx, settings):
         portfolio.holdings = [
             Holding(account="tokutei", kind="stock", code="MSFT", name="Microsoft", quantity=10, cost_total=400_000)
         ]
-    _stooq_ready(ctx, settings)
+    _yahoo_ready(ctx)
     with respx.mock:
-        mock_stooq({"msft.us": 100})  # USD/JPY is unavailable
+        mock_yahoo({"MSFT": 100})  # USD/JPY is unavailable
         result = await refresh_stock_prices(ctx)
     assert result["updated"] == []
     assert result["errors"][0]["code"] == "MSFT"
@@ -313,9 +312,9 @@ async def test_price_cache_without_market_is_refetched(ctx, settings):
     portfolio_store(ctx).cache_price(
         "7203", today, {"code": "7203", "symbol": "7203.jp", "date": "2026-09-20", "close": 2_000, "source": "stooq"}
     )
-    _stooq_ready(ctx, settings)
+    _yahoo_ready(ctx)
     with respx.mock:
-        mock_stooq({"7203.jp": 3_000})
+        mock_yahoo({"7203.T": 3_000})
         quote = await stock_price(ctx, "7203", today=today)
         assert (quote["market"], quote["close"], quote["close_jpy"], quote["cached"]) == ("jp", 3_000, 3_000, False)
         assert (await stock_price(ctx, "7203", today=today))["cached"] is True
@@ -338,11 +337,112 @@ async def test_incomplete_price_cache_is_refetched(ctx, settings):
             "source": "stooq",
         },
     )
-    _stooq_ready(ctx, settings)
+    _yahoo_ready(ctx)
     with respx.mock:
-        mock_stooq({"msft.us": 120, "usdjpy": 150})
+        mock_yahoo({"MSFT": 120, "JPY=X": 150})
         quote = await stock_price(ctx, "MSFT", today=today)
     assert (quote["close"], quote["close_jpy"], quote["fx_rate"], quote["cached"]) == (120, 18_000, 150, False)
+
+
+def _cached_quote(**extra) -> dict:
+    return {
+        "code": "7203",
+        "symbol": "7203.T",
+        "market": "jp",
+        "currency": "JPY",
+        "close": 3_000,
+        "close_jpy": 3_000,
+        "date": "2026-09-24",
+        "source": "yahoo_finance",
+        "fx_rate": None,
+        "fx_date": None,
+        "fx_source": None,
+    } | extra
+
+
+async def test_price_cache_expires_once_the_session_settles(ctx):
+    """A price fetched while its session runs is only cached until the close settles, not for the whole day."""
+    today = date.today()
+    store = portfolio_store(ctx)
+    store.cache_price("7203", today, _cached_quote(valid_until=(datetime.now(UTC) + timedelta(hours=1)).isoformat()))
+    _yahoo_ready(ctx)
+    with respx.mock:
+        route = mock_yahoo({"7203.T": 3_100})
+        assert (await stock_price(ctx, "7203", today=today))["cached"] is True
+        store.cache_price(
+            "7203", today, _cached_quote(valid_until=(datetime.now(UTC) - timedelta(minutes=1)).isoformat())
+        )
+        quote = await stock_price(ctx, "7203", today=today)
+    assert (quote["close"], quote["cached"]) == (3_100, False)
+    assert yahoo_symbols(route) == ["7203.T"]
+
+
+async def test_us_quote_is_cached_until_the_price_or_the_rate_settles(ctx, monkeypatch):
+    soon = datetime.now(UTC) + timedelta(hours=1)
+    later = soon + timedelta(hours=2)
+    _yahoo_ready(ctx)
+    connector = get_connectors(ctx)["yahoo_finance"]
+
+    async def previous_close(code, *, today=None, now=None):
+        return _cached_quote(code="MSFT", symbol="MSFT", market="us", currency="USD", close=100) | {
+            "valid_until": later.isoformat()
+        }
+
+    async def usd_jpy(*, today=None, now=None):
+        return {
+            "pair": "USDJPY",
+            "symbol": "JPY=X",
+            "date": "2026-09-24",
+            "rate": 150,
+            "source": "yahoo_finance",
+            "valid_until": soon.isoformat(),
+        }
+
+    monkeypatch.setattr(connector, "previous_close", previous_close)
+    monkeypatch.setattr(connector, "usd_jpy", usd_jpy)
+    quote = await stock_price(ctx, "MSFT", today=date.today())
+    assert quote["close_jpy"] == 15_000
+    assert datetime.fromisoformat(quote["valid_until"]) == soon
+
+
+async def test_rate_limit_stops_the_refresh(ctx):
+    with portfolio_store(ctx).transaction() as portfolio:
+        portfolio.holdings = [
+            Holding(account="tokutei", kind="stock", code=code, name=code, quantity=1, cost_total=1_000)
+            for code in ("7203", "8306", "MSFT")
+        ]
+    _yahoo_ready(ctx)
+    with respx.mock:
+        route = respx.get(url__startswith="https://query1.finance.yahoo.com/").mock(
+            return_value=httpx.Response(429, text="Too Many Requests")
+        )
+        result = await refresh_stock_prices(ctx)
+    assert result["updated"] == []
+    assert [e["code"] for e in result["errors"]] == ["7203", "8306", "MSFT"]
+    assert all("利用制限" in e["error"] for e in result["errors"])
+    # Once Yahoo throttles, the remaining holdings are not requested.
+    assert route.call_count == 1
+
+
+async def test_rate_limit_on_the_exchange_rate_also_stops_the_refresh(ctx):
+    with portfolio_store(ctx).transaction() as portfolio:
+        portfolio.holdings = [
+            Holding(account="tokutei", kind="stock", code=code, name=code, quantity=1, cost_total=1_000)
+            for code in ("AAPL", "MSFT")
+        ]
+    _yahoo_ready(ctx)
+    with respx.mock:
+        # Registered first, so it wins over the catch-all chart route.
+        respx.get("https://query1.finance.yahoo.com/v8/finance/chart/JPY=X").mock(
+            return_value=httpx.Response(429, text="Too Many Requests")
+        )
+        route = mock_yahoo({"AAPL": 200, "MSFT": 100})
+        result = await refresh_stock_prices(ctx)
+    assert [e["code"] for e in result["errors"]] == ["AAPL", "MSFT"]
+    assert "円換算できませんでした" in result["errors"][0]["error"] and "利用制限" in result["errors"][0]["error"]
+    # MSFT was never requested, so its reason must not repeat what was fetched for AAPL.
+    assert result["errors"][1]["error"] == RATE_LIMIT_MESSAGE
+    assert yahoo_symbols(route) == ["AAPL"]
 
 
 def test_investment_tools_registered(ctx):
@@ -364,7 +464,8 @@ def test_investment_tools_registered(ctx):
     # Funds are priced by the fund library and the managers, so the tool belongs to other connectors than stocks.
     assert specs["refresh_fund_navs"].writes
     assert specs["refresh_fund_navs"].connector == ("toushin_lib", "rakuten_csv", "daiwa_csv")
-    assert specs["refresh_stock_prices"].connector == "stooq"
+    assert specs["refresh_stock_prices"].connector == "yahoo_finance"
+    assert specs["refresh_stock_prices"].allowed(["yahoo_finance"])
     # An automation gets the fund tools only when it selected every source they can reach.
     assert specs["refresh_fund_navs"].allowed(["toushin_lib", "rakuten_csv", "daiwa_csv"])
     assert not specs["refresh_fund_navs"].allowed(["daiwa_csv"])
@@ -856,15 +957,15 @@ def test_refresh_prices_updates_stocks_and_funds_independently(client, ctx, sett
             _fund(500_000),
             _fund(300_000, code=SP500_ISIN, name="eMAXIS Slim 米国株式", cost_total=500_000),
         ]
-    _stooq_ready(ctx, settings)
+    _yahoo_ready(ctx)
     _funds_ready(ctx)
     with respx.mock:
-        mock_stooq({"7203.jp": 3_000})
+        mock_yahoo({"7203.T": 3_000})
         mock_toushin({ALL_COUNTRY_ISIN: (25_341, _jp(NAV_DAY)), SP500_ISIN: (30_000, _jp(NAV_DAY))})
         view = client.post("/api/portfolio/refresh-prices", headers={"x-csrf-token": csrf}).json()
     assert [u["code"] for u in view["refresh"]["updated"]] == ["7203"]
     assert [u["code"] for u in view["refresh_funds"]["updated"]] == [ALL_COUNTRY_ISIN, SP500_ISIN]
-    assert "Stooq" in view["refresh"]["note"] and "投資信託協会" in view["refresh_funds"]["note"]
+    assert "Yahoo Finance" in view["refresh"]["note"] and "投資信託協会" in view["refresh_funds"]["note"]
     # 100 x 3,000 + 500,000 / 10,000 x 25,341 + 300,000 / 10,000 x 30,000
     assert view["total_value"] == 300_000 + 1_267_050 + 900_000
     assert view["missing_prices"] == [] and view["stale_prices"] == []

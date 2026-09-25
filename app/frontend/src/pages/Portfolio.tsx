@@ -19,6 +19,7 @@ const KINDS = [
 ] as const
 const SOURCE_LABELS: Record<string, string> = {
   broker_csv: '証券会社 CSV',
+  yahoo_finance: 'Yahoo Finance',
   stooq: 'Stooq',
   nav_site: '基準価額サイト',
   manual: '手入力',
@@ -345,7 +346,7 @@ export function PortfolioPage() {
           {calculating ? '計算中…' : '評価額を計算'}
         </button>
         <span className="hint">
-          株式・ETF・REIT は株価（日本株・米国株／Stooq 前日終値）、投資信託は基準価額（投資信託協会の投信総合検索ライブラリー・運用会社の公式
+          株式・ETF・REIT は株価（日本株・米国株／Yahoo Finance の前日終値）、投資信託は基準価額（投資信託協会の投信総合検索ライブラリー・運用会社の公式
           CSV）を、それぞれ別に更新してから計算します。米国株は USD/JPY で円換算します。取得元が未設定の投資信託は、ファンド名が一致する公式ファンドが
           1 つだけなら自動で紐付けます。紐付けられなかった投資信託は「取得元を設定」から選ぶか、公式サイトの基準価額を手入力してください。
         </span>

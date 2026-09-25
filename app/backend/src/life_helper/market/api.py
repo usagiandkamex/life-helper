@@ -77,7 +77,7 @@ async def import_csv(
 
 @router.post("/refresh-prices")
 async def refresh_prices(user: CurrentUser = Depends(require_user), ctx: AppContext = Depends(get_ctx)) -> dict:
-    # Two independent sources: Stooq for what trades on an exchange, the fund managers for 基準価額.
+    # Two independent sources: Yahoo Finance for what trades on an exchange, the fund managers for 基準価額.
     result = await refresh_stock_prices(ctx)
     funds = await refresh_fund_navs(ctx)
     return _view(ctx) | {"refresh": result, "refresh_funds": funds}

@@ -30,7 +30,7 @@ COPILOT_WRITABLE_DIRS = ("memories", "notes", "plans")
 COPILOT_WRITABLE_FILES = ("INDEX.md",)
 WRITABLE_SUFFIXES = (".md", ".txt")
 # Hosts that carry API keys in the URL: only connectors may call them, never web_fetch.
-CONNECTOR_HOSTS = ("stooq.com", "stooq.pl", "openapi.rakuten.co.jp", "app.rakuten.co.jp", "api.github.com")
+CONNECTOR_HOSTS = ("openapi.rakuten.co.jp", "app.rakuten.co.jp", "api.github.com")
 
 
 def host_matches(host: str, domains: list[str] | tuple[str, ...]) -> bool:

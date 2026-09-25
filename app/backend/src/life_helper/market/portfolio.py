@@ -28,8 +28,17 @@ Kind = Literal["stock", "etf", "reit", "fund"]
 # Fund NAV providers double as price sources, so the screen can show where a NAV came from.
 # mufg_api is retired (its API refuses every request); it stays only so that saved portfolios still load.
 FundProvider = Literal["toushin_lib", "rakuten_csv", "daiwa_csv", "manual", "mufg_api"]
+# "stooq" and "mufg_api" are no longer fetched but stay valid, so prices saved before the switch still load.
 PriceSource = Literal[
-    "broker_csv", "stooq", "nav_site", "manual", "toushin_lib", "rakuten_csv", "daiwa_csv", "mufg_api"
+    "broker_csv",
+    "yahoo_finance",
+    "stooq",
+    "nav_site",
+    "manual",
+    "toushin_lib",
+    "rakuten_csv",
+    "daiwa_csv",
+    "mufg_api",
 ]
 OFFICIAL_NAV_SOURCES = frozenset({"toushin_lib", "rakuten_csv", "daiwa_csv", "mufg_api"})
 # A broker CSV is dated with the day it was imported, not with the 基準日 of the NAV inside it, which is up to a
@@ -60,7 +69,7 @@ class Price(BaseModel):
     source: PriceSource
     # Optional, so that portfolios saved before US stocks were supported still load.
     market: Market | None = Field(default=None, description="日本株（jp）か米国株（us）か")
-    symbol: str | None = Field(default=None, description="取得に使った Stooq のシンボル（例: msft.us）")
+    symbol: str | None = Field(default=None, description="取得に使ったシンボル（例: 7203.T、MSFT）")
     local_currency: Currency = Field(default="JPY", description="現地通貨（米国株は USD）")
     local_value: float | None = Field(default=None, description="現地通貨建ての価格（米国株は USD）")
     fx_rate: float | None = Field(default=None, description="円換算に使った USD/JPY")

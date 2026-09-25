@@ -1,7 +1,7 @@
 """Fund NAV lookup: linking a holding to an official fund and refreshing 基準価額.
 
-Kept apart from the stock price refresh on purpose: funds are not traded on an exchange, so their prices come
-from the fund library and the managers instead, and a failure on one side never blocks the other.
+Kept apart from the Yahoo Finance stock refresh on purpose: funds are not traded on an exchange, so their prices
+come from the fund library and the managers instead, and a failure on one side never blocks the other.
 """
 
 from __future__ import annotations
@@ -32,8 +32,9 @@ logger = logging.getLogger(__name__)
 MANUAL_PROVIDER = "manual"
 NOTE = (
     "基準価額は投資信託協会の投信総合検索ライブラリー（予備として運用会社の公式 CSV）から取得しています"
-    "（株価の更新とは別処理です）。取得元が未設定の投資信託は、ファンド名が一致する公式ファンドが 1 つだけなら"
-    "自動で紐付けます。紐付けられなかったファンドは「取得元を設定」から選ぶか、公式サイトで確認して手入力してください。"
+    "（株価の Yahoo Finance 更新とは別処理です）。取得元が未設定の投資信託は、ファンド名が一致する公式ファンドが"
+    " 1 つだけなら自動で紐付けます。紐付けられなかったファンドは「取得元を設定」から選ぶか、"
+    "公式サイトで確認して手入力してください。"
 )
 # A fund linked by name is checked against the NAV the holding already has (from the broker CSV): a candidate
 # quoting a very different NAV is another fund, or quotes another number of units, so it is left to the user.

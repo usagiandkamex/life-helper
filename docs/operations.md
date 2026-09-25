@@ -52,7 +52,7 @@
 
 ## 投資信託の基準価額（取得元の追加）
 
-基準価額は株価（Stooq）とは別に取得します（`POST /api/portfolio/refresh-prices` が両方を別々に実行）。主な取得元は
+基準価額は株価（Yahoo Finance）とは別に取得します（`POST /api/portfolio/refresh-prices` が両方を別々に実行）。主な取得元は
 [投資信託協会 投信総合検索ライブラリー](https://toushin-lib.fwg.ne.jp/)で、すべての運用会社のファンドをファンド名で検索でき、ISIN で基準価額の CSV を取得できます。
 楽天投信投資顧問・大和アセットマネジメントの公式 CSV は予備として残しています。
 

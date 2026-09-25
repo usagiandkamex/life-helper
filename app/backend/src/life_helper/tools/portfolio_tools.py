@@ -118,7 +118,7 @@ def build_tools(ctx: AppContext) -> list[ToolSpec]:
 
     @define_tool(
         name="get_stock_price",
-        description="日本株・米国株・ETF・REIT の前日終値を Stooq から取得する"
+        description="日本株・米国株・ETF・REIT の前日終値を Yahoo Finance から取得する"
         "（米国株は USD/JPY で円換算。当日取得済みならキャッシュを使う）。",
     )
     async def get_stock_price(params: StockPriceParams) -> dict:
@@ -129,7 +129,7 @@ def build_tools(ctx: AppContext) -> list[ToolSpec]:
 
     @define_tool(
         name="refresh_stock_prices",
-        description="保有している日本株・米国株・ETF・REIT の価格を Stooq の前日終値で更新する"
+        description="保有している日本株・米国株・ETF・REIT の価格を Yahoo Finance の前日終値で更新する"
         "（証券会社 CSV より新しい場合のみ。米国株は USD/JPY で円換算。投資信託は対象外）。",
     )
     async def refresh_prices(params: EmptyParams) -> dict:
@@ -138,7 +138,7 @@ def build_tools(ctx: AppContext) -> list[ToolSpec]:
     @define_tool(
         name="get_fund_nav",
         description="投資信託の基準価額を投資信託協会の投信総合検索ライブラリー（ISIN で指定）、"
-        "または運用会社の公式 CSV から取得する（株価の取得とは別）。",
+        "または運用会社の公式 CSV から取得する（株価の Yahoo Finance とは別）。",
     )
     async def get_fund_nav(params: FundNavParams) -> dict:
         connector = fund_connectors(ctx).get(params.provider)
@@ -182,8 +182,8 @@ def build_tools(ctx: AppContext) -> list[ToolSpec]:
 
     return [
         ToolSpec(get_portfolio),
-        ToolSpec(get_stock_price, connector="stooq"),
-        ToolSpec(refresh_prices, writes=True, connector="stooq"),
+        ToolSpec(get_stock_price, connector="yahoo_finance"),
+        ToolSpec(refresh_prices, writes=True, connector="yahoo_finance"),
         ToolSpec(get_fund_nav, connector=fund_provider_names),
         ToolSpec(refresh_navs, writes=True, connector=fund_provider_names),
         ToolSpec(simulate_investment_tool),

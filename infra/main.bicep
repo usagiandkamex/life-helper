@@ -30,9 +30,6 @@ param sessionSecret string
 param tokenEncryptionKey string
 
 @secure()
-param stooqApiKey string = ''
-
-@secure()
 param rakutenApplicationId string = ''
 
 @secure()
@@ -76,7 +73,6 @@ module resources 'resources.bicep' = {
     githubOauthClientSecret: githubOauthClientSecret
     sessionSecret: sessionSecret
     tokenEncryptionKey: tokenEncryptionKey
-    stooqApiKey: stooqApiKey
     rakutenApplicationId: rakutenApplicationId
     rakutenAccessKey: rakutenAccessKey
     githubAppId: githubAppId
