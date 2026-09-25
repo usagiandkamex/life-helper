@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import time
 import uuid
@@ -19,11 +20,11 @@ from playwright.async_api import Error as PlaywrightError
 
 from ..netguard import outbound_rejection
 from ..security import SecretMasker
-from .guard import fill_rejection
+from .guard import FILLABLE_TAGS, fill_rejection
 from .proxy import EgressProxy
 
 if TYPE_CHECKING:
-    from playwright.async_api import Browser, BrowserContext, Page, Playwright, Route
+    from playwright.async_api import Browser, BrowserContext, Locator, Page, Playwright, Route
 
     from ..config import Settings
     from ..context import AppContext
@@ -65,6 +66,8 @@ CONTEXT_OPTIONS: dict[str, Any] = {
     "service_workers": "block",
 }
 
+# Content for the model. It runs in the page's own world, so it is only what the page chose to show: what may be
+# typed in is decided by _field_attrs, which does not rely on the page's scripts.
 SNAPSHOT_JS = """
 (args) => {
   const root = args.selector ? document.querySelector(args.selector) : document.body;
@@ -111,18 +114,14 @@ SNAPSHOT_JS = """
 }
 """
 
-FIELD_JS = """
-(el) => {
-  const form = el.form || el.closest('form');
-  return {
-    tag: el.tagName.toLowerCase(),
-    type: (el.getAttribute('type') || '').toLowerCase(),
-    autocomplete: (el.getAttribute('autocomplete') || '').toLowerCase(),
-    editable: !!el.isContentEditable,
-    form_has_password: !!(form && form.querySelector('input[type=password]')),
-  };
+# Selectors handed to Playwright's engine instead of reading the element with the page's own DOM functions.
+FIELD_SELECTORS = {
+    # The element itself is content-editable, or it sits inside one (isContentEditable without page JavaScript).
+    "editable": '[contenteditable=""], [contenteditable="true"], [contenteditable=""] *, [contenteditable="true"] *',
+    # Login and sign-up forms: the field's form owner also holds a password box.
+    "password_form": "form:has(input[type=password]) *",
 }
-"""
+LOGIN_FORM_BY_ID = "form[id={id}]:has(input[type=password])"
 
 
 class BrowserError(RuntimeError):
@@ -133,18 +132,37 @@ def screenshot_dir(settings: Settings) -> Path:
     return settings.app_state_dir / "browser-screenshots"
 
 
-def save_screenshot(directory: Path, shot_id: str, png: bytes) -> None:
-    directory.mkdir(parents=True, exist_ok=True)
-    (directory / f"{shot_id}.png").write_bytes(png)
-    now = time.time()
-    shots = sorted(directory.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
+def _mtime(path: Path) -> float | None:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
+
+
+def is_expired(path: Path) -> bool:
+    mtime = _mtime(path)
+    return mtime is None or time.time() - mtime > SCREENSHOT_RETENTION_SECONDS
+
+
+def prune_screenshots(directory: Path) -> None:
+    """Drops screenshots past the retention period or the count limit. Also run at start-up and before serving one."""
+    if not directory.is_dir():
+        return
+    shots = sorted(directory.glob("*.png"), key=lambda p: _mtime(p) or 0.0, reverse=True)
     for index, path in enumerate(shots):
-        if index >= MAX_SCREENSHOTS or now - path.stat().st_mtime > SCREENSHOT_RETENTION_SECONDS:
+        if index >= MAX_SCREENSHOTS or is_expired(path):
             path.unlink(missing_ok=True)
 
 
+def save_screenshot(directory: Path, shot_id: str, png: bytes) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / f"{shot_id}.png").write_bytes(png)
+    prune_screenshots(directory)
+
+
 class BrowserService:
-    def __init__(self, *, max_sessions: int = MAX_SESSIONS) -> None:
+    def __init__(self, masker: SecretMasker | None = None, *, max_sessions: int = MAX_SESSIONS) -> None:
+        self._masker = masker
         self._lock = asyncio.Lock()
         self._slots = asyncio.Semaphore(max_sessions)
         self._playwright: Playwright | None = None
@@ -189,7 +207,7 @@ class BrowserService:
         from playwright.async_api import async_playwright
 
         try:
-            self._proxy = EgressProxy()
+            self._proxy = EgressProxy(self._masker)
             await self._proxy.start()
             self._playwright = await async_playwright().start()
             self._browser = await self._playwright.chromium.launch(
@@ -220,7 +238,7 @@ class BrowserService:
 def get_browser_service(ctx: AppContext) -> BrowserService:
     service = ctx.extras.get("browser_service")
     if service is None:
-        service = ctx.extras["browser_service"] = BrowserService()
+        service = ctx.extras["browser_service"] = BrowserService(ctx.masker)
     return service
 
 
@@ -296,6 +314,49 @@ class BrowserSession:
             raise BrowserError("先に browser_open でページを開いてください")
         return self._page
 
+    async def _active(self) -> Page:
+        page = self._current()
+        await self._guard_url(page)
+        return page
+
+    async def _guard_url(self, page: Page) -> None:
+        """Checks the URL the page actually shows: a redirect, a click or a popup may have left the allowed sites."""
+        url = page.url
+        if not url or url == "about:blank":
+            return
+        reason = await outbound_rejection(url, self._masker)
+        if reason is None:
+            return
+        with contextlib.suppress(PlaywrightError):
+            await page.goto("about:blank")
+        raise BrowserError(f"移動先がブロックされました: {reason}")
+
+    @staticmethod
+    async def _matches(page: Page, target: Locator, css: str) -> bool:
+        """Asks Playwright's own selector engine, which runs apart from the page's scripts and cannot be faked."""
+        return await target.and_(page.locator(css)).count() > 0
+
+    async def _field_attrs(self, page: Page, target: Locator) -> dict[str, Any]:
+        """Describes the field for ``fill_rejection`` without running any JavaScript in the page's world."""
+        tag = ""
+        for name in FILLABLE_TAGS:
+            if await self._matches(page, target, name):
+                tag = name
+                break
+        form_id = await target.get_attribute("form")
+        if form_id:
+            # The form attribute names the owner, so the surrounding elements say nothing about it.
+            form_has_password = await page.locator(LOGIN_FORM_BY_ID.format(id=json.dumps(form_id))).count() > 0
+        else:
+            form_has_password = await self._matches(page, target, FIELD_SELECTORS["password_form"])
+        return {
+            "tag": tag,
+            "type": (await target.get_attribute("type")) or "",
+            "autocomplete": (await target.get_attribute("autocomplete")) or "",
+            "editable": await self._matches(page, target, FIELD_SELECTORS["editable"]),
+            "form_has_password": form_has_password,
+        }
+
     @staticmethod
     async def _route(route: Route) -> None:
         if route.request.resource_type == "media":
@@ -311,6 +372,7 @@ class BrowserSession:
             await page.wait_for_load_state("networkidle", timeout=IDLE_WAIT_MS)
 
     async def _snapshot(self, page: Page, selector: str | None = None, *, status: int | None = None) -> dict:
+        await self._guard_url(page)
         data = await page.evaluate(SNAPSHOT_JS, {**LIMITS, "selector": selector})
         if data is None:
             raise BrowserError(f"要素が見つかりませんでした: {selector}")
@@ -333,6 +395,8 @@ class BrowserSession:
                 "ページを開けませんでした（接続できないか、接続先がブロックされました）: " + _describe(exc)
             ) from None
         await self._settle(page)
+        # A redirect may have landed somewhere that must not be shown: check before reading or waiting.
+        await self._guard_url(page)
         if wait_for_selector:
             await page.wait_for_selector(wait_for_selector)
         if self._on_use is not None:
@@ -340,10 +404,10 @@ class BrowserSession:
         return await self._snapshot(page, status=response.status if response is not None else None)
 
     async def read(self, selector: str | None = None) -> dict:
-        return await self._snapshot(self._current(), selector)
+        return await self._snapshot(await self._active(), selector)
 
     async def click(self, selector: str | None = None, text: str | None = None) -> dict:
-        page = self._current()
+        page = await self._active()
         if selector:
             target = page.locator(selector).first
         elif text:
@@ -355,9 +419,9 @@ class BrowserSession:
         return await self._snapshot(self._current())
 
     async def fill(self, selector: str, value: str, submit: bool = False) -> dict:
-        page = self._current()
+        page = await self._active()
         target = page.locator(selector).first
-        attrs = await target.evaluate(FIELD_JS)
+        attrs = await self._field_attrs(page, target)
         reason = fill_rejection(value, attrs, self._masker)
         if reason:
             raise BrowserError(reason)
@@ -374,7 +438,7 @@ class BrowserSession:
         return await self._snapshot(self._current())
 
     async def scroll(self, times: int = 1, wait_for_selector: str | None = None) -> dict:
-        page = self._current()
+        page = await self._active()
         for _ in range(times):
             await page.evaluate("() => window.scrollBy(0, window.innerHeight)")
             with contextlib.suppress(PlaywrightError):
@@ -384,7 +448,7 @@ class BrowserSession:
         return await self._snapshot(page)
 
     async def screenshot(self, full_page: bool = False) -> dict:
-        page = self._current()
+        page = await self._active()
         if full_page:
             height = int(await page.evaluate("() => document.documentElement.scrollHeight") or VIEWPORT["height"])
             clip = {"x": 0, "y": 0, "width": VIEWPORT["width"], "height": min(height, MAX_SCREENSHOT_HEIGHT)}

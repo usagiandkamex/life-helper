@@ -49,6 +49,9 @@ def init_chat(ctx: AppContext) -> None:
 async def start_services(ctx: AppContext) -> None:
     init_core(ctx)
     init_chat(ctx)
+    from .browser.service import prune_screenshots, screenshot_dir
+
+    prune_screenshots(screenshot_dir(ctx.settings))
 
 
 async def shutdown_services(ctx: AppContext) -> None:

@@ -10,7 +10,14 @@ import pytest
 from life_helper.browser import proxy as proxy_module
 from life_helper.browser.guard import fill_rejection
 from life_helper.browser.proxy import EgressProxy
-from life_helper.browser.service import BrowserError, BrowserService, BrowserSession, save_screenshot, screenshot_dir
+from life_helper.browser.service import (
+    BrowserError,
+    BrowserService,
+    BrowserSession,
+    prune_screenshots,
+    save_screenshot,
+    screenshot_dir,
+)
 from life_helper.copilot_integration.events import extract_screenshot
 from life_helper.copilot_integration.manager import ActiveSession
 from life_helper.copilot_integration.system_prompt import build_system_message
@@ -88,7 +95,7 @@ async def exchange(port: int, data: bytes) -> bytes:
 
 @pytest.fixture
 async def egress():
-    p = EgressProxy()
+    p = EgressProxy(MASKER)
     await p.start()
     yield p
     await p.stop()
@@ -154,6 +161,26 @@ async def test_proxy_forwards_vetted_http_and_tunnels(egress, monkeypatch):
         origin.close()
 
 
+async def test_proxy_blocks_credentials_and_sensitive_data_in_http_urls(egress):
+    """Page requests and redirects reach the proxy directly, so the whole URL is checked there too."""
+    requests: list[bytes] = []
+    origin, origin_port = await start_origin(requests)
+    host = f"public.example.com:{origin_port}"
+    try:
+        for head in (
+            f"GET http://taro:pw@{host}/ HTTP/1.1\r\nHost: {host}\r\n\r\n",
+            f"GET http://{host}/?k=SUPERSECRETKEY HTTP/1.1\r\nHost: {host}\r\n\r\n",
+            f"GET http://{host}/?k=SUPER%53ECRETKEY HTTP/1.1\r\nHost: {host}\r\n\r\n",
+            f"GET http://{host}/?card=4111111111111111 HTTP/1.1\r\nHost: {host}\r\n\r\n",
+        ):
+            answer = await exchange(egress.port, head.encode())
+            assert answer.startswith(b"HTTP/1.1 403"), head
+            assert b"SUPERSECRETKEY" not in answer and b"4111111111111111" not in answer
+    finally:
+        origin.close()
+    assert requests == []
+
+
 # -- session without Chromium -----------------------------------------------------------------------------
 
 
@@ -205,6 +232,37 @@ def test_screenshots_are_pruned(tmp_path):
     assert not old.exists()
 
 
+def test_expired_screenshots_are_pruned_without_a_new_one(tmp_path):
+    """Nothing may be saved for days, so the retention period is also applied on its own (start-up, serving)."""
+    shot = tmp_path / f"{SHOT_ID}.png"
+    shot.write_bytes(b"png")
+    os.utime(shot, (0, 0))
+    prune_screenshots(tmp_path)
+    assert not shot.exists()
+    prune_screenshots(tmp_path / "missing")  # never fails when nothing has been saved yet
+
+
+async def test_blocked_redirect_targets_are_not_shown(tmp_path, fake_dns):
+    """The proxy stops the request, but the page may still sit on the rejected URL: it must go back to blank."""
+
+    class FakePage:
+        url = "http://127.0.0.1:8000/secret"
+
+        def is_closed(self) -> bool:
+            return False
+
+        async def goto(self, url: str, **kwargs) -> None:
+            self.url = url
+
+    session = BrowserSession(NoBrowser(), MASKER, tmp_path)
+    page = FakePage()
+    session._page = page  # type: ignore[assignment]
+    result = await session.run(session.read)
+    assert "移動先" in result["error"] and "127.0.0.1" in result["error"]
+    assert page.url == "about:blank"
+    await session._guard_url(page)  # type: ignore[arg-type]  # a blank page is not a destination
+
+
 # -- wiring -----------------------------------------------------------------------------------------------
 
 
@@ -252,6 +310,17 @@ def test_screenshot_api_requires_sign_in_and_a_valid_id(client, ctx):
     assert resp.content.startswith(b"\x89PNG")
     for bad in ("f" * 32, "SECRET", "..%2Fsecret", "%2E%2E%2Fsecret"):
         assert client.get(f"/api/browser/screenshots/{bad}").status_code == 404, bad
+
+
+def test_screenshot_api_drops_screenshots_past_the_retention_period(client, ctx):
+    directory = screenshot_dir(ctx.settings)
+    directory.mkdir(parents=True, exist_ok=True)
+    shot = directory / f"{SHOT_ID}.png"
+    shot.write_bytes(b"\x89PNG\r\n\x1a\n")
+    os.utime(shot, (0, 0))
+    sign_in(client, ctx)
+    assert client.get(f"/api/browser/screenshots/{SHOT_ID}").status_code == 404
+    assert not shot.exists()
 
 
 # -- real Chromium (skipped when it is not installed) -----------------------------------------------------
@@ -322,7 +391,8 @@ async def test_browser_session_end_to_end(tmp_path, monkeypatch):
 
         # Redirect hops never reach Playwright's routing: the proxy must stop them.
         redirected = await session.run(lambda: session.open("https://site.test/redirect"))
-        assert redirected.get("status") == 403 or "error" in redirected
+        assert "移動先" in redirected.get("error", ""), redirected
+        assert session._current().url == "about:blank"  # the rejected URL is not left on screen
         direct = await session._current().goto(f"http://127.0.0.1:{origin_port}/direct")
         assert direct is not None and direct.status == 403
         assert requests == []
@@ -330,6 +400,43 @@ async def test_browser_session_end_to_end(tmp_path, monkeypatch):
         await session.close()
         origin.close()
     assert service._browser is None  # the last page closed, so Chromium stopped
+
+
+TAMPERED_PAGE = """<!doctype html><html><head><title>わな</title><script>
+const realGetAttribute = Element.prototype.getAttribute;
+Element.prototype.getAttribute = function (name) {
+  return name === 'type' || name === 'autocomplete' ? 'search' : realGetAttribute.call(this, name);
+};
+Element.prototype.querySelector = function () { return null; };
+Element.prototype.closest = function () { return null; };
+Object.defineProperty(Element.prototype, 'tagName', {get() { return 'TEXTAREA'; }});
+Object.defineProperty(HTMLInputElement.prototype, 'form', {get() { return null; }});
+</script></head><body>
+<form><input id="u" name="user"><input id="pw" name="pw" type="password"></form>
+<form id="signin"><input type="password" name="pw2"></form>
+<input id="outside" name="other" form="signin">
+</body></html>"""
+
+
+@pytest.mark.skipif(not _chromium_installed(), reason="Chromium for Playwright is not installed")
+async def test_form_checks_survive_a_page_that_rewrites_dom_apis(tmp_path, monkeypatch):
+    """A page can fake getAttribute / querySelector in its own world: the checks must not rely on them."""
+
+    async def site(route):
+        await route.fulfill(status=200, content_type="text/html; charset=utf-8", body=TAMPERED_PAGE)
+
+    monkeypatch.setattr(BrowserSession, "_route", staticmethod(site))
+    session = BrowserSession(BrowserService(), MASKER, tmp_path / "shots")
+    try:
+        page = await session.run(lambda: session.open("https://trap.test/"))
+        if "起動できませんでした" in page.get("error", ""):
+            pytest.skip("Chromium could not be launched")
+        assert "error" not in page, page
+        assert "パスワード" in (await session.run(lambda: session.fill("#pw", "taro")))["error"]
+        assert "ログイン" in (await session.run(lambda: session.fill("#u", "taro")))["error"]
+        assert "ログイン" in (await session.run(lambda: session.fill("#outside", "taro")))["error"]
+    finally:
+        await session.close()
 
 
 async def test_browser_error_is_reported_when_chromium_cannot_start(tmp_path, monkeypatch):

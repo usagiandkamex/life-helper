@@ -3,6 +3,10 @@
 Playwright's request routing never sees redirect hops or WebSockets, so the destination check lives here: every
 connection is vetted by host (``netguard``) and then made to one of the vetted public addresses, which also closes
 the DNS-rebinding gap between the check and the connection.
+
+Plain HTTP requests are vetted as whole URLs (``url_rejection``), so credentials, sensitive data and secrets in the
+path or query never leave. For HTTPS only the CONNECT authority is visible, so those connections are vetted by host;
+what the page then sends over the tunnel is limited by the checks on the tools themselves (``browser/guard.py``).
 """
 
 from __future__ import annotations
@@ -10,9 +14,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
-from ..netguard import host_rejection, resolve_public
+from ..netguard import host_rejection, resolve_public, url_rejection
+
+if TYPE_CHECKING:
+    from ..security import SecretMasker
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +72,8 @@ async def _relay_response(reader: asyncio.StreamReader, writer: asyncio.StreamWr
 
 
 class EgressProxy:
-    def __init__(self) -> None:
+    def __init__(self, masker: SecretMasker | None = None) -> None:
+        self._masker = masker
         self._server: asyncio.Server | None = None
         self._tasks: set[asyncio.Task] = set()
         self.port = 0
@@ -104,14 +113,17 @@ class EgressProxy:
         tunnel = method.upper() == "CONNECT"
         if tunnel:
             host, port = _split_authority(target)
+            # Only the authority is visible on CONNECT: the request line inside the tunnel is encrypted.
+            reason = host_rejection(host)
         else:
             parts = urlsplit(target)
             if parts.scheme != "http" or not parts.hostname:
                 await self._reply(writer, 400, "http の URL だけ中継できます")
                 return
             host, port = parts.hostname, parts.port or 80
+            # The whole URL is visible here, so it gets the same check as browser_open (never echoed back).
+            reason = url_rejection(target, self._masker)
 
-        reason = host_rejection(host)
         addresses: list[str] = []
         if reason is None:
             addresses, reason = await resolve_public(host)

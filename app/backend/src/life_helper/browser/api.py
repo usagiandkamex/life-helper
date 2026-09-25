@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 
 from ..auth import CurrentUser, require_user
 from ..context import AppContext, get_ctx
-from .service import screenshot_dir
+from .service import is_expired, screenshot_dir
 
 SCREENSHOT_ID = re.compile(r"[0-9a-f]{32}")
 
@@ -22,5 +22,9 @@ def get_screenshot(
 ) -> FileResponse:
     path = screenshot_dir(ctx.settings) / f"{shot_id}.png"
     if not SCREENSHOT_ID.fullmatch(shot_id) or not path.is_file():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "screenshot not found")
+    if is_expired(path):
+        # Past the retention period: drop it here too, in case nothing has been saved since.
+        path.unlink(missing_ok=True)
         raise HTTPException(status.HTTP_404_NOT_FOUND, "screenshot not found")
     return FileResponse(path, media_type="image/png", headers={"Cache-Control": "private, max-age=86400"})
