@@ -673,6 +673,8 @@ async def test_toushin_exhaustive_search_never_returns_a_partial_list(toushin):
         [page(others[:20], 25), page(others[15:20], 25)],
         # More funds than the total.
         [page(others[:20], 21), page(others[20:], 21)],
+        # A non-final page returns fewer rows than the fixed startNo offset expects, though the total stays put.
+        [page(others[:15], 25)],
     ):
         route.mock(side_effect=pages)
         with pytest.raises(ConnectorError, match="途中で変わりました"):

@@ -489,16 +489,15 @@ class ToushinLibConnector(FundCsvConnector):
             if expected is None:
                 expected = total
             isins = [_field(i, "isinCd") for i in items]
-            # The list changing between pages, a page that repeats funds, or one that stops short, would hide a
-            # fund from the count, so none of them is taken as a complete answer.
-            if total != expected or len(set(isins)) != len(isins) or seen & set(isins):
-                raise ConnectorError(f"{self.manager}の検索結果がページの途中で変わりました（もう一度お試しください）")
-            if not items and len(records) < expected:
+            expected_page_len = min(SEARCH_PAGE_SIZE, max(expected - len(records), 0))
+            invalid = total != expected or len(set(isins)) != len(isins) or seen & set(isins)
+            # The list changing between pages, a page that repeats funds, or one whose length doesn't match what
+            # the fixed startNo offset should have returned, would hide a fund from the count, so none of them is
+            # taken as a complete answer.
+            if invalid or len(items) != expected_page_len:
                 raise ConnectorError(f"{self.manager}の検索結果がページの途中で変わりました（もう一度お試しください）")
             seen.update(isins)
             records += items
-            if len(records) > expected:
-                raise ConnectorError(f"{self.manager}の検索結果がページの途中で変わりました（もう一度お試しください）")
             if len(records) == expected:
                 return records
         raise TooManyFundsError(f"「{keyword}」に当てはまるファンドが多すぎるため、候補を絞り込めませんでした")

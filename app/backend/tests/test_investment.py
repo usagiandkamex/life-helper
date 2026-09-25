@@ -15,7 +15,14 @@ from life_helper.connectors.yahoo_finance import RATE_LIMIT_MESSAGE
 from life_helper.market import clock
 from life_helper.market.broker_csv import BrokerCsvError, load_mapping, parse_broker_csv
 from life_helper.market.clock import market_today
-from life_helper.market.funds import auto_link_funds, fund_connectors, link_fund, refresh_fund_navs, suggest_funds
+from life_helper.market.funds import (
+    _plausible,
+    auto_link_funds,
+    fund_connectors,
+    link_fund,
+    refresh_fund_navs,
+    suggest_funds,
+)
 from life_helper.market.portfolio import (
     CapitalGainsParams,
     FundRef,
@@ -794,6 +801,14 @@ async def test_refresh_leaves_funds_it_cannot_link_unambiguously_to_the_user(ctx
     assert "HTTP 503" in down["auto_link"]["errors"][0]["error"]
 
 
+def test_plausible_excludes_exactly_double_or_half():
+    held = _imported("f", 10_000)
+    assert _plausible(held, 20_000) is False
+    assert _plausible(held, 5_000) is False
+    assert _plausible(held, 19_999) is True
+    assert _plausible(held, 5_001) is True
+
+
 async def test_auto_link_needs_the_search_and_the_fund_page_to_agree(ctx):
     # The search lists the S&P 500 fund under another fund's 協会コード; the fund page of its ISIN says otherwise.
     listed = SP500 | {"associFundCd": ALL_COUNTRY["associFundCd"]}
@@ -802,6 +817,26 @@ async def test_auto_link_needs_the_search_and_the_fund_page_to_agree(ctx):
     _funds_ready(ctx)
     with respx.mock:
         search = mock_toushin({}, funds=(listed,)).side_effect
+        pages = mock_toushin({SP500_ISIN: (44_842, _jp(NAV_DAY))}).side_effect
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return (search if request.method == "POST" else pages)(request)
+
+        respx.route(url__startswith="https://toushin-lib.fwg.ne.jp").mock(side_effect=handler)
+        result = await auto_link_funds(ctx)
+    assert result["linked"] == [] and "一致しない" in result["errors"][0]["error"]
+    assert portfolio_store(ctx).load().holdings[0].fund is None
+
+
+async def test_auto_link_fails_closed_when_the_search_omits_the_association_code(ctx):
+    # The search result has no usable 協会コード at all, so the required agreement with the fund page is
+    # unestablished; this must not be treated as if the codes simply matched.
+    unlisted = SP500 | {"associFundCd": ""}
+    with portfolio_store(ctx).transaction() as portfolio:
+        portfolio.holdings = [_imported(SBI_SP500, 43_966)]
+    _funds_ready(ctx)
+    with respx.mock:
+        search = mock_toushin({}, funds=(unlisted,)).side_effect
         pages = mock_toushin({SP500_ISIN: (44_842, _jp(NAV_DAY))}).side_effect
 
         def handler(request: httpx.Request) -> httpx.Response:

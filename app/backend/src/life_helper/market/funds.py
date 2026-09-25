@@ -93,14 +93,14 @@ def _plausible(holding: Holding, nav: float | None) -> bool:
     if holding.price is None or holding.price.value <= 0 or not nav:
         return True
     low, high = AUTO_LINK_NAV_RATIO
-    return low <= nav / holding.price.value <= high
+    return low < nav / holding.price.value < high
 
 
 async def _verified_quote(ctx: AppContext, candidate: dict) -> dict:
     """The NAV of ``candidate``, fetched through its fund page, and checked to be the fund the search named."""
     quote = await fund_connectors(ctx)[candidate["provider"]].fund_nav(candidate["fund_code"], today=market_today())
     listed = candidate.get("association_code")
-    if quote["fund_code"] != candidate["fund_code"] or (listed and quote["association_code"] != listed):
+    if quote["fund_code"] != candidate["fund_code"] or quote["association_code"] != listed:
         raise ConnectorError("検索結果とファンドページで協会コードが一致しないため、紐付けませんでした")
     return quote
 
