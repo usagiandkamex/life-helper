@@ -546,6 +546,11 @@ async def test_toushin_csv_failures_are_distinguished(toushin):
     route = respx.get(url__startswith="https://toushin-lib.fwg.ne.jp/FdsWeb/FDST030000/csv-file-download")
     for response, message in (
         (httpx.Response(500, json={"statusCode": None}), "ライブラリーにありません"),
+        # Only that answer means the library has no such NAV; any other 500, even one that carries a null
+        # statusCode of its own, is its site failing, and would send the user looking for a fund code instead.
+        (httpx.Response(500, text="<html>500 Internal Server Error</html>"), "HTTP 500"),
+        (httpx.Response(500, json={"statusCode": "E0001"}), "HTTP 500"),
+        (httpx.Response(500, json={"statusCode": None, "errorMsg": "ただいま混み合っています"}), "HTTP 500"),
         (httpx.Response(200, json={"statusCode": None}), "CSV が返りませんでした"),
         (httpx.Response(503, text=""), "HTTP 503"),
         (httpx.Response(200, text="<!DOCTYPE html><html>maintenance</html>"), "CSV ではありません"),

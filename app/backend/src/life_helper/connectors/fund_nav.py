@@ -348,6 +348,18 @@ class DaiwaFundCsvConnector(FundCsvConnector):
         return f"https://www.daiwa-am.co.jp/funds/detail/{code}/detail_top.html"
 
 
+def _no_data_answer(response) -> bool:
+    """True for the ``{"statusCode": null}`` body the library sends in place of a CSV it has no data for.
+
+    Only that exact body means "no such NAV": a page, an error text or any other JSON is the site itself
+    failing, which has to stay an error the user can retry instead of a fund reported as unregistered.
+    """
+    try:
+        return response.json() == {"statusCode": None}
+    except ValueError:
+        return False
+
+
 class ToushinLibConnector(FundCsvConnector):
     """投資信託協会 投信総合検索ライブラリー (https://toushin-lib.fwg.ne.jp/). Every manager's funds, no API key.
 
@@ -389,7 +401,9 @@ class ToushinLibConnector(FundCsvConnector):
         response = await self.get(
             TOUSHIN_CSV_URL, params={"isinCd": isin, "associFundCd": association_code}, max_bytes=MAX_CSV_BYTES
         )
-        if response.status_code == 500:
+        # The library answers its own {"statusCode":null} body when it has no NAV for the pair. Any other 500 is
+        # its site being in trouble, and is reported as such instead of as a fund that does not exist.
+        if response.status_code == 500 and _no_data_answer(response):
             raise FundNotFoundError(f"{isin} の基準価額が{self.manager}のライブラリーにありません")
         text = self._text(response)
         if text.lstrip().startswith("{"):

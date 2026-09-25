@@ -96,9 +96,18 @@ def _plausible(holding: Holding, nav: float | None) -> bool:
     return low < nav / holding.price.value < high
 
 
-async def _verified_quote(ctx: AppContext, candidate: dict) -> dict:
-    """The NAV of ``candidate``, fetched through its fund page, and checked to be the fund the search named."""
-    quote = await fund_connectors(ctx)[candidate["provider"]].fund_nav(candidate["fund_code"], today=market_today())
+async def _verified_quote(ctx: AppContext, candidate: dict, fetched: dict[tuple[str, str], dict]) -> dict:
+    """The NAV of ``candidate``, fetched through its fund page, and checked to be the fund the search named.
+
+    ``fetched`` keeps the NAVs already taken in this run: two holdings can name the same fund (one by its
+    official name, the other with the nickname a broker appends), and one fetch answers both. The checks below
+    are still made for every candidate, because each search result has to agree with the fund page on its own.
+    """
+    key = (candidate["provider"], candidate["fund_code"])
+    if key not in fetched:
+        connector = fund_connectors(ctx)[candidate["provider"]]
+        fetched[key] = await connector.fund_nav(candidate["fund_code"], today=market_today())
+    quote = fetched[key]
     listed = candidate.get("association_code")
     if quote["fund_code"] != candidate["fund_code"] or quote["association_code"] != listed:
         raise ConnectorError("検索結果とファンドページで協会コードが一致しないため、紐付けませんでした")
@@ -122,6 +131,8 @@ async def auto_link_funds(ctx: AppContext, *, quotes: dict[tuple[str, str], dict
     for h in pending:
         by_name.setdefault(normalize_name(h.name), []).append(h)
     chosen: dict[str, tuple[dict, dict]] = {}
+    # The NAVs taken while checking candidates, so a fund two holdings name differently is fetched once.
+    fetched: dict[tuple[str, str], dict] = {}
     # Search and fetch outside the file lock, then apply under it: the lock is never held across network calls.
     for group in by_name.values():
         rows = [{"id": h.id, "name": h.name} for h in group]
@@ -140,7 +151,7 @@ async def auto_link_funds(ctx: AppContext, *, quotes: dict[tuple[str, str], dict
                     report["unmatched"] += rows
                 continue
             (candidate,) = exact.values()
-            quote = await _verified_quote(ctx, candidate)
+            quote = await _verified_quote(ctx, candidate, fetched)
         except TooManyFundsError as e:
             report["ambiguous"] += [r | {"reason": str(e)} for r in rows]
             continue

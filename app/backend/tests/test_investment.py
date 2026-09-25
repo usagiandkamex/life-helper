@@ -868,6 +868,21 @@ async def test_auto_link_needs_the_search_and_the_fund_page_to_agree_on_the_name
     assert portfolio_store(ctx).load().holdings[0].fund is None
 
 
+async def test_auto_link_fetches_a_fund_two_holdings_name_differently_only_once(ctx):
+    # The same fund in two accounts: one broker writes the official name, the other appends the nickname.
+    with portfolio_store(ctx).transaction() as portfolio:
+        portfolio.holdings = [_imported(SBI_SCHD, 13_248), _imported(SCHD["fundNm"], 13_248, 100_000, "tokutei")]
+    _funds_ready(ctx)
+    with respx.mock:
+        route = mock_toushin({SCHD["isinCd"]: (13_246, _jp(NAV_DAY))})
+        result = await auto_link_funds(ctx)
+    assert [link["code"] for link in result["linked"]] == [SCHD["isinCd"], SCHD["isinCd"]]
+    # Both names were searched, but the fund page and its CSV were fetched once for the fund they share.
+    assert len(toushin_calls(route, "/FdsWeb/FDST999900/fundDataSearch")) > 1
+    assert len(toushin_calls(route, "/FdsWeb/FDST030000")) == 1
+    assert len(toushin_calls(route, "/FdsWeb/FDST030000/csv-file-download")) == 1
+
+
 async def test_auto_link_never_overrides_a_change_made_while_searching(ctx, monkeypatch):
     with portfolio_store(ctx).transaction() as portfolio:
         portfolio.holdings = [_imported(SBI_SP500, 43_966), _imported(SBI_SCHD, 13_248)]
