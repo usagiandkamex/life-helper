@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import json
 import logging
 from datetime import date, datetime, time
 from zoneinfo import ZoneInfo
@@ -14,9 +15,12 @@ from life_helper.connectors.fund_nav import (
     MAX_CSV_BYTES,
     MIN_SCORE,
     DaiwaFundCsvConnector,
-    MufgFundApiConnector,
     RakutenFundCsvConnector,
+    TooManyFundsError,
+    ToushinLibConnector,
+    keyword_variants,
     match_score,
+    same_fund_name,
 )
 from life_helper.connectors.rakuten_travel import RakutenTravelConnector, parse_vacancies
 from life_helper.connectors.registry import get_connectors
@@ -35,15 +39,20 @@ from .conftest import (
     DAIWA_HEADER,
     FANG_PLUS,
     RAKUTEN_HEADER,
+    SCHD,
+    SCHD_GROWTH,
     SP500,
+    TOUSHIN_HEADER,
     YAHOO_NOT_FOUND,
     daiwa_csv,
     mock_daiwa,
-    mock_mufg,
     mock_rakuten,
+    mock_toushin,
     mock_yahoo,
-    mufg_payload,
     sign_in,
+    toushin_calls,
+    toushin_csv,
+    toushin_page,
     yahoo_chart,
     yahoo_symbols,
 )
@@ -67,8 +76,10 @@ def yahoo(tmp_path, masker):
 
 
 @pytest.fixture
-def mufg(tmp_path, masker):
-    return MufgFundApiConnector({}, masker, tmp_path / "state.json")
+def toushin(tmp_path, masker):
+    connector = ToushinLibConnector({}, masker, tmp_path / "state.json")
+    connector.min_interval_seconds = 0
+    return connector
 
 
 @pytest.fixture
@@ -423,16 +434,6 @@ def test_rakuten_rejects_foreign_endpoint(tmp_path, masker):
         RakutenTravelConnector({}, masker, tmp_path / "s.json", endpoint="https://evil.example/api")
 
 
-def test_fund_code_decides_the_api_path():
-    assert MufgFundApiConnector.code_path("0331418A") == "association_fund_cd/0331418A"
-    assert MufgFundApiConnector.code_path("jp90c000h1t1") == "isin_cd/JP90C000H1T1"
-    assert MufgFundApiConnector.code_path("253425") == "fund_cd/253425"
-    # A code that could escape the URL path, or that fits no known code shape, never reaches the API.
-    for bad in ("", "../../etc", "0331418A/../x", "03314", "25342A", "0331418A0331418A"):
-        with pytest.raises(ConnectorError, match="ファンドコード"):
-            MufgFundApiConnector.code_path(bad)
-
-
 def test_fund_name_matching_only_scores_candidates():
     # Managers write fund names in full-width characters, brokers in half-width.
     assert (
@@ -445,94 +446,272 @@ def test_fund_name_matching_only_scores_candidates():
     assert match_score("ひふみプラス", "ｅＭＡＸＩＳ Ｓｌｉｍ 米国株式（Ｓ＆Ｐ５００）") < MIN_SCORE
 
 
+def test_same_fund_name_needs_the_whole_official_name():
+    assert same_fund_name("eMAXIS Slim 米国株式(S&P500)", SP500["fundNm"])
+    # Brokers append the nickname to the official name; that is still the same fund.
+    sbi = "楽天・シュワブ・高配当株式・米国ファンド(四半期決算型)(楽天・SCHD)"
+    assert same_fund_name(sbi, SCHD["fundNm"], SCHD["fundNkNm"])
+    assert not same_fund_name(sbi, SCHD_GROWTH["fundNm"], SCHD_GROWTH["fundNkNm"])
+    # A part of the name, or the nickname alone, is only similar.
+    assert not same_fund_name("eMAXIS Slim 米国株式", SP500["fundNm"])
+    assert not same_fund_name("楽天・SCHD", SCHD["fundNm"], SCHD["fundNkNm"])
+    assert not same_fund_name("", SP500["fundNm"])
+
+
+def test_keyword_variants_drop_trailing_brackets_one_at_a_time():
+    assert keyword_variants("楽天・シュワブ・高配当株式・米国ファンド(四半期決算型)(楽天・SCHD)") == [
+        "楽天・シュワブ・高配当株式・米国ファンド(四半期決算型)(楽天・SCHD)",
+        "楽天・シュワブ・高配当株式・米国ファンド(四半期決算型)",
+        "楽天・シュワブ・高配当株式・米国ファンド",
+    ]
+    # Full-width brackets are the same brackets, and a name without any is searched once.
+    assert keyword_variants("ｅＭＡＸＩＳ Ｓｌｉｍ米国株式（Ｓ＆Ｐ５００）") == [
+        "eMAXIS Slim米国株式(S&P500)",
+        "eMAXIS Slim米国株式",
+    ]
+    assert keyword_variants("ひふみプラス") == ["ひふみプラス"]
+    assert keyword_variants("  ") == []
+
+
+def test_toushin_isin_keeps_stray_codes_out_of_the_url(toushin):
+    assert toushin.fund_code(" jp90c000gkc6 ") == "JP90C000GKC6"
+    assert toushin.fund_code("ＪＰ９０Ｃ０００ＧＫＣ６") == "JP90C000GKC6"
+    for bad in ("", "0331418A", "JP90C000GKC", "JP90C000GKC6X", "US0378331005", "JP90C000GKC6&associFundCd=1", "../x"):
+        with pytest.raises(ConnectorError, match="ISIN"):
+            toushin.fund_code(bad)
+
+
 @respx.mock
-async def test_mufg_fund_nav(mufg):
-    route = mock_mufg({"0331418A": (25_341, "20260924")})
-    result = await mufg.fund_nav("0331418A", today=date(2026, 9, 25))
+async def test_toushin_fund_nav(toushin):
+    route = mock_toushin({SP500["isinCd"]: (44_842, "2026年09月24日")})
+    result = await toushin.fund_nav("JP90C000GKC6", today=date(2026, 9, 25))
     assert result == {
-        "fund_code": "0331418A",
-        "name": "ｅＭＡＸＩＳ Ｓｌｉｍ 全世界株式（オール・カントリー）",
-        "nav": 25_341.0,
+        "fund_code": "JP90C000GKC6",
+        "name": "ｅＭＡＸＩＳ　Ｓｌｉｍ米国株式（Ｓ＆Ｐ５００）",
+        "nav": 44_842.0,
         "price_unit": 10_000,
         "date": "2026-09-24",
-        "source": "mufg_api",
-        "source_url": "https://developer.am.mufg.jp/fund_information_latest/association_fund_cd/0331418A",
-        "manager": "三菱UFJアセットマネジメント",
-        "isin": "JP90C000H1T1",
-        "association_code": "0331418A",
+        "source": "toushin_lib",
+        "source_url": "https://toushin-lib.fwg.ne.jp/FdsWeb/FDST030000?isinCd=JP90C000GKC6",
+        "manager": "",
+        "isin": "JP90C000GKC6",
+        "association_code": "03311187",
     }
-    assert route.calls.last.request.url.path == "/fund_information_latest/association_fund_cd/0331418A"
-    assert mufg.configured and mufg.last_used() is not None
+    (csv_call,) = toushin_calls(route, "/FdsWeb/FDST030000/csv-file-download")
+    assert dict(csv_call.request.url.params) == {"isinCd": "JP90C000GKC6", "associFundCd": "03311187"}
+    # The 協会コード confirmed on the fund page is remembered, so the next refresh only fetches the CSV.
+    await toushin.fund_nav("JP90C000GKC6", today=date(2026, 9, 25))
+    assert len(toushin_calls(route, "/FdsWeb/FDST030000")) == 1
+    assert len(toushin_calls(route, "/FdsWeb/FDST030000/csv-file-download")) == 2
+    assert toushin.configured and toushin.last_used() is not None
 
 
 @respx.mock
-async def test_mufg_search_offers_candidates(mufg):
-    mock_mufg({})
-    candidates = await mufg.search_funds("eMAXIS Slim 全世界株式（オール・カントリー）")
-    assert [(c["fund_code"], c["score"]) for c in candidates] == [("0331418A", 1.0)]
-    assert candidates[0]["provider"] == "mufg_api" and candidates[0]["price_unit"] == 10_000
-    # A name that matches nothing offers nothing, instead of returning the closest fund.
-    assert await mufg.search_funds("ひふみプラス") == []
-
-
-@respx.mock
-async def test_mufg_never_values_a_holding_with_another_fund(mufg):
-    mufg.min_interval_seconds = 0
-    route = respx.get(url__startswith="https://developer.am.mufg.jp")
-    route.mock(return_value=httpx.Response(200, json=mufg_payload(SP500 | {"nav": 30_000, "base_date": "20260924"})))
-    with pytest.raises(ConnectorError, match="別のファンド"):
-        await mufg.fund_nav("0331418A", today=date(2026, 9, 25))
-    # The code has to come back in the field it was asked for: another fund's ISIN is not an association code.
-    mixed = ALL_COUNTRY | {"isin_cd": "JP90C000FYT1", "association_fund_cd": "JP90C000H1T1", "nav": 1}
-    route.mock(return_value=httpx.Response(200, json=mufg_payload(mixed | {"base_date": "20260924"})))
-    with pytest.raises(ConnectorError, match="別のファンド"):
-        await mufg.fund_nav("JP90C000H1T1", today=date(2026, 9, 25))
-
-
-@respx.mock
-async def test_mufg_failures_are_distinguished(mufg):
-    mufg.min_interval_seconds = 0
-    route = respx.get(url__startswith="https://developer.am.mufg.jp")
-    for response, message in (
-        (httpx.Response(403, text="ERROR: The request could not be satisfied"), "HTTP 403"),
-        (httpx.Response(503, text=""), "HTTP 503"),
-        (httpx.Response(200, text="<html>maintenance</html>"), "JSON ではありません"),
-        (httpx.Response(200, json={"result": {"status": 400}, "errors": {"count": 1}}), "エラーを返しました"),
-        # An error next to a dataset is still an error: the dataset is not used.
+async def test_toushin_only_trusts_the_association_code_of_the_isins_own_page(toushin):
+    route = respx.route(url__startswith="https://toushin-lib.fwg.ne.jp")
+    csv = httpx.Response(200, content=toushin_csv(25_341).encode("cp932"))
+    for page, error in (
+        # The page of another fund: its code would silently select that fund's CSV.
+        (toushin_page(ALL_COUNTRY), "形式が想定と異なります"),
+        # The requested ISIN appears on the page, but the download link is for another fund.
+        (toushin_page(ALL_COUNTRY) + '<input type="hidden" value="JP90C000GKC6">', "形式が想定と異なります"),
+        # Two different codes on the page: there is no telling which one is this fund's.
+        (toushin_page(SP500) + 'associFundCd=0331418A"', "形式が想定と異なります"),
+        (toushin_page(SP500).replace('id="associFundCd" value="03311187"', 'id="associFundCd" value="x"'), "形式"),
+        # Two download links, even if one is for this ISIN.
         (
-            httpx.Response(
-                200,
-                json=mufg_payload(ALL_COUNTRY | {"nav": 1, "base_date": "20260924"}) | {"errors": {"count": 1}},
+            toushin_page(SP500) + '<a href="csv-file-download?isinCd=JP90C000H1T1&amp;associFundCd=03311187">',
+            "形式",
+        ),
+        (
+            toushin_page(SP500).replace(
+                "<title>ｅＭＡＸＩＳ　Ｓｌｉｍ米国株式（Ｓ＆Ｐ５００）</title>", "<title></title>"
             ),
-            "エラーを返しました",
+            "形式",
         ),
-        (httpx.Response(200, json={"result": {"status": 200}}), "datasets がありません"),
-        (httpx.Response(200, json=mufg_payload()), "見つかりませんでした"),
-        (httpx.Response(200, json=mufg_payload(ALL_COUNTRY | {"nav": 0, "base_date": "20260924"})), "基準価額が不正"),
-        (httpx.Response(200, json=mufg_payload(ALL_COUNTRY | {"base_date": "20260924"})), "基準価額が不正"),
-        # A number too large to be a NAV is refused here, so it never reaches the portfolio file.
-        (
-            httpx.Response(200, json=mufg_payload(ALL_COUNTRY | {"nav": 1e100, "base_date": "20260924"})),
-            "基準価額が不正",
-        ),
-        (httpx.Response(200, json=mufg_payload(ALL_COUNTRY | {"nav": 1, "base_date": "2026-99-99"})), "基準日が不正"),
-        (httpx.Response(200, json=mufg_payload(ALL_COUNTRY | {"nav": 1, "base_date": "20261005"})), "未来の日付"),
+        (toushin_page(None), "見つかりませんでした"),
+    ):
+        route.mock(side_effect=[httpx.Response(200, text=page), csv])
+        with pytest.raises(ConnectorError, match=error):
+            await toushin.fund_nav("JP90C000GKC6", today=date(2026, 9, 25))
+        # The CSV was never asked for with a code the page did not confirm.
+        assert all(c.request.url.path != "/FdsWeb/FDST030000/csv-file-download" for c in route.calls)
+    assert toushin._identified == {}
+
+
+@respx.mock
+async def test_toushin_csv_failures_are_distinguished(toushin):
+    toushin.min_interval_seconds = 0
+    toushin._identified["JP90C000GKC6"] = ("03311187", SP500["fundNm"])
+    route = respx.get(url__startswith="https://toushin-lib.fwg.ne.jp/FdsWeb/FDST030000/csv-file-download")
+    for response, message in (
+        (httpx.Response(500, json={"statusCode": None}), "ライブラリーにありません"),
+        # Only that answer means the library has no such NAV; any other 500, even one that carries a null
+        # statusCode of its own, is its site failing, and would send the user looking for a fund code instead.
+        (httpx.Response(500, text="<html>500 Internal Server Error</html>"), "HTTP 500"),
+        (httpx.Response(500, json={"statusCode": "E0001"}), "HTTP 500"),
+        (httpx.Response(500, json={"statusCode": None, "errorMsg": "ただいま混み合っています"}), "HTTP 500"),
+        (httpx.Response(200, json={"statusCode": None}), "CSV が返りませんでした"),
+        (httpx.Response(503, text=""), "HTTP 503"),
+        (httpx.Response(200, text="<!DOCTYPE html><html>maintenance</html>"), "CSV ではありません"),
+        (httpx.Response(200, text=TOUSHIN_HEADER), "基準価額の行がありません"),
+        (httpx.Response(200, content=f"{TOUSHIN_HEADER}\n2026年09月24日,0,1,,\n".encode("cp932")), "基準価額が不正"),
+        (httpx.Response(200, content=f"{TOUSHIN_HEADER}\n2026年10月05日,44842,1,,\n".encode("cp932")), "未来の日付"),
     ):
         route.mock(return_value=response)
         with pytest.raises(ConnectorError, match=message):
-            await mufg.fund_nav("0331418A", today=date(2026, 9, 25))
+            await toushin.fund_nav("JP90C000GKC6", today=date(2026, 9, 25))
 
 
 @respx.mock
-async def test_mufg_network_error_is_reported_as_connector_error(mufg):
-    respx.get(url__startswith="https://developer.am.mufg.jp").mock(side_effect=httpx.ConnectError("boom"))
+async def test_toushin_search_offers_candidates(toushin):
+    toushin.min_interval_seconds = 0
+    route = mock_toushin({})
+    candidates = await toushin.search_funds("eMAXIS Slim 米国株式(S&P500)")
+    assert [(c["fund_code"], c["exact"], c["score"]) for c in candidates] == [("JP90C000GKC6", True, 1.0)]
+    assert candidates[0] | {"source_url": None} == {
+        "provider": "toushin_lib",
+        "provider_label": toushin.info.label,
+        "manager": "三菱UFJアセットマネジメント",
+        "fund_code": "JP90C000GKC6",
+        "name": "ｅＭＡＸＩＳ　Ｓｌｉｍ米国株式（Ｓ＆Ｐ５００）",
+        "nickname": "",
+        "isin": "JP90C000GKC6",
+        "association_code": "03311187",
+        "price_unit": 10_000,
+        "score": 1.0,
+        "exact": True,
+        "nav": 44_842.0,
+        "date": "2026-09-24",
+        "source_url": None,
+    }
+    body = json.loads(route.calls.last.request.content)
+    # Without t_kensakuKbn the library ignores the keyword and answers with every fund.
+    assert body == {"t_keyword": "eMAXIS Slim 米国株式(S&P500)", "t_kensakuKbn": "1", "startNo": 0, "draw": 1}
+
+    # The broker name with the nickname appended finds nothing as is, so it is searched again without it.
+    sbi = "楽天・シュワブ・高配当株式・米国ファンド(四半期決算型)(楽天・SCHD)"
+    candidates = await toushin.search_funds(sbi)
+    assert [(c["fund_code"], c["exact"]) for c in candidates] == [("JP90C000R6N1", True)]
+    everything = await toushin.search_funds(sbi, exhaustive=True)
+    # Every variant is searched when uniqueness matters, so the other share class is seen, but is not exact.
+    assert [(c["fund_code"], c["exact"]) for c in everything] == [("JP90C000R6N1", True), ("JP90C000S073", False)]
+    assert await toushin.search_funds("ひふみプラス") == []
+
+
+@respx.mock
+async def test_toushin_exhaustive_search_reads_every_page_or_refuses(toushin):
+    toushin.min_interval_seconds = 0
+    many = [
+        SP500 | {"isinCd": f"JP90C{i:06d}0", "associFundCd": f"T{i:07d}", "fundNm": f"テストファンド{i}"}
+        for i in range(45)
+    ]
+    route = mock_toushin({}, funds=many)
+    assert len(await toushin.search_funds("テストファンド")) == 20
+    assert len(route.calls) == 1
+    assert len(await toushin.search_funds("テストファンド", exhaustive=True)) == 45
+    assert [json.loads(c.request.content)["startNo"] for c in route.calls[1:]] == [0, 20, 40]
+    too_many = many * 3
+    toushin._searched.clear()
+    mock_toushin({}, funds=[f | {"isinCd": f"JP91C{i:06d}0"} for i, f in enumerate(too_many)])
+    with pytest.raises(TooManyFundsError, match="多すぎる"):
+        await toushin.search_funds("テストファンド", exhaustive=True)
+
+
+@respx.mock
+async def test_toushin_search_failures_are_errors_not_empty_results(toushin):
+    toushin.min_interval_seconds = 0
+    route = respx.post("https://toushin-lib.fwg.ne.jp/FdsWeb/FDST999900/fundDataSearch")
+    ok = {"statusCode": None, "searchResultInfo": {"recordsTotal": "1", "resultInfoMapList": [SP500]}}
+    for response, message in (
+        (httpx.Response(503, text=""), "HTTP 503"),
+        (httpx.Response(200, text="<html>maintenance</html>"), "JSON ではありません"),
+        (httpx.Response(200, json={"statusCode": None}), "検索結果の形式"),
+        (
+            httpx.Response(200, json={"searchResultInfo": {"recordsTotal": "x", "resultInfoMapList": []}}),
+            "検索結果の形式",
+        ),
+    ):
+        route.mock(return_value=response)
+        with pytest.raises(ConnectorError, match=message):
+            await toushin.search_funds("eMAXIS Slim 米国株式")
+    # One ISIN answering with two 協会コード is a broken result, not two candidates.
+    conflict = ok | {
+        "searchResultInfo": {"recordsTotal": "2", "resultInfoMapList": [SP500, SP500 | {"associFundCd": "0331418A"}]}
+    }
+    route.mock(return_value=httpx.Response(200, json=conflict))
+    with pytest.raises(ConnectorError, match="矛盾"):
+        await toushin.search_funds("eMAXIS Slim 米国株式")
+    # Records without a usable ISIN or name are skipped; a broken 協会コード or NAV is only left out, because
+    # the NAV is fetched with the code the fund page confirms.
+    broken = [
+        SP500 | {"isinCd": "../x"},
+        SP500 | {"fundNm": " "},
+        SP500 | {"isinCd": "JP90C000H1T1", "associFundCd": "", "standardPrice": "-"},
+    ]
+    route.mock(
+        return_value=httpx.Response(200, json={"searchResultInfo": {"recordsTotal": "3", "resultInfoMapList": broken}})
+    )
+    (only,) = await toushin.search_funds("eMAXIS Slim 米国株式")
+    assert (only["fund_code"], only["association_code"], only["nav"], only["date"]) == (
+        "JP90C000H1T1",
+        None,
+        None,
+        None,
+    )
+
+
+@respx.mock
+async def test_toushin_exhaustive_search_never_returns_a_partial_list(toushin):
+    route = respx.post("https://toushin-lib.fwg.ne.jp/FdsWeb/FDST999900/fundDataSearch")
+    others = [SP500 | {"isinCd": f"JP90C{i:06d}0", "fundNm": f"別のファンド{i}"} for i in range(25)]
+
+    def page(items, total):
+        return httpx.Response(200, json={"searchResultInfo": {"recordsTotal": str(total), "resultInfoMapList": items}})
+
+    for pages in (
+        # The total changes between pages.
+        [page(others[:20], 25), page(others[20:], 26)],
+        # A page stops short of the total.
+        [page(others[:20], 25), page([], 25)],
+        # A page repeats funds of the one before.
+        [page(others[:20], 25), page(others[15:20], 25)],
+        # More funds than the total.
+        [page(others[:20], 21), page(others[20:], 21)],
+        # A non-final page returns fewer rows than the fixed startNo offset expects, though the total stays put.
+        [page(others[:15], 25)],
+    ):
+        route.mock(side_effect=pages)
+        with pytest.raises(ConnectorError, match="途中で変わりました"):
+            await toushin.search_funds("ひふみプラス", exhaustive=True)
+    # A fund with the very name but no usable ISIN makes it unknowable whether the name is unique.
+    route.mock(return_value=page([SP500, SP500 | {"isinCd": "", "associFundCd": "0331999Z"}], 2))
+    with pytest.raises(ConnectorError, match="ISIN の不正"):
+        await toushin.search_funds("eMAXIS Slim 米国株式(S&P500)", exhaustive=True)
+    # With nothing wrong, the complete answer is kept for the day, so a name is not searched on every refresh.
+    route.mock(return_value=page([SP500], 1))
+    calls = len(route.calls)
+    first = await toushin.search_funds("ひふみプラス", exhaustive=True)
+    assert await toushin.search_funds("ひふみプラス", exhaustive=True) == first
+    assert len(route.calls) == calls + 1
+
+
+@respx.mock
+async def test_toushin_network_error_is_reported_as_connector_error(toushin):
+    respx.route(url__startswith="https://toushin-lib.fwg.ne.jp").mock(side_effect=httpx.ConnectError("boom"))
     with pytest.raises(ConnectorError, match="接続できませんでした"):
-        await mufg.fund_nav("0331418A")
+        await toushin.fund_nav("JP90C000GKC6")
+    with pytest.raises(ConnectorError, match="接続できませんでした"):
+        await toushin.search_funds("eMAXIS Slim")
 
 
-async def test_fund_connector_refuses_other_hosts(mufg):
+async def test_fund_connector_refuses_other_hosts(toushin):
     with pytest.raises(ConnectorError):
-        await mufg.get("https://evil.example/fund_information_latest/fund_cd/253425", params={})
+        await toushin.get("https://evil.example/FdsWeb/FDST030000", params={})
+    with pytest.raises(ConnectorError):
+        await toushin.post("https://evil.example/FdsWeb/FDST999900/fundDataSearch", body={})
+    with pytest.raises(ConnectorError):
+        await toushin.post("http://toushin-lib.fwg.ne.jp/FdsWeb/FDST999900/fundDataSearch", body={})
 
 
 @respx.mock

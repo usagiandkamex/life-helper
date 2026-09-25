@@ -32,7 +32,7 @@ MARKETS: tuple[Market, ...] = ("jp", "us")
 MARKET_SUFFIXES: dict[str, Market] = {"T": "jp", "JP": "jp", "US": "us"}
 MARKET_CURRENCY: dict[Market, str] = {"jp": "JPY", "us": "USD"}
 MARKET_TIMEZONE: dict[Market, str] = {"jp": "Asia/Tokyo", "us": "America/New_York"}
-# Stocks and REITs are EQUITY, ETFs are ETF. Funds (MUTUALFUND) are priced from the fund managers instead.
+# Stocks and REITs are EQUITY, ETFs are ETF. Funds (MUTUALFUND) are priced from the fund library instead.
 LISTED_INSTRUMENTS = ("EQUITY", "ETF")
 RATE_LIMIT_MESSAGE = "Yahoo Finance の利用制限に達したため株価を取得できませんでした（時間をおいて再度お試しください）"
 

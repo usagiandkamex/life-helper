@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 JST = ZoneInfo("Asia/Tokyo")
 MAX_RUNTIME_MINUTES = 20
 # Connectors that were replaced, so automations saved with the old name keep their tools.
-RENAMED_CONNECTORS = {"stooq": "yahoo_finance"}
+RENAMED_CONNECTORS = {"stooq": "yahoo_finance", "mufg_api": "toushin_lib"}
 
 
 def normalize_connectors(names: list[str]) -> list[str]:

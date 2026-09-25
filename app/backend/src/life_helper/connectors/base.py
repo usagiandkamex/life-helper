@@ -76,6 +76,30 @@ class Connector:
         headers: dict[str, str] | None = None,
         max_bytes: int | None = None,
     ) -> httpx.Response:
+        return await self._request("GET", url, params=params, headers=headers, max_bytes=max_bytes)
+
+    async def post(
+        self,
+        url: str,
+        *,
+        body: dict[str, Any],
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        max_bytes: int | None = None,
+    ) -> httpx.Response:
+        """Sends ``body`` as JSON, under the same host allowlist, throttling and error masking as ``get``."""
+        return await self._request("POST", url, params=params or {}, body=body, headers=headers, max_bytes=max_bytes)
+
+    async def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict[str, Any],
+        body: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        max_bytes: int | None = None,
+    ) -> httpx.Response:
         host = urlparse(url).hostname or ""
         if urlparse(url).scheme != "https" or host not in self.info.hosts:
             raise ConnectorError("接続先がこのコネクタで許可されていません")
@@ -85,10 +109,11 @@ class Connector:
                 await asyncio.sleep(wait)
             try:
                 async with httpx.AsyncClient(timeout=20, transport=self._transport, follow_redirects=False) as client:
+                    request = client.build_request(method, url, params=params, json=body, headers=headers)
                     if max_bytes is None:
-                        response = await client.get(url, params=params, headers=headers)
+                        response = await client.send(request)
                     else:
-                        response = await self._capped(client, url, params, headers, max_bytes)
+                        response = await self._capped(client, request, max_bytes)
             except httpx.HTTPError as e:
                 # Never propagate the raw exception: its message can contain the full URL with the API key.
                 logger.warning("%s request failed: %s", self.info.name, type(e).__name__)
@@ -98,29 +123,23 @@ class Connector:
         self._record_use()
         return response
 
-    async def _capped(
-        self,
-        client: httpx.AsyncClient,
-        url: str,
-        params: dict[str, Any],
-        headers: dict[str, str] | None,
-        max_bytes: int,
-    ) -> httpx.Response:
+    async def _capped(self, client: httpx.AsyncClient, request: httpx.Request, max_bytes: int) -> httpx.Response:
         """Reads at most ``max_bytes`` of the body, so an oversized (or compressed) answer never fills memory."""
-        async with client.stream("GET", url, params=params, headers=headers) as streamed:
+        streamed = await client.send(request, stream=True)
+        try:
             body = bytearray()
             async for chunk in streamed.aiter_bytes():
                 body += chunk
                 if len(body) > max_bytes:
                     raise ConnectorError(f"{self.info.label} の応答が想定より大きいため取り込みませんでした")
-            # aiter_bytes already decompressed the body, so the encoding and length of the wire form must go.
-            passthrough = httpx.Headers(streamed.headers)
-            for name in ("content-encoding", "content-length"):
-                if name in passthrough:
-                    del passthrough[name]
-            return httpx.Response(
-                streamed.status_code, headers=passthrough, content=bytes(body), request=streamed.request
-            )
+        finally:
+            await streamed.aclose()
+        # aiter_bytes already decompressed the body, so the encoding and length of the wire form must go.
+        passthrough = httpx.Headers(streamed.headers)
+        for name in ("content-encoding", "content-length"):
+            if name in passthrough:
+                del passthrough[name]
+        return httpx.Response(streamed.status_code, headers=passthrough, content=bytes(body), request=streamed.request)
 
     def mask(self, value: Any) -> Any:
         return self._masker.mask(value)

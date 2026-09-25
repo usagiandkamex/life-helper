@@ -12,7 +12,7 @@ from ..auth import CurrentUser, require_user
 from ..context import AppContext, get_ctx
 from ..tools.registry import ToolSpec
 from .base import Connector, ConnectorError
-from .fund_nav import DaiwaFundCsvConnector, MufgFundApiConnector, RakutenFundCsvConnector
+from .fund_nav import DaiwaFundCsvConnector, RakutenFundCsvConnector, ToushinLibConnector
 from .rakuten_travel import RakutenTravelConnector
 from .yahoo_finance import YahooFinanceConnector
 
@@ -31,8 +31,8 @@ def get_connectors(ctx: AppContext) -> dict[str, Connector]:
     connectors: dict[str, Connector] = {
         # No API key: the chart API behind finance.yahoo.com is open (unofficial, for personal use).
         "yahoo_finance": YahooFinanceConnector({}, ctx.masker, state, transport=transport),
-        # No API key: the managers publish the fund API and the 基準価額 CSVs openly, under their terms of use.
-        "mufg_api": MufgFundApiConnector({}, ctx.masker, state, transport=transport),
+        # No API key: the fund library and the managers' 基準価額 CSVs are published openly, under their terms of use.
+        "toushin_lib": ToushinLibConnector({}, ctx.masker, state, transport=transport),
         "rakuten_csv": RakutenFundCsvConnector({}, ctx.masker, state, transport=transport),
         "daiwa_csv": DaiwaFundCsvConnector({}, ctx.masker, state, transport=transport),
         "rakuten_travel": RakutenTravelConnector(

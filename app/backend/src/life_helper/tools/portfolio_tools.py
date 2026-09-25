@@ -38,9 +38,12 @@ class StockPriceParams(BaseModel):
 
 
 class FundNavParams(BaseModel):
-    provider: str = Field(description="データ提供元（例: mufg_api、rakuten_csv、daiwa_csv）")
+    provider: str = Field(
+        default="toushin_lib", description="データ提供元（toushin_lib＝投資信託協会、rakuten_csv、daiwa_csv）"
+    )
     fund_code: str = Field(
-        max_length=32, description="運用会社のファンドコード・投資信託協会コード・ISIN（例: 0331418A）"
+        max_length=32,
+        description="toushin_lib は ISIN コード（例: JP90C000GKC6）、rakuten_csv・daiwa_csv は各社のファンドコード",
     )
 
 
@@ -134,8 +137,8 @@ def build_tools(ctx: AppContext) -> list[ToolSpec]:
 
     @define_tool(
         name="get_fund_nav",
-        description="投資信託の基準価額を運用会社の公式 API・公式 CSV から取得する"
-        "（データ提供元とファンドコードを指定。株価の Yahoo Finance とは別）。",
+        description="投資信託の基準価額を投資信託協会の投信総合検索ライブラリー（ISIN で指定）、"
+        "または運用会社の公式 CSV から取得する（株価の Yahoo Finance とは別）。",
     )
     async def get_fund_nav(params: FundNavParams) -> dict:
         connector = fund_connectors(ctx).get(params.provider)
@@ -148,8 +151,8 @@ def build_tools(ctx: AppContext) -> list[ToolSpec]:
 
     @define_tool(
         name="refresh_fund_navs",
-        description="保有している投資信託の基準価額を、紐付けた運用会社の公式 API・公式 CSV から更新して"
-        "評価額を計算し直す（紐付けていないファンドは手入力のまま）。",
+        description="保有している投資信託の基準価額を更新して評価額を計算し直す。取得元が未設定のファンドは、"
+        "名前が一致する公式ファンドが 1 つだけなら自動で紐付ける（紐付けられないファンドは手入力のまま）。",
     )
     async def refresh_navs(params: EmptyParams) -> dict:
         return await refresh_fund_navs(ctx)

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { api, formatDate, json, yen } from '../api'
 import { LazyChart } from '../components/LazyChart'
 import { Disclaimer } from '../components/Markdown'
-import type { ChartData, FundCandidates, Holding, PortfolioView } from '../types'
+import type { ChartData, FundAutoLink, FundCandidates, Holding, PortfolioView } from '../types'
 
 const ACCOUNTS = [
   ['nisa_tsumitate', 'NISA つみたて投資枠'],
@@ -23,11 +23,20 @@ const SOURCE_LABELS: Record<string, string> = {
   stooq: 'Stooq',
   nav_site: '基準価額サイト',
   manual: '手入力',
-  mufg_api: '三菱UFJアセットマネジメント',
+  toushin_lib: '投資信託協会',
+  mufg_api: '三菱UFJアセットマネジメント（旧 API）',
   rakuten_csv: '楽天投信投資顧問',
   daiwa_csv: '大和アセットマネジメント',
 }
+// What to type as the code when linking by hand, per provider.
+const CODE_HINTS: Record<string, string> = {
+  toushin_lib: 'ISIN コード（JP で始まる 12 桁）',
+  rakuten_csv: '基準価額 CSV の 6 桁番号',
+  daiwa_csv: '4 桁のファンドコード',
+}
 const MARKET_LABELS: Record<string, string> = { jp: '日本株', us: '米国株' }
+// A search that failed says nothing about whether the fund exists, so it must not read as "no such fund".
+const SEARCH_FAILED = '候補を取得できませんでした。時間をおいて探し直すか、コードを指定して紐付けるか、公式サイトの基準価額を手入力してください。'
 
 const amount = (value: number) => value.toLocaleString('ja-JP', { maximumFractionDigits: 2 })
 const label = (labels: Record<string, string>, key: string | null | undefined) => (key ? labels[key] ?? key : '')
@@ -48,6 +57,8 @@ function PriceCell({ holding }: { holding: Holding }) {
   const market = [label(MARKET_LABELS, price.market), price.symbol].filter(Boolean).join(' ')
   const converted = price.local_currency === 'USD' && price.local_value !== null && price.local_value !== undefined
   const fund = holding.kind === 'fund'
+  // A broker CSV is dated with the day it was imported, not with the 基準日 of the NAV inside it.
+  const datePrefix = fund ? (price.source === 'broker_csv' ? 'CSV 取込日 ' : '基準日 ') : ''
   return (
     <>
       <div>
@@ -55,7 +66,7 @@ function PriceCell({ holding }: { holding: Holding }) {
       </div>
       <small>
         {market && `${market}・`}
-        {fund ? '基準日 ' : ''}
+        {datePrefix}
         {price.date}・{label(SOURCE_LABELS, price.source)}
         {price.source_url && (
           <>
@@ -86,6 +97,74 @@ function PriceCell({ holding }: { holding: Holding }) {
   )
 }
 
+function AutoLinkReport({
+  report,
+  busy,
+  onPick,
+}: {
+  report: FundAutoLink
+  busy: boolean
+  onPick: (id: string) => void
+}) {
+  const pending = [...report.ambiguous, ...report.unmatched]
+  if (report.linked.length === 0 && pending.length === 0 && report.errors.length === 0) return null
+  const pick = (id: string) => (
+    <>
+      {' '}
+      <button className="link small" onClick={() => onPick(id)} disabled={busy}>
+        候補を見る
+      </button>
+    </>
+  )
+  return (
+    <>
+      {report.linked.length > 0 && (
+        <div className="banner ok">
+          ファンド名から公式ファンドに自動で紐付けました（違う場合は「取得元を設定」で選び直してください）:
+          <ul>
+            {report.linked.map((l) => (
+              <li key={l.id}>
+                {l.name} → {l.official_name}（{l.code}）
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {pending.length > 0 && (
+        <div className="banner warn">
+          自動では紐付けられなかった投資信託（候補から選ぶか、手入力してください）:
+          <ul>
+            {report.ambiguous.map((a) => (
+              <li key={a.id}>
+                {a.name}: {a.reason}
+                {pick(a.id)}
+              </li>
+            ))}
+            {report.unmatched.map((u) => (
+              <li key={u.id}>
+                {u.name}: 同じ名前の公式ファンドが見つかりませんでした
+                {pick(u.id)}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {report.errors.length > 0 && (
+        <div className="banner error">
+          公式ファンドを検索できなかった投資信託（時間をおいて「評価額を計算」をやり直してください）:
+          <ul>
+            {report.errors.map((e) => (
+              <li key={e.id}>
+                {e.name}: {e.error}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </>
+  )
+}
+
 export function PortfolioPage() {
   const [view, setView] = useState<PortfolioView | null>(null)
   const [message, setMessage] = useState('')
@@ -95,6 +174,7 @@ export function PortfolioPage() {
   const [broker, setBroker] = useState('sbi')
   const [fundTarget, setFundTarget] = useState<Holding | null>(null)
   const [candidates, setCandidates] = useState<FundCandidates | null>(null)
+  const [searching, setSearching] = useState(false)
   const [chart, setChart] = useState<ChartData | null>(null)
   const [simResult, setSimResult] = useState<{ principal: number; expected_value: number; percentiles: Record<string, number>; after_tax: Record<string, number> } | null>(null)
 
@@ -102,6 +182,10 @@ export function PortfolioPage() {
   useEffect(() => {
     load().catch((e) => setError(e.message))
   }, [load])
+  // The picker opens below the holdings table, often out of sight of the button that opened it.
+  useEffect(() => {
+    if (fundTarget) document.getElementById('fund-picker')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [fundTarget])
 
   const run = async (fn: () => Promise<PortfolioView | void>, done?: (v: PortfolioView) => string) => {
     setBusy(true)
@@ -137,6 +221,7 @@ export function PortfolioPage() {
         (v) =>
           `評価額を計算しました: 合計 ${yen(v.total_value)}` +
           `（株価 ${v.refresh?.updated.length ?? 0} 件・基準価額 ${v.refresh_funds?.updated.length ?? 0} 件を反映）。` +
+          `${v.refresh_funds?.auto_link?.linked.length ? `${v.refresh_funds.auto_link.linked.length} 件の投資信託をファンド名から公式ファンドに紐付けました。` : ''}` +
           `${v.refresh?.errors.length ? `${v.refresh.errors.length} 件は株価を取得できませんでした（理由は下に表示しています）。` : ''}` +
           `${v.refresh_funds?.errors.length ? `${v.refresh_funds.errors.length} 件は基準価額を取得できませんでした（直前の基準価額を残しています）。` : ''}` +
           `${v.missing_prices.length ? `価格が未登録の ${v.missing_prices.length} 件は合計に含めていません。` : ''}` +
@@ -149,9 +234,10 @@ export function PortfolioPage() {
 
   const searchFunds = (name: string) => {
     setCandidates(null)
+    setSearching(true)
     run(async () => {
       setCandidates(await api<FundCandidates>(`/api/portfolio/fund-candidates?name=${encodeURIComponent(name)}`))
-    })
+    }).finally(() => setSearching(false))
   }
 
   const openFundPicker = (h: Holding) => {
@@ -159,7 +245,8 @@ export function PortfolioPage() {
     searchFunds(h.name)
   }
 
-  // Linking always needs this click: a similar name alone never decides which fund a holding is.
+  // Linking by hand always needs this click: a similar name alone never decides which fund a holding is.
+  // Only an identical name that exactly one official fund has is linked automatically, by the refresh.
   const linkFund = async (target: Holding, provider: string, fundCode: string, priceUnit = 10000) => {
     const ok = await run(
       () =>
@@ -271,9 +358,9 @@ export function PortfolioPage() {
           {calculating ? '計算中…' : '評価額を計算'}
         </button>
         <span className="hint">
-          株式・ETF・REIT は株価（日本株・米国株／Yahoo Finance の前日終値）、投資信託は基準価額（運用会社の公式 API・公式 CSV）を、
-          それぞれ別に更新してから計算します。米国株は USD/JPY で円換算します。
-          自動取得に対応していない投資信託は、公式サイトの基準価額を手入力してください。
+          株式・ETF・REIT は株価（日本株・米国株／Yahoo Finance の前日終値）、投資信託は基準価額（投資信託協会の投信総合検索ライブラリー・運用会社の公式
+          CSV）を、それぞれ別に更新してから計算します。米国株は USD/JPY で円換算します。取得元が未設定の投資信託は、ファンド名が一致する公式ファンドが
+          1 つだけなら自動で紐付けます。紐付けられなかった投資信託は「取得元を設定」から選ぶか、公式サイトの基準価額を手入力してください。
         </span>
       </div>
       {view.refresh && view.refresh.errors.length > 0 && (
@@ -299,6 +386,16 @@ export function PortfolioPage() {
             ))}
           </ul>
         </div>
+      )}
+      {view.refresh_funds?.auto_link && (
+        <AutoLinkReport
+          report={view.refresh_funds.auto_link}
+          busy={busy}
+          onPick={(id) => {
+            const target = view.holdings.find((h) => h.id === id)
+            if (target) openFundPicker(target)
+          }}
+        />
       )}
       {(view.stale_prices.length > 0 || view.manual_funds.length > 0) && (
         <div className="banner warn">
@@ -328,7 +425,9 @@ export function PortfolioPage() {
             <input type="file" accept=".csv" hidden disabled={busy} onChange={(e) => e.target.files?.[0] && importCsv(e.target.files[0])} />
           </label>
         </div>
-        <p className="hint">CSV の取り込みは保有銘柄を置き換えます。CSV の評価額が最も正確です（取り込み時点）。株価の更新は「評価額を計算」から行います。</p>
+        <p className="hint">
+          CSV の取り込みは保有銘柄を置き換えます。CSV の評価額が最も正確です（取り込み時点）。株価・基準価額の更新は「評価額を計算」から行います。
+        </p>
       </section>
 
       <section className="panel">
@@ -368,11 +467,11 @@ export function PortfolioPage() {
                       '—'
                     ) : (
                       <>
-                        <div>{h.auto_nav ? label(SOURCE_LABELS, h.fund?.provider) : '手入力'}</div>
+                        <div>{h.auto_nav ? label(SOURCE_LABELS, h.fund?.provider) : h.fund ? '手入力' : '未設定'}</div>
                         {h.fund?.fund_code && <small>{h.fund.fund_code}</small>}
                         {!h.auto_nav && (
                           <div>
-                            <small className="warn-text">自動取得未対応</small>
+                            <small className="warn-text">{h.fund ? '自動取得しない' : '自動取得していません'}</small>
                           </div>
                         )}
                         <button className="link small" onClick={() => openFundPicker(h)} disabled={busy}>
@@ -382,7 +481,7 @@ export function PortfolioPage() {
                     )}
                   </td>
                   <td>
-                    <button className="link danger" onClick={() => removeHolding(h.id)}>
+                    <button className="link danger" onClick={() => removeHolding(h.id)} disabled={busy}>
                       削除
                     </button>
                   </td>
@@ -412,14 +511,14 @@ export function PortfolioPage() {
       </section>
 
       {fundTarget && (
-        <section className="panel" key={fundTarget.id}>
+        <section className="panel" id="fund-picker" key={fundTarget.id}>
           <h2>基準価額の取得元: {fundTarget.name}</h2>
           <p className="hint">
-            {candidates?.note ?? '公式ファンドの候補を探しています…'}
+            {candidates?.note ?? (searching ? '公式ファンドの候補を探しています…' : SEARCH_FAILED)}
             {view.fund_providers.length > 1 &&
-              `（対応運用会社: ${view.fund_providers
+              `（取得元: ${view.fund_providers
                 .filter((p) => p.provider !== 'manual')
-                .map((p) => p.manager)
+                .map((p) => p.label)
                 .join('、')}）`}
           </p>
           <form
@@ -447,7 +546,9 @@ export function PortfolioPage() {
           ))}
           {candidates && candidates.candidates.length === 0 && (
             <p className="hint">
-              候補が見つかりませんでした。運用会社とファンドコードを指定して紐付けるか、公式サイトの基準価額を手入力してください。
+              {candidates.errors.length > 0
+                ? SEARCH_FAILED
+                : '候補が見つかりませんでした。ファンド名を短くして探し直すか、コードを指定して紐付けるか、公式サイトの基準価額を手入力してください。'}
             </p>
           )}
           {candidates && candidates.candidates.length > 0 && (
@@ -457,7 +558,8 @@ export function PortfolioPage() {
                   <tr>
                     <th>公式のファンド名</th>
                     <th>運用会社</th>
-                    <th>ファンドコード</th>
+                    <th>コード</th>
+                    <th>基準価額</th>
                     <th>名前の一致度</th>
                     <th />
                   </tr>
@@ -465,13 +567,17 @@ export function PortfolioPage() {
                 <tbody>
                   {candidates.candidates.map((c) => (
                     <tr key={`${c.provider}:${c.fund_code}`}>
-                      <td>{c.name}</td>
+                      <td>
+                        {c.name}
+                        {c.nickname && <small>（愛称: {c.nickname}）</small>}
+                      </td>
                       <td>{c.manager}</td>
                       <td>
                         {c.fund_code}
-                        {c.isin && <small> / {c.isin}</small>}
+                        {c.association_code && c.association_code !== c.fund_code && <small> / {c.association_code}</small>}
                       </td>
-                      <td>{Math.round(c.score * 100)}%</td>
+                      <td>{c.nav ? `${amount(c.nav)} 円（${c.date ?? '—'}）` : '—'}</td>
+                      <td>{c.exact ? '一致' : `${Math.round(c.score * 100)}%`}</td>
                       <td>
                         <button
                           className="button small"
@@ -499,28 +605,32 @@ export function PortfolioPage() {
             }}
           >
             <label>
-              運用会社
+              取得元
               <select name="provider">
                 {view.fund_providers
                   .filter((p) => p.provider !== 'manual')
                   .map((p) => (
                     <option key={p.provider} value={p.provider}>
-                      {p.manager}
+                      {label(SOURCE_LABELS, p.provider)}
                     </option>
                   ))}
               </select>
             </label>
             <label>
-              ファンドコード
-              <input name="fund_code" placeholder="ファンドコード" required />
+              コード
+              <input name="fund_code" placeholder="ISIN コードなど" required />
             </label>
             <button className="button small" disabled={busy}>
               コードを指定して紐付ける
             </button>
           </form>
           <p className="hint">
-            運用会社によっては名前で検索できません。公式サイトのファンドページに書かれたコード（URL のファンドコード、投資信託協会コード、基準価額
-            CSV のリンクの番号）を指定してください。提供元が公式名称を返す場合は紐付け後に表示します。返さない場合は公式ページで入力したコードを確認してください。
+            候補に見つからないときは、取得元ごとのコードを指定してください（
+            {view.fund_providers
+              .filter((p) => CODE_HINTS[p.provider])
+              .map((p) => `${label(SOURCE_LABELS, p.provider)}: ${CODE_HINTS[p.provider]}`)
+              .join('、')}
+            ）。ISIN コードは証券会社や運用会社のファンドページに載っています。紐付けると公式名称を表示するので、保有しているファンドか確認してください。
           </p>
           <form
             className="row wrap"

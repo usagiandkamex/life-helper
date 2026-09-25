@@ -123,44 +123,109 @@ def yahoo_symbols(route) -> list[str]:
 
 
 ALL_COUNTRY = {
-    "fund_cd": "253425",
-    "isin_cd": "JP90C000H1T1",
-    "association_fund_cd": "0331418A",
-    "fund_name": "ｅＭＡＸＩＳ Ｓｌｉｍ 全世界株式（オール・カントリー）",
+    "isinCd": "JP90C000H1T1",
+    "associFundCd": "0331418A",
+    "fundNm": "ｅＭＡＸＩＳ　Ｓｌｉｍ全世界株式（オール・カントリー）",
+    "fundNkNm": None,
+    "entrustCmpNm": "三菱ＵＦＪアセットマネジメント",
+    "standardPrice": "25341.0",
+    "standardDate": "2026-09-24 00:00:00",
 }
 SP500 = {
-    "fund_cd": "253266",
-    "isin_cd": "JP90C000FYT1",
-    "association_fund_cd": "0331C180",
-    "fund_name": "ｅＭＡＸＩＳ Ｓｌｉｍ 米国株式（Ｓ＆Ｐ５００）",
+    "isinCd": "JP90C000GKC6",
+    "associFundCd": "03311187",
+    "fundNm": "ｅＭＡＸＩＳ　Ｓｌｉｍ米国株式（Ｓ＆Ｐ５００）",
+    "fundNkNm": None,
+    "entrustCmpNm": "三菱ＵＦＪアセットマネジメント",
+    "standardPrice": "44842.0",
+    "standardDate": "2026-09-24 00:00:00",
 }
+SCHD = {
+    "isinCd": "JP90C000R6N1",
+    "associFundCd": "9I312249",
+    "fundNm": "楽天・シュワブ・高配当株式・米国ファンド（四半期決算型）",
+    "fundNkNm": "楽天・ＳＣＨＤ",
+    "entrustCmpNm": "楽天投信投資顧問",
+    "standardPrice": "13246.0",
+    "standardDate": "2026-09-24 00:00:00",
+}
+SCHD_GROWTH = {
+    "isinCd": "JP90C000S073",
+    "associFundCd": "9I316257",
+    "fundNm": "楽天・シュワブ・高配当株式・米国ファンド（資産成長型）",
+    "fundNkNm": "楽天・ＳＣＨＤ（資産成長型）",
+    "entrustCmpNm": "楽天投信投資顧問",
+    "standardPrice": "13509.0",
+    "standardDate": "2026-09-24 00:00:00",
+}
+LIBRARY = (ALL_COUNTRY, SP500, SCHD, SCHD_GROWTH)
+TOUSHIN_HEADER = "年月日,基準価額(円),純資産総額（百万円）,分配金,決算期"
 
 
-def mufg_payload(*datasets: dict) -> dict:
-    """The envelope of the 三菱UFJアセットマネジメント fund API."""
-    return {
-        "result": {"status": 200, "retcount": len(datasets), "errcd": None, "errmsg": None},
-        "errors": {"count": 0, "error_list": None},
-        "datasets": list(datasets),
-    }
+def toushin_csv(nav: float, day: str = "2026年09月24日") -> str:
+    """The NAV history CSV of the fund library: 年月日 like 2026年09月24日, oldest first, no fund identifier."""
+    return f"{TOUSHIN_HEADER}\n2018年07月03日,10038,1,,\n{day},{nav},12979588,,\n"
 
 
-def mock_mufg(navs: dict[str, tuple[float, str]], *, code_list: list[dict] | None = None, funds=(ALL_COUNTRY, SP500)):
-    """Mocks the fund API: ``navs`` maps any code of a fund to (基準価額, 基準日 YYYYMMDD)."""
+def toushin_page(fund: dict | None) -> str:
+    """The fund page: the title is the official name, and the CSV download link names the ISIN and 協会コード."""
+    if fund is None:
+        return "<html><head><title></title></head><body>該当するファンドがありません</body></html>"
+    isin, code = fund["isinCd"], fund["associFundCd"]
+    return (
+        f"<html><head><title>{fund['fundNm']}</title></head><body>"
+        f'<a href="/FdsWeb/download?reportId=1&amp;updateFlag=1&amp;associFundCd={code}">目論見書</a>'
+        f'<a href="/FdsWeb/FDST030000/csv-file-download?isinCd={isin}&amp;associFundCd={code}" id="download">CSV</a>'
+        f'<input type="hidden" id="isinCd" value="{isin}"><input type="hidden" id="associFundCd" value="{code}" />'
+        "</body></html>"
+    )
+
+
+def mock_toushin(navs: dict[str, tuple[float, str]], *, funds=LIBRARY):
+    """Mocks the fund library. ``navs`` maps an ISIN to (基準価額, 年月日 like 2026年09月24日).
+
+    Like the real site, the keyword search is not fuzzy enough to find a name with the nickname appended, and the
+    CSV answers with the fund of the 協会コード even when the ISIN belongs to another fund.
+    """
+    import json
+
     import httpx
     import respx
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/code_list":
-            return httpx.Response(200, json=mufg_payload(*(code_list if code_list is not None else funds)))
-        code = request.url.path.rsplit("/", 1)[-1]
-        for fund in funds:
-            if code in (fund["fund_cd"], fund["isin_cd"], fund["association_fund_cd"]) and code in navs:
-                nav, base_date = navs[code]
-                return httpx.Response(200, json=mufg_payload(fund | {"nav": nav, "base_date": base_date}))
-        return httpx.Response(200, json=mufg_payload())
+    from life_helper.connectors.fund_nav import normalize_name
 
-    return respx.get(url__startswith="https://developer.am.mufg.jp").mock(side_effect=handler)
+    def search(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        keyword = normalize_name(body["t_keyword"]) if body.get("t_kensakuKbn") == "1" else ""
+        hits = [f for f in funds if keyword in normalize_name(f["fundNm"])]
+        start = int(body.get("startNo", 0))
+        page = hits[start : start + 20]
+        info = {"recordsTotal": str(len(hits)), "pageSize": "20", "startNo": str(start), "resultInfoMapList": page}
+        return httpx.Response(200, json={"statusCode": None, "searchResultInfo": info})
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        params = request.url.params
+        if request.method == "POST" and request.url.path == "/FdsWeb/FDST999900/fundDataSearch":
+            return search(request)
+        if request.url.path == "/FdsWeb/FDST030000":
+            return httpx.Response(
+                200, text=toushin_page(next((f for f in funds if f["isinCd"] == params.get("isinCd")), None))
+            )
+        if request.url.path == "/FdsWeb/FDST030000/csv-file-download":
+            if not params.get("isinCd") or not params.get("associFundCd"):
+                return httpx.Response(200, json={"statusCode": None})
+            fund = next((f for f in funds if f["associFundCd"] == params["associFundCd"]), None)
+            if fund is None or fund["isinCd"] not in navs:
+                return httpx.Response(500, json={"statusCode": None})
+            nav, day = navs[fund["isinCd"]]
+            return httpx.Response(200, content=toushin_csv(nav, day).encode("cp932"))
+        return httpx.Response(404, text="Not Found")
+
+    return respx.route(url__startswith="https://toushin-lib.fwg.ne.jp").mock(side_effect=handler)
+
+
+def toushin_calls(route, path: str) -> list:
+    return [c for c in route.calls if c.request.url.path == path]
 
 
 FANG_PLUS = "ｉＦｒｅｅＮＥＸＴ ＦＡＮＧ＋インデックス"
