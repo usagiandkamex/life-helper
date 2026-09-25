@@ -205,7 +205,18 @@ details.hint p { margin: 0.25rem 0 0; }
 .card { background: var(--md-surface); border-radius: var(--md-shape-m); padding: 1rem; box-shadow: var(--md-elevation-1); }
 .card h3 { margin-top: 0; color: var(--muted); }
 .card .big { font-size: 1.5rem; font-weight: 400; line-height: 2rem; margin: 0.25rem 0; }
-.table-wrap { overflow-x: auto; }
+/* 横にはみ出す表はスクロールできることが分かるように、端に影を出す（スクロール位置に応じて消える） */
+.table-wrap {
+  overflow-x: auto;
+  background:
+    linear-gradient(to right, var(--md-surface) 30%, rgba(255, 255, 255, 0)) left center,
+    linear-gradient(to left, var(--md-surface) 30%, rgba(255, 255, 255, 0)) right center,
+    radial-gradient(farthest-side at 0 50%, rgba(0, 0, 0, 0.28), rgba(0, 0, 0, 0)) left center,
+    radial-gradient(farthest-side at 100% 50%, rgba(0, 0, 0, 0.28), rgba(0, 0, 0, 0)) right center;
+  background-repeat: no-repeat;
+  background-size: 2rem 100%, 2rem 100%, 1rem 100%, 1rem 100%;
+  background-attachment: local, local, scroll, scroll;
+}
 .grid-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0.75rem; margin-top: 0.75rem; align-items: end; }
 .editor-panel { display: flex; flex-direction: column; gap: 0.75rem; }
 .runs { list-style: none; padding: 0; margin: 0; }

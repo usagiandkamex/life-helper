@@ -661,7 +661,7 @@ export function PortfolioPage() {
                   </td>
                   <td className="actions">
                     <button className="link small" onClick={() => openEditor(h)} disabled={busy}>
-                      数量・取得額を編集
+                      編集
                     </button>
                     <button className="link danger" onClick={() => removeHolding(h.id)} disabled={busy}>
                       削除
@@ -714,7 +714,7 @@ export function PortfolioPage() {
           <summary>CSV 取り込みの使い方</summary>
           <p>
             CSV の評価額が最も正確です（取り込み時点）。株価・基準価額の更新は「評価額を計算」から行います。
-            積立・買い増しの後は、CSV を取り込み直すか、保有銘柄の「数量・取得額を編集」で購入分を加算してください。
+            積立・買い増しの後は、CSV を取り込み直すか、保有銘柄の「編集」で購入分を加算してください。
           </p>
         </details>
       </section>
