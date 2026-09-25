@@ -13,6 +13,9 @@ from ..connectors.base import ConnectorError
 from ..market.clock import market_today
 from ..market.funds import fund_connectors, refresh_fund_navs
 from ..market.portfolio import (
+    MAX_PRICE,
+    MAX_QUANTITY,
+    MAX_YEN,
     Account,
     CapitalGainsParams,
     Holding,
@@ -49,10 +52,6 @@ class FundNavParams(BaseModel):
     )
 
 
-# Far above any real holding, but small enough that quantity × price still rounds to yen with Decimal's precision.
-MAX_QUANTITY = 1_000_000_000_000
-MAX_YEN = 1_000_000_000_000_000
-MAX_PRICE = 10_000_000_000
 CONFLICT_MESSAGE = "ほかの操作で数量または取得額が変わっています。最新の値を確認して、入力し直してください。"
 
 

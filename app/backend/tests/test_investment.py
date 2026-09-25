@@ -193,6 +193,19 @@ def test_parse_rejects_unexpected_header_and_unknown_broker():
         load_mapping(BROKER_DIR, "../etc")
 
 
+def test_parse_rejects_values_the_portfolio_cannot_hold():
+    # Without this check the value is saved as a plain float and only fails later, when summarize() rounds the
+    # portfolio to yen. The import replaces every holding, so the whole CSV is refused instead of the one row.
+    for csv_text in (
+        RAKUTEN_CSV.replace('"28,000"', "1e30"),  # 評価額
+        RAKUTEN_CSV.replace(",特定,10,", ",特定,inf,"),  # 数量
+        RAKUTEN_CSV.replace(",特定,10,2000,", ",特定,10,-2000,"),  # 取得単価
+        RAKUTEN_CSV.replace(",2800,", ",1e30,"),  # 現在値
+    ):
+        with pytest.raises(BrokerCsvError):
+            parse_broker_csv(csv_text.encode("utf-8-sig"), load_mapping(BROKER_DIR, "rakuten"))
+
+
 def test_portfolio_api_import_refresh_and_holdings(client, ctx, settings):
     csrf = sign_in(client, ctx)
     h = {"x-csrf-token": csrf}

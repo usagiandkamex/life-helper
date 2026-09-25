@@ -60,6 +60,13 @@ ACCOUNT_LABELS = {
 NISA_ACCOUNTS = ("nisa_tsumitate", "nisa_growth")
 TAXABLE_ACCOUNTS = ("tokutei", "ippan")
 
+# Far above any real holding, but small enough that quantity × price still rounds to yen with Decimal's precision.
+# The paths that write a holding (手入力ツールと証券会社 CSV の取り込み) check these, so a value they store cannot
+# make ``summarize()`` fail when it rounds to yen.
+MAX_QUANTITY = 1_000_000_000_000
+MAX_YEN = 1_000_000_000_000_000
+MAX_PRICE = 10_000_000_000
+
 
 class Price(BaseModel):
     """A price in yen. US stocks also keep the local (USD) price and the rate used to convert it."""
