@@ -637,6 +637,16 @@ def test_manual_nav_links_source_price_unit_and_basis_date_together(client, ctx)
     assert (saved.price.value, saved.price.date, saved.price.source) == (2.5, NAV_DAY.isoformat(), "manual")
 
 
+async def test_link_fund_rejects_incomplete_or_non_manual_nav_input(ctx):
+    holding = Holding(account="ideco", kind="fund", name="手入力ファンド", quantity=1_200, cost_total=1_000)
+    with portfolio_store(ctx).transaction() as portfolio:
+        portfolio.holdings = [holding]
+    incomplete = await link_fund(ctx, holding.id, "manual", manual_nav=2.5)
+    non_manual = await link_fund(ctx, holding.id, "mufg_api", "0331418A", manual_nav=2.5, price_date=NAV_DAY)
+    assert "両方指定" in incomplete["error"]
+    assert "手入力のときだけ" in non_manual["error"]
+
+
 async def test_relinking_a_fund_drops_the_price_of_the_previous_one(ctx):
     holding = _fund(500_000)
     holding.apply_price(Price(value=25_000, date=NAV_DAY.isoformat(), source="mufg_api"))
