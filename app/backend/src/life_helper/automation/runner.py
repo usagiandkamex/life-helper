@@ -136,7 +136,10 @@ class AutomationRunner:
             if not get_connectors(self.ctx).get(c) or not get_connectors(self.ctx)[c].configured
         ]
         if missing:
-            record |= {"status": "error", "summary": f"コネクタの API キーが登録されていません: {', '.join(missing)}"}
+            record |= {
+                "status": "error",
+                "summary": f"使えないコネクタがあります（API キーが未登録か、機能が無効）: {', '.join(missing)}",
+            }
             await self._notify_failure(automation, record)
             return self._finish(automation, record, condition_met=None)
         if not await self._token_valid():

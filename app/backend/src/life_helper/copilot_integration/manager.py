@@ -156,7 +156,12 @@ class CopilotManager:
             "available_tools": available_toolset(has_skills),
             "system_message": {
                 "mode": "append",
-                "content": build_system_message(s.knowledge_dir, automation=self.automation, allow_write=allow_write),
+                "content": build_system_message(
+                    s.knowledge_dir,
+                    automation=self.automation,
+                    allow_write=allow_write,
+                    browser=any(spec.tool.name.startswith("browser_") for spec in specs),
+                ),
             },
             "working_directory": str(s.knowledge_dir),
             "streaming": True,

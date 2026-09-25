@@ -23,7 +23,7 @@ DNS_CACHE_SECONDS = 60
 _DNS_CACHE_MAX = 1024
 
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
-_dns_cache: dict[str, tuple[float, str | None]] = {}
+_dns_cache: dict[str, tuple[float, list[str], str | None]] = {}
 
 
 def host_matches(host: str, domains: list[str] | tuple[str, ...]) -> bool:
@@ -70,18 +70,11 @@ def literal_ip(host: str) -> IPAddress | None:
     return ipaddress.IPv4Address(address)
 
 
-def url_rejection(url: str, masker: SecretMasker | None = None) -> str | None:
-    """Returns why ``url`` must not be requested, or None. Never echoes the full URL (it may carry sensitive data)."""
-    try:
-        parts = urlsplit(url)
-        host = (parts.hostname or "").rstrip(".")
-        _ = parts.port
-    except ValueError:
-        return "URL の形式が正しくありません"
-    if parts.scheme.lower() not in ALLOWED_SCHEMES or not host:
-        return "http / https の URL だけ参照できます"
-    if parts.username or parts.password:
-        return "認証情報を含む URL は参照できません"
+def host_rejection(host: str) -> str | None:
+    """Host-level checks (no DNS): internal names and addresses, and the connector-only API hosts."""
+    host = host.lower().strip("[]").rstrip(".")
+    if not host:
+        return "接続先のホスト名がありません"
     if host == "localhost" or host.endswith(".localhost"):
         return INTERNAL_REASON.format(host=host)
     ip = literal_ip(host)
@@ -89,6 +82,24 @@ def url_rejection(url: str, masker: SecretMasker | None = None) -> str | None:
         return INTERNAL_REASON.format(host=host)
     if host_matches(host, CONNECTOR_HOSTS):
         return f"{host} は API キーを使うサービスです。用意されたツール（コネクタ）を使ってください"
+    return None
+
+
+def url_rejection(url: str, masker: SecretMasker | None = None) -> str | None:
+    """Returns why ``url`` must not be requested, or None. Never echoes the full URL (it may carry sensitive data)."""
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+        _ = parts.port
+    except ValueError:
+        return "URL の形式が正しくありません"
+    if parts.scheme.lower() not in ALLOWED_SCHEMES or not host:
+        return "http / https の URL だけ参照できます"
+    if parts.username or parts.password:
+        return "認証情報を含む URL は参照できません"
+    reason = host_rejection(host)
+    if reason:
+        return reason
     decoded = unquote_plus(url)
     kinds = detect_sensitive(decoded)
     if kinds:
@@ -104,18 +115,17 @@ async def _lookup(host: str) -> list[str]:
     return [str(info[4][0]) for info in infos]
 
 
-async def resolved_rejection(url: str) -> str | None:
-    """Rejects hosts whose DNS answers include an internal address. Results are cached briefly per host."""
-    try:
-        host = (urlsplit(url).hostname or "").rstrip(".")
-    except ValueError:
-        return "URL の形式が正しくありません"
-    if not host or literal_ip(host) is not None:
-        return None
+async def resolve_public(host: str) -> tuple[list[str], str | None]:
+    """Returns the host's addresses when every one of them is public, else a reason. Cached briefly per host."""
+    host = host.lower().strip("[]").rstrip(".")
+    ip = literal_ip(host)
+    if ip is not None:
+        return [str(ip)], INTERNAL_REASON.format(host=host) if is_internal_ip(ip) else None
     now = time.monotonic()
     cached = _dns_cache.get(host)
     if cached is not None and now - cached[0] < DNS_CACHE_SECONDS:
-        return cached[1]
+        return cached[1], cached[2]
+    addresses: list[str] = []
     try:
         addresses = await _lookup(host)
     except (OSError, UnicodeError):
@@ -126,8 +136,19 @@ async def resolved_rejection(url: str) -> str | None:
         reason = INTERNAL_REASON.format(host=host) if internal else None
     if len(_dns_cache) >= _DNS_CACHE_MAX:
         _dns_cache.clear()
-    _dns_cache[host] = (now, reason)
-    return reason
+    _dns_cache[host] = (now, addresses, reason)
+    return addresses, reason
+
+
+async def resolved_rejection(url: str) -> str | None:
+    """Rejects hosts whose DNS answers include an internal address (literal addresses are left to url_rejection)."""
+    try:
+        host = urlsplit(url).hostname or ""
+    except ValueError:
+        return "URL の形式が正しくありません"
+    if not host or literal_ip(host) is not None:
+        return None
+    return (await resolve_public(host))[1]
 
 
 async def outbound_rejection(url: str, masker: SecretMasker | None = None) -> str | None:

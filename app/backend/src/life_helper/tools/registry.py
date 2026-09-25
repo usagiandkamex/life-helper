@@ -42,7 +42,8 @@ def build_tools(
 
 
 def _builders():
+    from ..browser import tools as browser_tools
     from ..connectors import registry as connector_registry
     from . import finance, portfolio_tools
 
-    return (finance.build_tools, portfolio_tools.build_tools, connector_registry.build_tools)
+    return (finance.build_tools, portfolio_tools.build_tools, connector_registry.build_tools, browser_tools.build_tools)
