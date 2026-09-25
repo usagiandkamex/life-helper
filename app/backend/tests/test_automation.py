@@ -107,9 +107,6 @@ def test_store_roundtrip(tmp_path):
 class FakePolicy:
     on_tool_result = None
 
-    def release_all(self):
-        return None
-
 
 class FakeAutoSession:
     def __init__(self, manager: FakeAutoManager) -> None:

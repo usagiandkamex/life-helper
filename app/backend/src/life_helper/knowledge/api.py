@@ -96,7 +96,7 @@ async def delete_file(path: str, user: CurrentUser = Depends(require_user), ctx:
 
 @contextlib.asynccontextmanager
 async def _knowledge_write_lock(ctx: AppContext):
-    """Same lock that Copilot's create/edit take, so UI edits never interleave with chat/automation writes."""
+    """Same lock as the Copilot knowledge write tools, so UI edits never interleave with chat/automation writes."""
     lock = FileLock(knowledge_write_lock_path(ctx.settings), ttl_seconds=60)
     if not await wait_acquire(lock, 10):
         raise HTTPException(

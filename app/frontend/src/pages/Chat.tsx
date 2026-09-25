@@ -3,7 +3,19 @@ import { useNavigate } from 'react-router-dom'
 import { api, ApiError, json } from '../api'
 import { LazyChart } from '../components/LazyChart'
 import { Disclaimer, Markdown } from '../components/Markdown'
-import type { ChartData, Conversation, HistoryMessage, Screenshot, TurnEvent } from '../types'
+import type { ApprovalStatus, ChartData, Conversation, HistoryMessage, Screenshot, TurnEvent } from '../types'
+
+type ApprovalItem = {
+  kind: 'approval'
+  id: string
+  turnId: string
+  path: string
+  diff: string
+  status: ApprovalStatus
+  written?: boolean
+}
+
+type Decision = 'approve' | 'approve_all' | 'reject'
 
 type Item =
   | { kind: 'user'; text: string }
@@ -19,14 +31,16 @@ type Item =
       screenshot?: Screenshot
     }
   | { kind: 'file_write'; path: string; diff: string }
+  | ApprovalItem
   | { kind: 'error'; message: string }
 
-function applyEvent(items: Item[], ev: TurnEvent): Item[] {
+function applyEvent(items: Item[], ev: TurnEvent, turnId: string): Item[] {
   const next = [...items]
   const last = next[next.length - 1]
   const closeStreaming = () => {
     if (last?.kind === 'assistant' && last.streaming) next[next.length - 1] = { ...last, streaming: false }
   }
+  const approvalIndex = (id: string) => next.findIndex((i) => i.kind === 'approval' && i.id === id)
   switch (ev.type) {
     case 'delta':
       if (last?.kind === 'assistant' && last.streaming) next[next.length - 1] = { ...last, text: last.text + ev.text }
@@ -52,10 +66,27 @@ function applyEvent(items: Item[], ev: TurnEvent): Item[] {
         }
       return next
     }
-    case 'file_write':
+    case 'file_write': {
+      // A write the user approved on a card is shown on that card instead of a separate line.
+      const idx = ev.approval_id ? approvalIndex(ev.approval_id) : -1
+      if (idx >= 0) {
+        next[idx] = { ...(next[idx] as ApprovalItem), written: true }
+        return next
+      }
       closeStreaming()
       next.push({ kind: 'file_write', path: ev.path, diff: ev.diff })
       return next
+    }
+    case 'approval_request':
+      if (approvalIndex(ev.id) >= 0) return items
+      closeStreaming()
+      next.push({ kind: 'approval', id: ev.id, turnId, path: ev.path, diff: ev.diff, status: 'pending' })
+      return next
+    case 'approval_result': {
+      const idx = approvalIndex(ev.id)
+      if (idx >= 0) next[idx] = { ...(next[idx] as ApprovalItem), status: ev.status }
+      return next
+    }
     case 'error':
       closeStreaming()
       next.push({ kind: 'error', message: ev.message })
@@ -78,9 +109,13 @@ function fromHistory(messages: HistoryMessage[]): Item[] {
 const TOOL_LABELS: Record<string, string> = {
   view: 'ファイルを読む',
   grep: '知識を検索',
+  rg: '知識を検索',
   glob: 'ファイルを探す',
+  // create / edit are no longer exposed, but older conversations still show them in their history.
   create: 'ファイルを作成',
   edit: 'ファイルを編集',
+  write_knowledge_file: 'ファイルに保存',
+  edit_knowledge_file: 'ファイルを編集',
   web_fetch: 'Web ページを参照',
   skill: 'スキルを使用',
   browser_open: 'ブラウザで開く',
@@ -127,7 +162,7 @@ export function ChatPage() {
       sourceRef.current = source
       source.onmessage = (msg) => {
         const ev = JSON.parse(msg.data) as TurnEvent
-        setItems((prev) => applyEvent(prev, ev))
+        setItems((prev) => applyEvent(prev, ev, id))
         if (ev.type === 'end') {
           source.close()
           setTurnId(null)
@@ -403,7 +438,91 @@ function MessageItem({ item, onSchedule }: { item: Item; onSchedule: (text: stri
           </details>
         </div>
       )
+    case 'approval':
+      return <ApprovalCard item={item} />
     case 'error':
       return <div className="banner error">{item.message}</div>
   }
+}
+
+function diffClass(line: string, index: number): string {
+  // Only the two file headers start with ---/+++; a content line such as "+++ note" is an addition.
+  if (index < 2 && (line.startsWith('--- ') || line.startsWith('+++ '))) return 'meta'
+  if (line.startsWith('@@') || line.startsWith('\\')) return 'meta'
+  if (line.startsWith('+')) return 'add'
+  if (line.startsWith('-')) return 'del'
+  return ''
+}
+
+function DiffView({ diff }: { diff: string }) {
+  return (
+    <pre className="diff">
+      {diff.split('\n').map((line, i) => (
+        <span key={i} className={diffClass(line, i)}>
+          {line}
+          {'\n'}
+        </span>
+      ))}
+    </pre>
+  )
+}
+
+const APPROVAL_LABELS: Record<Exclude<ApprovalItem['status'], 'pending'>, string> = {
+  approved: 'への書き込みを承認しました',
+  rejected: 'への書き込みを却下しました',
+  expired: 'には、承認されなかったため書き込みませんでした',
+  cancelled: 'には、回答が終わったため書き込みませんでした',
+}
+
+function ApprovalCard({ item }: { item: ApprovalItem }) {
+  const [sending, setSending] = useState<Decision | null>(null)
+  const [error, setError] = useState('')
+
+  const decide = async (decision: Decision) => {
+    setSending(decision)
+    setError('')
+    try {
+      await api(`/api/turns/${item.turnId}/approvals/${item.id}`, { method: 'POST', body: json({ decision }) })
+    } catch (e) {
+      // 409: already decided (another tab, or the answer ended); the result arrives on the stream.
+      if (!(e instanceof ApiError && e.status === 409)) setError((e as Error).message)
+    } finally {
+      setSending(null)
+    }
+  }
+
+  if (item.status === 'pending') {
+    return (
+      <div className="msg approval pending" role="group" aria-label={`${item.path} への書き込みの承認`}>
+        <p className="approval-title">
+          ✏️ <code>{item.path}</code> に書き込もうとしています。内容を確認してください。
+        </p>
+        <DiffView diff={item.diff} />
+        <div className="approval-actions">
+          <button className="button primary small" disabled={!!sending} onClick={() => decide('approve')}>
+            承認
+          </button>
+          <button className="button small" disabled={!!sending} onClick={() => decide('approve_all')}>
+            この回答中はすべて承認
+          </button>
+          <button className="button danger small" disabled={!!sending} onClick={() => decide('reject')}>
+            却下
+          </button>
+        </div>
+        {error && <p className="error-text">{error}</p>}
+      </div>
+    )
+  }
+  const label =
+    item.status === 'approved' && item.written
+      ? `💾 ${item.path} に書き込みました`
+      : `${item.status === 'approved' ? '✔' : '✖'} ${item.path} ${APPROVAL_LABELS[item.status]}`
+  return (
+    <div className={`msg approval ${item.status}`}>
+      <details>
+        <summary>{label}（内容を確認）</summary>
+        <DiffView diff={item.diff} />
+      </details>
+    </div>
+  )
 }
