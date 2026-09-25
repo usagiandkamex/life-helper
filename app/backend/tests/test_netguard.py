@@ -41,6 +41,8 @@ def test_literal_ip_ignores_host_names(host):
         "https://93.184.215.14/",
         "https://[64:ff9b::5db8:d70e]/",
         "https://EXAMPLE.com./",
+        "https://例え.jp/",
+        "https://ｅｘａｍｐｌｅ。com/",
     ],
 )
 def test_public_http_and_https_are_allowed(url):
@@ -68,6 +70,8 @@ def test_public_http_and_https_are_allowed(url):
         "http://[fd00::1]/",
         "http://[fe80::1]/",
         "http://224.0.0.1/",
+        "http://ｌｏｃａｌｈｏｓｔ。/",
+        "http://１２７。０。０。１/",
     ],
 )
 def test_internal_addresses_are_rejected(url):
@@ -84,6 +88,8 @@ def test_internal_addresses_are_rejected(url):
         "https:///nohost",
         "https://user:pass@example.com/",
         "https://example.com:99999/",
+        "https://bad..example.com/",
+        "https://\ud800.example.com/",
     ],
 )
 def test_other_schemes_and_malformed_urls_are_rejected(url):
@@ -93,6 +99,43 @@ def test_other_schemes_and_malformed_urls_are_rejected(url):
 def test_connector_hosts_are_rejected():
     assert "コネクタ" in (url_rejection("https://openapi.rakuten.co.jp/engine/api?applicationId=x") or "")
     assert "コネクタ" in (url_rejection("https://api.github.com/user") or "")
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "api.github.com。",
+        "api.github.com．",
+        "api.github.com｡",
+        "ＡＰＩ.github.com",
+        "api。github。com",
+        "sub.openapi.rakuten.co.jp。",
+        "ａｐｐ.rakuten.co.jp",
+    ],
+)
+async def test_unicode_connector_hosts_are_rejected_before_dns(host, monkeypatch):
+    async def unexpected_lookup(host):
+        raise AssertionError("a blocked host must not reach DNS")
+
+    monkeypatch.setattr(netguard, "_lookup", unexpected_lookup)
+    assert netguard.host_matches(host, netguard.CONNECTOR_HOSTS)
+    assert "コネクタ" in (url_rejection(f"https://{host}/") or "")
+    assert "コネクタ" in (await outbound_rejection(f"https://{host}/") or "")
+    assert "コネクタ" in (await netguard.resolve_public(host))[1]
+
+
+async def test_dns_uses_the_same_canonical_host_as_policy(monkeypatch):
+    calls = []
+
+    async def lookup(host):
+        calls.append(host)
+        return ["93.184.215.14"]
+
+    monkeypatch.setattr(netguard, "_lookup", lookup)
+    assert await outbound_rejection("https://ｅｘａｍｐｌｅ。com。/") is None
+    assert await outbound_rejection("https://example.com/") is None
+    assert await outbound_rejection("https://例え.jp/") is None
+    assert calls == ["example.com", "xn--r8jz45g.jp"]
 
 
 def test_sensitive_data_and_secrets_in_urls_are_rejected():

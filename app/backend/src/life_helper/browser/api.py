@@ -27,4 +27,4 @@ def get_screenshot(
         # Past the retention period: drop it here too, in case nothing has been saved since.
         path.unlink(missing_ok=True)
         raise HTTPException(status.HTTP_404_NOT_FOUND, "screenshot not found")
-    return FileResponse(path, media_type="image/png", headers={"Cache-Control": "private, max-age=86400"})
+    return FileResponse(path, media_type="image/png", headers={"Cache-Control": "no-store"})

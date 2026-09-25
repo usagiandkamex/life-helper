@@ -242,6 +242,21 @@ def test_expired_screenshots_are_pruned_without_a_new_one(tmp_path):
     prune_screenshots(tmp_path / "missing")  # never fails when nothing has been saved yet
 
 
+def test_startup_prunes_expired_screenshots(app, ctx):
+    from fastapi.testclient import TestClient
+
+    directory = screenshot_dir(ctx.settings)
+    directory.mkdir(parents=True, exist_ok=True)
+    expired = directory / f"{SHOT_ID}.png"
+    expired.write_bytes(b"old")
+    os.utime(expired, (0, 0))
+    fresh = directory / f"{'a' * 32}.png"
+    fresh.write_bytes(b"new")
+    with TestClient(app):
+        assert not expired.exists()
+        assert fresh.read_bytes() == b"new"
+
+
 async def test_blocked_redirect_targets_are_not_shown(tmp_path, fake_dns):
     """The proxy stops the request, but the page may still sit on the rejected URL: it must go back to blank."""
 
@@ -307,9 +322,12 @@ def test_screenshot_api_requires_sign_in_and_a_valid_id(client, ctx):
     sign_in(client, ctx)
     resp = client.get(f"/api/browser/screenshots/{SHOT_ID}")
     assert resp.status_code == 200 and resp.headers["content-type"] == "image/png"
+    assert resp.headers["cache-control"] == "no-store"
     assert resp.content.startswith(b"\x89PNG")
     for bad in ("f" * 32, "SECRET", "..%2Fsecret", "%2E%2E%2Fsecret"):
         assert client.get(f"/api/browser/screenshots/{bad}").status_code == 404, bad
+    client.cookies.clear()
+    assert client.get(f"/api/browser/screenshots/{SHOT_ID}").status_code == 401
 
 
 def test_screenshot_api_drops_screenshots_past_the_retention_period(client, ctx):

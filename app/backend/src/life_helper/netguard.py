@@ -28,8 +28,13 @@ _EMBEDDED_IPV4 = (ipaddress.IPv6Network("::/96"), ipaddress.IPv6Network("64:ff9b
 _dns_cache: dict[str, tuple[float, list[str], str | None]] = {}
 
 
+def canonical_host(host: str) -> str:
+    """Use the DNS spelling for policy checks too (IDNA also maps Unicode dots and full-width letters)."""
+    return host.strip("[]").encode("idna").decode("ascii").lower().rstrip(".")
+
+
 def host_matches(host: str, domains: list[str] | tuple[str, ...]) -> bool:
-    host = host.lower().rstrip(".")
+    host = canonical_host(host)
     return any(host == d or host.endswith("." + d) for d in domains)
 
 
@@ -77,7 +82,10 @@ def literal_ip(host: str) -> IPAddress | None:
 
 def host_rejection(host: str) -> str | None:
     """Host-level checks (no DNS): internal names and addresses, and the connector-only API hosts."""
-    host = host.lower().strip("[]").rstrip(".")
+    try:
+        host = canonical_host(host)
+    except UnicodeError:
+        return "接続先のホスト名が正しくありません"
     if not host:
         return "接続先のホスト名がありません"
     if host == "localhost" or host.endswith(".localhost"):
@@ -122,7 +130,10 @@ async def _lookup(host: str) -> list[str]:
 
 async def resolve_public(host: str) -> tuple[list[str], str | None]:
     """Returns the host's addresses when every one of them is public, else a reason. Cached briefly per host."""
-    host = host.lower().strip("[]").rstrip(".")
+    reason = host_rejection(host)
+    if reason:
+        return [], reason
+    host = canonical_host(host)
     ip = literal_ip(host)
     if ip is not None:
         return [str(ip)], INTERNAL_REASON.format(host=host) if is_internal_ip(ip) else None

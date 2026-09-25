@@ -90,6 +90,8 @@ def test_url_permissions(policy):
     for bad in (
         "https://openapi.rakuten.co.jp/engine/api",
         "https://api.github.com/user",
+        "https://api.github.com。/user",
+        "https://ａｐｐ.rakuten.co.jp/",
         "http://127.0.0.1:8000/healthz",
         "http://localhost:8000/",
         "http://169.254.169.254/metadata/instance",
