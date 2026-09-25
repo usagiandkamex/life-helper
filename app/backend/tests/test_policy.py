@@ -42,7 +42,6 @@ def kb(tmp_path):
 def policy(kb, tmp_path):
     skills = tmp_path / "skills"
     skills.mkdir()
-    writes: list = []
     p = ToolPolicy(
         knowledge_root=kb,
         skills_root=skills,
@@ -50,9 +49,7 @@ def policy(kb, tmp_path):
         masker=SecretMasker(["SUPERSECRETKEY"]),
         custom_tools={"calculate", "update_holding"},
         write_custom_tools={"update_holding"},
-        on_write=lambda path, diff: writes.append(path),
     )
-    p.writes = writes  # type: ignore[attr-defined]
     return p
 
 
@@ -69,13 +66,30 @@ def test_read_permissions(policy, kb, tmp_path):
     assert isinstance(policy.handle_permission(req("read", path=str(kb / ".." / "x")), {}), PermissionDecisionReject)
 
 
-def test_write_permissions(policy, kb):
-    assert approved(policy.handle_permission(req("write", file_name=str(kb / "memories" / "money.md")), {}))
-    assert approved(policy.handle_permission(req("write", file_name=str(kb / "INDEX.md")), {}))
-    assert policy.writes == ["memories/money.md", "INDEX.md"]
-    for bad in (kb / "profile" / "about-me.md", kb / "docs" / "x.md", kb / "money" / "portfolio.yaml", kb / "x.md"):
-        assert not approved(policy.handle_permission(req("write", file_name=str(bad)), {})), bad
-    assert not approved(policy.handle_permission(req("write", file_name=str(kb / "notes" / "run.py")), {}))
+def test_runtime_write_requests_are_always_denied(policy, kb):
+    # Built-in writers are not exposed; even allowed locations must go through the app's knowledge tools.
+    for target in (kb / "memories" / "money.md", kb / "INDEX.md", kb / "profile" / "about-me.md"):
+        decision = policy.handle_permission(req("write", file_name=str(target)), {})
+        assert isinstance(decision, PermissionDecisionReject), target
+        assert "write_knowledge_file" in decision.feedback
+
+
+def test_writable_locations(policy, kb, tmp_path):
+    assert policy.writable(str(kb / "memories" / "money.md"))
+    assert policy.writable("notes/sub/a.txt") and policy.writable("INDEX.md")
+    for bad in (
+        kb / "profile" / "about-me.md",
+        kb / "docs" / "x.md",
+        kb / "money" / "portfolio.yaml",
+        kb / "x.md",
+        kb / "notes" / "run.py",
+        tmp_path / "memories" / "x.md",
+    ):
+        assert not policy.writable(str(bad)), bad
+    assert not policy.writable("memories/../profile/about-me.md")
+    assert not policy.writable("") and not policy.writable("memories/a\x00.md")
+    policy.allow_write = False
+    assert not policy.writable("memories/money.md")
 
 
 def test_url_permissions(policy):
@@ -105,44 +119,52 @@ def test_readonly_mode_blocks_all_writes(policy, kb):
     assert approved(policy.handle_permission(req("custom-tool", tool_name="calculate"), {}))
 
 
-async def test_pre_tool_use_blocks_writes_outside_allowed_dirs(policy, kb, tmp_path):
-    session_ws = tmp_path / "base" / "session-state" / "abc" / "secret.md"
-    out = await policy.pre_tool_use({"toolName": "create", "toolArgs": {"path": str(session_ws), "file_text": "x"}}, {})
-    assert out["permissionDecision"] == "deny"
-    ok = await policy.pre_tool_use(
-        {"toolName": "create", "toolArgs": {"path": str(kb / "notes" / "a.md"), "file_text": "hi"}}, {}
+async def test_pre_tool_use_blocks_builtin_writers(policy, kb):
+    # GPT-family models get apply_patch, others create/edit: none of them may run.
+    for tool, args in (
+        ("create", {"path": str(kb / "notes" / "a.md"), "file_text": "hi"}),
+        ("edit", {"path": str(kb / "memories" / "m.md"), "old_str": "a", "new_str": "b"}),
+        ("apply_patch", "*** Begin Patch\n*** Add File: notes/a.md\n+hi\n*** End Patch"),
+        ("str_replace_editor", {"command": "create", "path": str(kb / "notes" / "a.md")}),
+        ("powershell", {}),
+    ):
+        out = await policy.pre_tool_use({"toolName": tool, "toolArgs": args}, {})
+        assert out["permissionDecision"] == "deny", tool
+
+
+def test_available_builtins_exclude_writers():
+    from life_helper.copilot_integration.manager import available_toolset
+    from life_helper.copilot_integration.policy import ALLOWED_BUILTINS
+
+    assert not {"create", "edit", "apply_patch", "str_replace_editor", "bash", "powershell"} & set(ALLOWED_BUILTINS)
+    assert available_toolset(True).to_list() == [f"builtin:{t}" for t in ALLOWED_BUILTINS] + ["custom:*"]
+
+
+async def test_request_approval_fails_closed(policy):
+    from life_helper.copilot_integration.policy import Approval, WriteScope
+
+    assert not (await policy.request_approval(None, "memories/a.md", "+x")).approved  # no scope attached
+    assert not (await policy.request_approval(WriteScope(), "memories/a.md", "+x")).approved  # no approver
+
+    async def boom(path, diff):
+        raise RuntimeError("ui gone")
+
+    assert not (await policy.request_approval(WriteScope(approver=boom), "memories/a.md", "+x")).approved
+
+    async def not_an_approval(path, diff):
+        return True
+
+    assert not (await policy.request_approval(WriteScope(approver=not_an_approval), "memories/a.md", "+x")).approved
+
+    async def yes(path, diff):
+        return Approval(True, approval_id="a1")
+
+    assert (await policy.request_approval(WriteScope(approver=yes), "memories/a.md", "+x")) == Approval(
+        True, approval_id="a1"
     )
-    assert ok is None
-
-
-async def test_pre_tool_use_blocks_sensitive_content(policy, kb):
-    out = await policy.pre_tool_use(
-        {
-            "toolName": "edit",
-            "toolArgs": {"path": str(kb / "memories" / "m.md"), "old_str": "a", "new_str": "口座番号: 1234567"},
-        },
-        {},
-    )
-    assert out["permissionDecision"] == "deny"
-
-
-async def test_split_edit_cannot_assemble_sensitive_data(policy, kb):
-    target = kb / "memories" / "m.md"
-    target.write_text("口座番号: XXXX\n", encoding="utf-8")
-    # The fragment alone looks harmless, but the resulting file would contain an account number.
-    out = await policy.pre_tool_use(
-        {"toolName": "edit", "toolArgs": {"path": str(target), "old_str": "XXXX", "new_str": "1234567"}}, {}
-    )
-    assert out["permissionDecision"] == "deny"
-
-
-def test_write_permission_checks_full_post_edit_content(policy, kb):
-    request = req(
-        "write", file_name=str(kb / "memories" / "m.md"), new_file_contents="口座番号: 1234567", diff="+1234567"
-    )
-    assert not approved(policy.handle_permission(request, {}))
-    diff_only = req("write", file_name=str(kb / "memories" / "m.md"), diff="-口座番号: 1234567\n+(削除)")
-    assert approved(policy.handle_permission(diff_only, {}))  # removing old sensitive data is allowed
+    # A scope whose turn has finished cannot ask anymore.
+    finished = WriteScope(approver=yes, is_active=lambda: False)
+    assert not (await policy.request_approval(finished, "memories/a.md", "+x")).approved
 
 
 def test_denial_reasons_are_masked(policy):
@@ -160,6 +182,13 @@ async def test_pre_tool_use_defaults_search_path_to_knowledge(policy, kb, tmp_pa
     out = await policy.pre_tool_use({"toolName": "view", "toolArgs": {"path": str(tmp_path / "x")}}, {})
     assert out["permissionDecision"] == "deny"
     out = await policy.pre_tool_use({"toolName": "glob", "toolArgs": {"pattern": "*", "paths": [str(tmp_path)]}}, {})
+    assert out["permissionDecision"] == "deny"
+    # GPT-family models search with rg, which only takes ``paths``.
+    out = await policy.pre_tool_use({"toolName": "rg", "toolArgs": {"pattern": "NISA"}}, {})
+    assert out["modifiedArgs"] == {"pattern": "NISA", "paths": str(kb.resolve())}
+    out = await policy.pre_tool_use({"toolName": "rg", "toolArgs": {"pattern": "x", "paths": "memories"}}, {})
+    assert out["modifiedArgs"]["paths"] == str((kb / "memories").resolve())
+    out = await policy.pre_tool_use({"toolName": "rg", "toolArgs": {"pattern": "x", "paths": str(tmp_path)}}, {})
     assert out["permissionDecision"] == "deny"
 
 
@@ -207,29 +236,28 @@ def test_system_message_contains_kb_profile_and_rules(kb):
     # INDEX.md is model-writable, so its content must not be promoted into the system message.
     assert "# idx" not in msg and "INDEX.md" in msg
     assert "目安" in msg and "個別銘柄" in msg
-    assert "report_result" not in msg
-    auto = build_system_message(kb, automation=True, allow_write=False)
+    assert "write_knowledge_file" in msg and "edit_knowledge_file" in msg
+    assert "report_result" not in msg and "承認" not in msg
+    chat = build_system_message(kb, approval=True)
+    assert "承認" in chat and "繰り返さない" in chat
+    auto = build_system_message(kb, automation=True, allow_write=False, approval=True)
     assert "report_result" in auto and "読み取り専用" in auto
+    assert "承認ボタン" not in auto  # unattended runs never wait for a user
 
 
-async def test_write_lock_is_shared_across_sessions_and_reentrant(policy, kb, tmp_path):
-    from life_helper.automation.locks import FileLock
+def test_chat_sessions_require_approval_but_automations_do_not(ctx):
+    from life_helper.copilot_integration.manager import CopilotManager
 
-    lock_path = tmp_path / "locks" / "knowledge-write.lock"
-    policy.write_lock_path = lock_path
-    args = {"toolName": "create", "toolArgs": {"path": str(kb / "notes" / "a.md"), "file_text": "x"}}
-    assert await policy.pre_tool_use(args, {}) is None
-    assert await policy.pre_tool_use(args, {}) is None  # parallel write in the same session: reentrant
-    other = FileLock(lock_path, ttl_seconds=60)
-    assert not other.try_acquire()  # another session/process is excluded
-    await policy.post_tool_use({"toolName": "create", "toolResult": "ok"}, {})
-    assert not other.try_acquire()
-    await policy.post_tool_use_failure({"toolName": "create"}, {})
-    assert other.try_acquire()
-    other.release()
-    await policy.pre_tool_use(args, {})
-    policy.release_all()
-    assert other.try_acquire()
+    chat_specs, chat_policy = CopilotManager(ctx, ctx.settings.copilot_chat_dir).build_session_tools(allow_write=True)
+    assert chat_policy.require_approval
+    names = {s.tool.name for s in chat_specs}
+    assert {"write_knowledge_file", "edit_knowledge_file"} <= names
+    assert {"write_knowledge_file", "edit_knowledge_file"} <= chat_policy.write_custom_tools
+    assert {"write_knowledge_file", "edit_knowledge_file"} <= chat_policy.custom_tools
+    _, auto_policy = CopilotManager(ctx, ctx.settings.copilot_automation_dir, automation=True).build_session_tools(
+        allow_write=False
+    )
+    assert not auto_policy.require_approval and not auto_policy.allow_write
 
 
 def test_connector_filter(ctx, settings):

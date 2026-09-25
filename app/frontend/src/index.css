@@ -99,6 +99,16 @@ td.actions { white-space: nowrap; display: flex; gap: 0.5rem; }
 .msg.assistant { max-width: 100%; }
 .msg.tool, .msg.file-write { font-size: 0.8rem; color: var(--muted); }
 .msg.file-write summary { color: var(--ok); }
+.msg.approval { font-size: 0.85rem; }
+.msg.approval.pending { border: 1px solid var(--warn); background: #fffbeb; border-radius: 8px; padding: 0.6rem 0.75rem; }
+.msg.approval.pending .diff { background: #fff; }
+.msg.approval:not(.pending) { color: var(--muted); font-size: 0.8rem; }
+.msg.approval.approved summary { color: var(--ok); }
+.approval-title { margin: 0 0 0.4rem; }
+.approval-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.5rem; }
+.diff .add { color: var(--ok); background: #f0fdf4; }
+.diff .del { color: var(--danger); background: #fef2f2; }
+.diff .meta { color: var(--muted); }
 .cursor { animation: blink 1s steps(2) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 .markdown table { margin: 0.5rem 0; }

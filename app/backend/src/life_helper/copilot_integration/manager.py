@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -12,7 +11,8 @@ from typing import TYPE_CHECKING, Any
 from copilot import CopilotClient, CopilotSession, ToolSet
 
 from ..tools.registry import ToolSpec, build_tools
-from .policy import ALLOWED_BUILTINS, ToolPolicy, knowledge_write_lock_path
+from .knowledge_tools import build_knowledge_tools
+from .policy import ALLOWED_BUILTINS, ToolPolicy, WriteScope, knowledge_write_lock_path
 from .system_prompt import build_system_message
 
 if TYPE_CHECKING:
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 KEEP = object()
-"""Sentinel for ``open_session(on_write=KEEP)``: leave the cached session's write callback untouched."""
+"""Sentinel for ``open_session(write_scope=KEEP)``: leave the cached session's write scope untouched."""
 
 
 class NoTokenError(RuntimeError):
@@ -129,24 +129,37 @@ class CopilotManager:
             custom_tools={spec.tool.name for spec in specs},
             write_custom_tools={spec.tool.name for spec in specs if spec.writes},
             allow_write=allow_write,
+            # Unattended automations cannot answer an approval card; they follow their own allow_write setting.
+            require_approval=not self.automation,
             write_lock_path=knowledge_write_lock_path(s),
         )
+
+    def build_session_tools(
+        self, *, allow_write: bool, extra_tools: list[ToolSpec] | None = None, connectors: list[str] | None = None
+    ) -> tuple[list[ToolSpec], ToolPolicy]:
+        """Custom tools plus the knowledge-base write tools, which are bound to the session's policy."""
+        specs = build_tools(self.ctx, extra=extra_tools, connectors=connectors)
+        policy = self.build_policy(specs, allow_write=allow_write)
+        knowledge_specs = build_knowledge_tools(policy)
+        policy.custom_tools |= {spec.tool.name for spec in knowledge_specs}
+        policy.write_custom_tools |= {spec.tool.name for spec in knowledge_specs}
+        return specs + knowledge_specs, policy
 
     def session_options(
         self, *, model: str, policy: ToolPolicy, specs: list[ToolSpec], allow_write: bool
     ) -> dict[str, Any]:
         s = self.ctx.settings
         has_skills = s.skills_dir.is_dir() and any(s.skills_dir.glob("*/SKILL.md"))
+        system_message = build_system_message(
+            s.knowledge_dir, automation=self.automation, allow_write=allow_write, approval=policy.require_approval
+        )
         options: dict[str, Any] = {
             "model": model,
             "on_permission_request": policy.handle_permission,
             "hooks": policy.hooks(),
             "tools": [spec.tool for spec in specs],
             "available_tools": available_toolset(has_skills),
-            "system_message": {
-                "mode": "append",
-                "content": build_system_message(s.knowledge_dir, automation=self.automation, allow_write=allow_write),
-            },
+            "system_message": {"mode": "append", "content": system_message},
             "working_directory": str(s.knowledge_dir),
             "streaming": True,
             "infinite_sessions": {"enabled": True},
@@ -165,10 +178,11 @@ class CopilotManager:
         allow_write: bool = True,
         extra_tools: list[ToolSpec] | None = None,
         connectors: list[str] | None = None,
-        on_write: Callable[[str, str], None] | None | object = KEEP,
+        write_scope: WriteScope | None | object = KEEP,
     ) -> ActiveSession:
         """Returns a cached session or resumes/creates one. Tools and hooks are re-supplied on resume because they
-        are not persisted in Copilot's session state."""
+        are not persisted in Copilot's session state. ``write_scope`` belongs to the current turn, so a cached
+        session receives the new one (``KEEP`` leaves it as it is)."""
         fingerprint = (
             allow_write,
             tuple(sorted(spec.tool.name for spec in extra_tools or [])),
@@ -180,17 +194,18 @@ class CopilotManager:
                 await self._close_locked(session_id)
                 cached = None
             if cached is not None:
-                if on_write is not KEEP:
-                    cached.policy.on_write = on_write  # type: ignore[assignment]
+                if write_scope is not KEEP:
+                    cached.policy.write_scope = write_scope  # type: ignore[assignment]
                 if cached.model != model:
                     await cached.session.set_model(model)
                     cached.model = model
                 return cached
 
             client, generation = await self.client()
-            specs = build_tools(self.ctx, extra=extra_tools, connectors=connectors)
-            policy = self.build_policy(specs, allow_write=allow_write)
-            policy.on_write = None if on_write is KEEP else on_write  # type: ignore[assignment]
+            specs, policy = self.build_session_tools(
+                allow_write=allow_write, extra_tools=extra_tools, connectors=connectors
+            )
+            policy.write_scope = None if write_scope is KEEP else write_scope  # type: ignore[assignment]
             options = self.session_options(model=model, policy=policy, specs=specs, allow_write=allow_write)
             if resume and self.state_exists(session_id):
                 try:
