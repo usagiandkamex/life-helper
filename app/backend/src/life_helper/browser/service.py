@@ -102,7 +102,7 @@ SNAPSHOT_JS = """
   const links = [];
   const seen = new Set();
   for (const a of root.querySelectorAll('a[href]')) {
-    if (links.length >= args.maxLinks) break;
+    if (links.length > args.maxLinks) break;
     const url = a.href;
     if (url.length > args.maxUrl) { truncated = true; continue; }
     const text = clean(a.innerText || a.getAttribute('aria-label') || a.title).slice(0, 120);
@@ -112,18 +112,19 @@ SNAPSHOT_JS = """
   }
   const tables = [];
   for (const t of root.querySelectorAll('table')) {
-    if (tables.length >= args.maxTables) break;
+    if (tables.length > args.maxTables) break;
     const rows = [];
     for (const tr of t.rows) {
-      if (rows.length >= args.maxRows) break;
-      const cells = Array.from(tr.cells).slice(0, args.maxCols).map((c) => clean(c.innerText).slice(0, args.maxCell));
+      if (rows.length > args.maxRows) break;
+      const cols = Array.from(tr.cells).slice(0, args.maxCols + 1);
+      const cells = cols.map((c) => clean(c.innerText).slice(0, args.maxCell));
       if (cells.some((c) => c)) rows.push(cells);
     }
     if (rows.length) tables.push({caption: clean(t.caption ? t.caption.innerText : '').slice(0, 200), rows});
   }
   const inputs = [];
   for (const el of root.querySelectorAll('input, textarea, select')) {
-    if (inputs.length >= args.maxInputs) break;
+    if (inputs.length > args.maxInputs) break;
     const type = (el.getAttribute('type') || '').toLowerCase();
     if (['hidden', 'password', 'file', 'submit', 'button', 'image', 'reset'].includes(type)) continue;
     const box = el.getBoundingClientRect();

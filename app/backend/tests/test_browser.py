@@ -586,6 +586,37 @@ async def test_large_page_attributes_are_bounded_before_leaving_chromium(tmp_pat
 
 
 @pytest.mark.skipif(not _chromium_installed(), reason="Chromium for Playwright is not installed")
+async def test_collection_caps_are_reported_as_truncated(tmp_path, monkeypatch):
+    links = "".join(f'<a href="https://site.test/{i}">link {i}</a>' for i in range(LIMITS["maxLinks"] + 5))
+    inputs = "".join(f'<input name="f{i}" type="text">' for i in range(LIMITS["maxInputs"] + 5))
+    cells = "".join(f"<td>c{c}</td>" for c in range(LIMITS["maxCols"] + 3))
+    rows = "".join(f"<tr>{cells}</tr>" for _ in range(LIMITS["maxRows"] + 3))
+    body = f"<html><body>{links}{inputs}<table>{rows}</table></body></html>"
+
+    async def site(route):
+        await route.fulfill(content_type="text/html", body=body)
+
+    monkeypatch.setattr(BrowserSession, "_route", staticmethod(site))
+    session = BrowserSession(BrowserService(), MASKER, tmp_path)
+    try:
+        result = await session.run(lambda: session.open("https://site.test/"))
+        assert "error" not in result, result
+        assert len(result["links"]) == LIMITS["maxLinks"]
+        assert len(result["inputs"]) == LIMITS["maxInputs"]
+        assert len(result["tables"][0]["rows"]) == LIMITS["maxRows"]
+        assert all(len(row) == LIMITS["maxCols"] for row in result["tables"][0]["rows"])
+        assert result["result_truncated"]
+        # The renderer stops one item past each cap so the Python side can detect and report the overflow.
+        data = await session._current().evaluate(SNAPSHOT_JS, {**LIMITS, "selector": None})
+        assert len(data["links"]) == LIMITS["maxLinks"] + 1
+        assert len(data["inputs"]) == LIMITS["maxInputs"] + 1
+        assert len(data["tables"][0]["rows"]) == LIMITS["maxRows"] + 1
+        assert len(data["tables"][0]["rows"][0]) == LIMITS["maxCols"] + 1
+    finally:
+        await session.close()
+
+
+@pytest.mark.skipif(not _chromium_installed(), reason="Chromium for Playwright is not installed")
 async def test_chromium_websocket_uses_egress_proxy(tmp_path, websocket_origin, monkeypatch):
     port, requests, messages = websocket_origin
 

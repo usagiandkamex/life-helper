@@ -148,6 +148,14 @@ def test_sensitive_data_and_secrets_in_urls_are_rejected():
     assert url_rejection("https://example.com/?k=other", masker) is None
 
 
+def test_sensitive_data_in_the_host_is_not_echoed_in_the_rejection():
+    # A blocked host that itself carries sensitive data must return the generic reason, not name the host.
+    reason = url_rejection("http://4111111111111111.localhost/")
+    assert reason is not None and "カード番号" in reason and "4111" not in reason
+    reason = netguard.host_rejection("4111111111111111.localhost")
+    assert reason is not None and "カード番号" in reason and "4111" not in reason
+
+
 async def test_resolved_rejection_checks_every_answer_and_caches(fake_dns, monkeypatch):
     fake_dns["mixed.example.com"] = ["93.184.215.14", "10.0.0.1"]
     fake_dns["mapped.example.com"] = ["::ffff:192.168.0.1"]

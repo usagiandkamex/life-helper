@@ -80,8 +80,24 @@ def literal_ip(host: str) -> IPAddress | None:
     return ipaddress.IPv4Address(address)
 
 
+def sensitive_rejection(text: str, masker: SecretMasker | None = None) -> str | None:
+    """Returns why ``text`` carries sensitive data or a known secret, or None. Never echoes ``text`` itself."""
+    decoded = unquote_plus(text)
+    kinds = detect_sensitive(decoded)
+    if kinds:
+        labels = "、".join(SENSITIVE_LABELS[k] for k in kinds)
+        return f"機微情報（{labels}）を含む URL は送信できません"
+    if masker is not None and (masker.contains_secret(text) or masker.contains_secret(decoded)):
+        return "秘密情報を含む URL は送信できません"
+    return None
+
+
 def host_rejection(host: str) -> str | None:
-    """Host-level checks (no DNS): internal names and addresses, and the connector-only API hosts."""
+    """Host-level checks (no DNS): internal names and addresses, and the connector-only API hosts.
+
+    A host that itself carries sensitive data (e.g. a card number in a label) is never echoed: the generic
+    sensitive-data rejection is returned instead of one naming the host.
+    """
     try:
         host = canonical_host(host)
     except UnicodeError:
@@ -89,13 +105,14 @@ def host_rejection(host: str) -> str | None:
     if not host:
         return "接続先のホスト名がありません"
     if host == "localhost" or host.endswith(".localhost"):
-        return INTERNAL_REASON.format(host=host)
-    ip = literal_ip(host)
-    if ip is not None and is_internal_ip(ip):
-        return INTERNAL_REASON.format(host=host)
-    if host_matches(host, CONNECTOR_HOSTS):
-        return f"{host} は API キーを使うサービスです。用意されたツール（コネクタ）を使ってください"
-    return None
+        reason = INTERNAL_REASON.format(host=host)
+    elif (ip := literal_ip(host)) is not None and is_internal_ip(ip):
+        reason = INTERNAL_REASON.format(host=host)
+    elif host_matches(host, CONNECTOR_HOSTS):
+        reason = f"{host} は API キーを使うサービスです。用意されたツール（コネクタ）を使ってください"
+    else:
+        return None
+    return sensitive_rejection(host) or reason
 
 
 def url_rejection(url: str, masker: SecretMasker | None = None) -> str | None:
@@ -110,17 +127,9 @@ def url_rejection(url: str, masker: SecretMasker | None = None) -> str | None:
         return "http / https の URL だけ参照できます"
     if parts.username or parts.password:
         return "認証情報を含む URL は参照できません"
-    reason = host_rejection(host)
-    if reason:
-        return reason
-    decoded = unquote_plus(url)
-    kinds = detect_sensitive(decoded)
-    if kinds:
-        labels = "、".join(SENSITIVE_LABELS[k] for k in kinds)
-        return f"機微情報（{labels}）を含む URL は送信できません"
-    if masker is not None and (masker.contains_secret(url) or masker.contains_secret(decoded)):
-        return "秘密情報を含む URL は送信できません"
-    return None
+    # Sensitive/secret checks run before any host-specific rejection, so a host that itself carries sensitive
+    # data (e.g. a card number in a label) never gets echoed in the reason.
+    return sensitive_rejection(url, masker) or host_rejection(host)
 
 
 async def _lookup(host: str) -> list[str]:
