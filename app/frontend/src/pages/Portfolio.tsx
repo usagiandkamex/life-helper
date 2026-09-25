@@ -542,7 +542,10 @@ export function PortfolioPage() {
           ))}
           {candidates && candidates.candidates.length === 0 && (
             <p className="hint">
-              候補が見つかりませんでした。ファンド名を短くして探し直すか、コードを指定して紐付けるか、公式サイトの基準価額を手入力してください。
+              {candidates.errors.length > 0
+                ? // A search that failed says nothing about whether the fund exists, so it must not read as "no such fund".
+                  '候補を取得できませんでした。時間をおいて探し直すか、コードを指定して紐付けるか、公式サイトの基準価額を手入力してください。'
+                : '候補が見つかりませんでした。ファンド名を短くして探し直すか、コードを指定して紐付けるか、公式サイトの基準価額を手入力してください。'}
             </p>
           )}
           {candidates && candidates.candidates.length > 0 && (
