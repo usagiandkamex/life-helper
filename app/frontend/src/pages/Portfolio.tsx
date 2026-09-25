@@ -659,12 +659,10 @@ export function PortfolioPage() {
                   <td>
                     <SourceCell holding={h} busy={busy} onPick={openFundPicker} />
                   </td>
-                  <td>
-                    <div>
-                      <button className="link small" onClick={() => openEditor(h)} disabled={busy}>
-                        数量・取得額を編集
-                      </button>
-                    </div>
+                  <td className="actions">
+                    <button className="link small" onClick={() => openEditor(h)} disabled={busy}>
+                      数量・取得額を編集
+                    </button>
                     <button className="link danger" onClick={() => removeHolding(h.id)} disabled={busy}>
                       削除
                     </button>

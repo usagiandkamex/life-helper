@@ -95,6 +95,8 @@ table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
 th, td { text-align: left; padding: 0.75rem 0.5rem; border-bottom: 1px solid var(--md-outline-variant); vertical-align: top; }
 th { font-size: 0.75rem; font-weight: 500; color: var(--muted); letter-spacing: 0.03125rem; }
 tbody tr:last-child td { border-bottom: none; }
+/* 日本語が 1 文字ずつ折り返して表が潰れないようにする（はみ出す分は .table-wrap が横スクロール） */
+.table-wrap th, .table-wrap td { word-break: keep-all; }
 tr.muted { color: var(--muted); }
 td.neg { color: var(--danger); }
 td.actions { white-space: nowrap; display: flex; gap: 0.75rem; }
@@ -147,7 +149,7 @@ label.button { flex-direction: row; }
 .icon-button:hover { background: var(--md-surface-container-high); }
 .icon-button:focus-visible { outline: 3px solid var(--md-primary); outline-offset: -3px; }
 /* text button（表内などの控えめな操作） */
-.link { background: none; border: none; color: var(--primary); cursor: pointer; padding: 0; font: inherit; font-weight: 500; text-align: left; border-radius: var(--md-shape-xs); }
+.link { background: none; border: none; color: var(--primary); cursor: pointer; padding: 0.375rem 0; font: inherit; font-weight: 500; text-align: left; border-radius: var(--md-shape-xs); }
 .link:hover { text-decoration: underline; }
 .link:focus-visible { outline: 2px solid var(--md-primary); outline-offset: 2px; }
 .link.danger { color: var(--danger); }

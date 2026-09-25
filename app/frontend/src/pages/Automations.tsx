@@ -260,12 +260,14 @@ function Editor({
   const s = draft.schedule
   const n = draft.notify
   // The saved model stays selectable even when the list is unavailable or no longer offers it, so opening the
-  // editor never switches an automation to another model by itself.
+  // editor never switches an automation to another model by itself. An empty model behaves like the default.
+  const model = draft.model || 'auto'
   const modelOptions = [
     { id: 'auto', name: '自動（おまかせ）' },
     ...models.filter((m) => m.id !== 'auto'),
-    ...(draft.model && draft.model !== 'auto' && !models.some((m) => m.id === draft.model)
-      ? [{ id: draft.model, name: draft.model }]
+    // Only a loaded list can tell that a model is gone; an unreachable /api/models says nothing about it.
+    ...(model !== 'auto' && !models.some((m) => m.id === model)
+      ? [{ id: model, name: models.length ? `${model}（一覧にありません）` : model }]
       : []),
   ]
   return (
@@ -336,7 +338,7 @@ function Editor({
         </label>
         <label>
           モデル
-          <select value={draft.model} onChange={(e) => set('model', e.target.value)}>
+          <select value={model} onChange={(e) => set('model', e.target.value)}>
             {modelOptions.map((m) => (
               <option key={m.id} value={m.id}>
                 {m.name}
