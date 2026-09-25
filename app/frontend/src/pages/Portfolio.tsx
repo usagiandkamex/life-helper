@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, formatDate, json, yen } from '../api'
+import { AmountInput } from '../components/AmountInput'
 import { LazyChart } from '../components/LazyChart'
 import { Disclaimer } from '../components/Markdown'
-import { afterPurchase, averageCost, parseNumber, totalsProblem, type Totals } from '../holdings'
+import { afterPurchase, averageCost, groupNumber, parseNumber, totalsProblem, type Totals } from '../holdings'
 import type { ChartData, FundAutoLink, FundCandidates, Holding, PortfolioView } from '../types'
 
 const ACCOUNTS = [
@@ -45,6 +46,11 @@ const amount = (value: number) => value.toLocaleString('ja-JP', { maximumFractio
 const exact = (value: number) => value.toLocaleString('ja-JP', { maximumSignificantDigits: 17 })
 const exactYen = (value: number) => `${exact(value)} 円`
 const label = (labels: Record<string, string>, key: string | null | undefined) => (key ? labels[key] ?? key : '')
+// 入力欄の値は 3 桁区切りつきの文字列なので、区切りを外して数値にする（空欄や数字でないときは fallback）。
+const numberField = (data: FormData, name: string, fallback = Number.NaN) => {
+  const value = parseNumber(String(data.get(name) ?? ''))
+  return Number.isFinite(value) ? value : fallback
+}
 const marketToday = () => {
   const parts = new Intl.DateTimeFormat('en-US', {
     day: '2-digit',
@@ -91,7 +97,7 @@ function PriceCell({ holding }: { holding: Holding }) {
 
 // 取得元の書き方は投資信託も個別銘柄も同じにする: 1 行目が表示中の価格の出どころ、2 行目がその取得元での銘柄の識別子。
 // 投資信託は次の更新に使う取得元が表示中の価格の出どころと違うことがある（CSV を取り込んだ直後など）ので、そのときだけ続けて書く。
-function SourceCell({ holding, busy, onPick }: { holding: Holding; busy: boolean; onPick: (h: Holding) => void }) {
+function SourceCell({ holding }: { holding: Holding }) {
   const price = holding.price
   const fund = holding.kind === 'fund'
   const source = price ? label(SOURCE_LABELS, price.source) : '未取得'
@@ -131,11 +137,6 @@ function SourceCell({ holding, busy, onPick }: { holding: Holding; busy: boolean
         <div>
           <small className="warn-text">{holding.fund ? '自動では更新しません' : '取得元が未設定です'}</small>
         </div>
-      )}
-      {fund && (
-        <button className="link small" onClick={() => onPick(holding)} disabled={busy}>
-          取得元を設定
-        </button>
       )}
     </>
   )
@@ -233,8 +234,8 @@ function HoldingEditor({
   const [mode, setMode] = useState<'buy' | 'total'>('buy')
   const [buyQuantity, setBuyQuantity] = useState('')
   const [buyCost, setBuyCost] = useState('')
-  const [totalQuantity, setTotalQuantity] = useState(String(holding.quantity))
-  const [totalCost, setTotalCost] = useState(String(holding.cost_total))
+  const [totalQuantity, setTotalQuantity] = useState(groupNumber(holding.quantity))
+  const [totalCost, setTotalCost] = useState(groupNumber(holding.cost_total))
   const [costEdited, setCostEdited] = useState(false)
 
   let result: Totals | string | null
@@ -281,28 +282,25 @@ function HoldingEditor({
           <>
             <label>
               購入数量（株・口）
-              <input type="number" step="any" min="0" value={buyQuantity} onChange={(e) => setBuyQuantity(e.target.value)} required />
+              <AmountInput value={buyQuantity} onValueChange={setBuyQuantity} required />
             </label>
             <label>
               購入金額（円）
-              <input type="number" step="any" min="0" value={buyCost} onChange={(e) => setBuyCost(e.target.value)} required />
+              <AmountInput value={buyCost} onValueChange={setBuyCost} required />
             </label>
           </>
         ) : (
           <>
             <label>
               数量の合計（株・口）
-              <input type="number" step="any" min="0" value={totalQuantity} onChange={(e) => setTotalQuantity(e.target.value)} required />
+              <AmountInput value={totalQuantity} onValueChange={setTotalQuantity} required />
             </label>
             <label>
               取得額の合計（円）
-              <input
-                type="number"
-                step="any"
-                min="0"
+              <AmountInput
                 value={totalCost}
-                onChange={(e) => {
-                  setTotalCost(e.target.value)
+                onValueChange={(v) => {
+                  setTotalCost(v)
                   setCostEdited(true)
                 }}
                 required
@@ -352,6 +350,10 @@ export function PortfolioPage() {
   const [searching, setSearching] = useState(false)
   // Only the id is kept: the editor reads the holding from the latest view, and closes once a CSV import replaces it.
   const [editId, setEditId] = useState<string | null>(null)
+  // 表の下の編集欄で選んでいる銘柄。表からボタンを外したので、どの銘柄を編集するかはここで選ぶ。
+  const [selectedId, setSelectedId] = useState('')
+  // 手入力で追加したあとに入力欄を空に戻すための番号（3 桁区切りの入力欄は form.reset() では消えない）。
+  const [addKey, setAddKey] = useState(0)
   const [chart, setChart] = useState<ChartData | null>(null)
   const [simResult, setSimResult] = useState<{ principal: number; expected_value: number; percentiles: Record<string, number>; after_tax: Record<string, number> } | null>(null)
 
@@ -421,16 +423,26 @@ export function PortfolioPage() {
   }
 
   const openFundPicker = (h: Holding) => {
+    setSelectedId(h.id)
     setEditId(null)
     setFundTarget(h)
     searchFunds(h.name)
   }
 
   const openEditor = (h: Holding) => {
+    setSelectedId(h.id)
     setFundTarget(null)
     setCandidates(null)
     setError('')
     setEditId(h.id)
+  }
+
+  // 編集する銘柄を選び直したら、前の銘柄で開いていた編集欄・取得元の欄は閉じる。
+  const selectHolding = (id: string) => {
+    setSelectedId(id)
+    setEditId(null)
+    setFundTarget(null)
+    setCandidates(null)
   }
 
   // Totals, not the purchase, are sent, so a double click or a retry cannot add the purchase twice. The totals it
@@ -497,7 +509,14 @@ export function PortfolioPage() {
 
   const addHolding = (form: HTMLFormElement) => {
     const data = new FormData(form)
-    const price = Number(data.get('price'))
+    const totals = { quantity: numberField(data, 'quantity'), cost: numberField(data, 'cost_total') }
+    const problem = totalsProblem(totals)
+    if (problem) {
+      setMessage('')
+      setError(problem)
+      return
+    }
+    const price = numberField(data, 'price')
     run(async () => {
       const v = await api<PortfolioView>('/api/portfolio/holdings', {
         method: 'POST',
@@ -507,19 +526,23 @@ export function PortfolioPage() {
           kind: data.get('kind'),
           code: data.get('code') || '',
           name: data.get('name'),
-          quantity: Number(data.get('quantity')),
-          cost_total: Number(data.get('cost_total')),
+          quantity: totals.quantity,
+          cost_total: totals.cost,
           price: price > 0 ? price : null,
         }),
       })
-      form.reset()
+      // 3 桁区切りの入力欄は form.reset() では空にならないので、フォームごと作り直す。
+      setAddKey((n) => n + 1)
       return v
     }, () => '追加しました')
   }
 
-  const removeHolding = (id: string) => {
-    if (window.confirm('この銘柄を削除しますか？'))
-      run(() => api<PortfolioView>('/api/portfolio/holdings', { method: 'POST', body: json({ action: 'delete', id }) }))
+  const removeHolding = async (target: Holding) => {
+    if (!window.confirm(`${target.account_label}の「${target.name}」を削除しますか？`)) return
+    const ok = await run(() =>
+      api<PortfolioView>('/api/portfolio/holdings', { method: 'POST', body: json({ action: 'delete', id: target.id }) }),
+    )
+    if (ok) selectHolding('')
   }
 
   const simulate = async (form: HTMLFormElement) => {
@@ -529,8 +552,8 @@ export function PortfolioPage() {
       {
         method: 'POST',
         body: json({
-          initial: Number(data.get('initial')),
-          monthly_contribution: Number(data.get('monthly')),
+          initial: numberField(data, 'initial', 0),
+          monthly_contribution: numberField(data, 'monthly', 0),
           years: Number(data.get('years')),
           expected_return: Number(data.get('rate')) / 100,
           volatility: Number(data.get('vol')) / 100,
@@ -544,6 +567,8 @@ export function PortfolioPage() {
 
   if (!view) return <div className="panel">{error || '読み込み中…'}</div>
   const editing = editId ? view.holdings.find((h) => h.id === editId) : undefined
+  // 削除や CSV の取り込みで銘柄が入れ替わったときは、選び直してもらう。
+  const selected = view.holdings.find((h) => h.id === selectedId)
   return (
     <div className="stack">
       <Disclaimer />
@@ -632,21 +657,20 @@ export function PortfolioPage() {
             <thead>
               <tr>
                 <th>口座</th>
-                <th>銘柄</th>
+                <th className="name">銘柄</th>
                 <th className="num">数量</th>
                 <th className="num">取得額</th>
                 <th className="num">評価額</th>
                 <th className="num">損益</th>
                 <th>価格</th>
                 <th>取得元</th>
-                <th />
               </tr>
             </thead>
             <tbody>
               {view.holdings.map((h) => (
-                <tr key={h.id}>
+                <tr key={h.id} className={h.id === selected?.id ? 'selected' : undefined}>
                   <td>{h.account_label}</td>
-                  <td>
+                  <td className="name">
                     {h.name}
                     {h.code && <small> ({h.code})</small>}
                   </td>
@@ -658,66 +682,43 @@ export function PortfolioPage() {
                     <PriceCell holding={h} />
                   </td>
                   <td>
-                    <SourceCell holding={h} busy={busy} onPick={openFundPicker} />
-                  </td>
-                  <td className="actions">
-                    <button className="link small" onClick={() => openEditor(h)} disabled={busy}>
-                      編集
-                    </button>
-                    <button className="link danger" onClick={() => removeHolding(h.id)} disabled={busy}>
-                      削除
-                    </button>
+                    <SourceCell holding={h} />
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
-        <form
-          className="grid-form"
-          onSubmit={(e) => {
-            e.preventDefault()
-            addHolding(e.currentTarget)
-          }}
-        >
-          <select name="account">{ACCOUNTS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select>
-          <select name="kind">{KINDS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select>
-          <input name="code" placeholder="証券コード・ティッカー（任意）" />
-          <input name="name" placeholder="銘柄名" required />
-          <input name="quantity" type="number" step="any" min="0" placeholder="数量（株・口）" required />
-          <input name="cost_total" type="number" min="0" placeholder="取得額（円）" required />
-          <input name="price" type="number" step="any" min="0" placeholder="現在値（投信は1万口あたり）" />
-          <button className="button" disabled={busy}>
-            手入力で追加
-          </button>
-        </form>
-      </section>
-
-      <section className="panel">
-        <h2>保有銘柄の更新</h2>
+        {/* 行ごとにボタンを置くと表が読みにくいので、編集する銘柄はここで選ぶ。 */}
         <div className="row wrap">
-          <select value={broker} onChange={(e) => setBroker(e.target.value)}>
-            {view.brokers.map((b) => (
-              <option key={b.name} value={b.name}>
-                {b.label}
-              </option>
-            ))}
-          </select>
-          <label className="button">
-            保有証券 CSV を取り込む
-            <input type="file" accept=".csv" hidden disabled={busy} onChange={(e) => e.target.files?.[0] && importCsv(e.target.files[0])} />
+          <label className="grow">
+            編集する銘柄
+            <select value={selected?.id ?? ''} onChange={(e) => selectHolding(e.target.value)}>
+              <option value="">選択してください</option>
+              {view.holdings.map((h) => (
+                <option key={h.id} value={h.id}>
+                  {h.account_label}・{h.name}
+                </option>
+              ))}
+            </select>
           </label>
+          <button className="button small" onClick={() => selected && openEditor(selected)} disabled={busy || !selected}>
+            数量・取得額を編集
+          </button>
+          <button
+            className="button small"
+            onClick={() => selected && openFundPicker(selected)}
+            disabled={busy || selected?.kind !== 'fund'}
+          >
+            取得元を設定
+          </button>
+          <button className="button small danger" onClick={() => selected && removeHolding(selected)} disabled={busy || !selected}>
+            削除
+          </button>
         </div>
-        <p className="hint warn-text">
-          取り込むと保有銘柄は CSV の内容に置き換わります（手で編集した数量・取得額も CSV の値になります）。
+        <p className="hint">
+          選んだ銘柄は表の中で色が付きます。「取得元を設定」は基準価額を取得する投資信託だけで使えます。
         </p>
-        <details className="hint">
-          <summary>CSV 取り込みの使い方</summary>
-          <p>
-            CSV の評価額が最も正確です（取り込み時点）。株価・基準価額の更新は「評価額を計算」から行います。
-            積立・買い増しの後は、CSV を取り込み直すか、保有銘柄の「編集」で購入分を加算してください。
-          </p>
-        </details>
       </section>
 
       {editing && (
@@ -858,16 +859,16 @@ export function PortfolioPage() {
             onSubmit={(e) => {
               e.preventDefault()
               const data = new FormData(e.currentTarget)
-              setManualNav(fundTarget, Number(data.get('price_unit')), Number(data.get('nav')), String(data.get('price_date')))
+              setManualNav(fundTarget, numberField(data, 'price_unit'), numberField(data, 'nav'), String(data.get('price_date')))
             }}
           >
             <label>
               基準価額（円）
-              <input name="nav" type="number" step="any" min="0" defaultValue={fundTarget.price?.value} required />
+              <AmountInput name="nav" defaultValue={fundTarget.price?.value} required />
             </label>
             <label>
               価格単位（口）
-              <input name="price_unit" type="number" min="1" step="1" defaultValue={fundTarget.price_unit} required />
+              <AmountInput name="price_unit" defaultValue={fundTarget.price_unit} required />
             </label>
             <label>
               基準日
@@ -885,6 +886,56 @@ export function PortfolioPage() {
       )}
 
       <section className="panel">
+        <h2>保有銘柄の更新</h2>
+        <div className="row wrap">
+          <select value={broker} onChange={(e) => setBroker(e.target.value)}>
+            {view.brokers.map((b) => (
+              <option key={b.name} value={b.name}>
+                {b.label}
+              </option>
+            ))}
+          </select>
+          <label className="button">
+            保有証券 CSV を取り込む
+            <input type="file" accept=".csv" hidden disabled={busy} onChange={(e) => e.target.files?.[0] && importCsv(e.target.files[0])} />
+          </label>
+        </div>
+        <p className="hint warn-text">
+          取り込むと保有銘柄は CSV の内容に置き換わります（手で編集した数量・取得額も CSV の値になります）。
+        </p>
+        <details className="hint">
+          <summary>CSV 取り込みの使い方</summary>
+          <p>
+            CSV の評価額が最も正確です（取り込み時点）。株価・基準価額の更新は「評価額を計算」から行います。
+            積立・買い増しの後は、CSV を取り込み直すか、「数量・取得額を編集」で購入分を加算してください。
+          </p>
+        </details>
+        {/* CSV に載らない銘柄を足すときだけ使うので、畳んでおく。 */}
+        <details className="collapse">
+          <summary>手入力で追加</summary>
+          <form
+            key={addKey}
+            className="grid-form"
+            onSubmit={(e) => {
+              e.preventDefault()
+              addHolding(e.currentTarget)
+            }}
+          >
+            <select name="account">{ACCOUNTS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select>
+            <select name="kind">{KINDS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select>
+            <input name="code" placeholder="証券コード・ティッカー（任意）" />
+            <input name="name" placeholder="銘柄名" required />
+            <AmountInput name="quantity" placeholder="数量（株・口）" required />
+            <AmountInput name="cost_total" placeholder="取得額（円）" required />
+            <AmountInput name="price" placeholder="現在値（投信は1万口あたり）" />
+            <button className="button" disabled={busy}>
+              追加
+            </button>
+          </form>
+        </details>
+      </section>
+
+      <section className="panel">
         <h2>積立シミュレーション</h2>
         <form
           className="grid-form"
@@ -893,8 +944,8 @@ export function PortfolioPage() {
             simulate(e.currentTarget).catch((err) => setError(err.message))
           }}
         >
-          <label>元本（円）<input name="initial" type="number" min="0" defaultValue={Math.round(view.total_value)} /></label>
-          <label>毎月の積立（円）<input name="monthly" type="number" min="0" defaultValue={30000} /></label>
+          <label>元本（円）<AmountInput name="initial" key={Math.round(view.total_value)} defaultValue={Math.round(view.total_value)} /></label>
+          <label>毎月の積立（円）<AmountInput name="monthly" defaultValue={30000} /></label>
           <label>年数<input name="years" type="number" min="1" max="60" defaultValue={20} /></label>
           <label>想定利回り（%）<input name="rate" type="number" step="0.1" defaultValue={4} /></label>
           <label>リスク（%）<input name="vol" type="number" step="1" defaultValue={15} /></label>

@@ -100,8 +100,12 @@ tbody tr:last-child td { border-bottom: none; }
 /* 日本語が 1 文字ずつ折り返して表が潰れないようにする（はみ出す分は .table-wrap が横スクロール） */
 .table-wrap th, .table-wrap td { word-break: keep-all; }
 tr.muted { color: var(--muted); }
+/* 表の下の欄で選んでいる銘柄は、表の中でも分かるようにする（損益の色は残す） */
+tr.selected > td { background: var(--md-secondary-container); }
 td.neg { color: var(--danger); }
-td.actions { white-space: nowrap; display: flex; gap: 0.75rem; }
+/* 操作の列はセルのまま横に並べる（display: flex にするとセルが行から外れて表が崩れる） */
+td.actions { white-space: nowrap; }
+td.actions > * + * { margin-left: 0.75rem; }
 
 /* buttons: filled / outlined / text（状態レイヤー付き） */
 .button {
@@ -163,6 +167,9 @@ details.hint > summary { cursor: pointer; color: var(--primary); font-weight: 50
 details.hint > summary:focus-visible { outline: 2px solid var(--md-primary); outline-offset: 2px; border-radius: var(--md-shape-xs); }
 details.hint > summary + * { margin-top: 0.25rem; }
 details.hint p { margin: 0.25rem 0 0; }
+/* 普段は畳んでおく操作（中身はフォームなので .hint のように小さくしない） */
+details.collapse > summary { cursor: pointer; color: var(--primary); font-weight: 500; font-size: 0.875rem; padding: 0.25rem 0; }
+details.collapse > summary:focus-visible { outline: 2px solid var(--md-primary); outline-offset: 2px; border-radius: var(--md-shape-xs); }
 .error-text { color: var(--danger); font-size: 0.875rem; }
 .warn-text { color: var(--warn); }
 .badge { background: var(--md-error); color: var(--md-on-error); border-radius: var(--md-shape-full); padding: 0 0.4rem; font-size: 0.6875rem; font-weight: 500; line-height: 1rem; margin-left: 0.3rem; }
@@ -303,6 +310,8 @@ details.hint p { margin: 0.25rem 0 0; }
   .split { flex-direction: column; height: auto; }
   .split > aside { width: 100%; }
   .msg.user { max-width: 95%; }
+  /* 銘柄名は長いので、スマホでは折り返す（keep-all のままだと 1 行に伸びて列幅が広がる） */
+  .table-wrap th.name, .table-wrap td.name { word-break: normal; overflow-wrap: anywhere; min-width: 6rem; }
 }
 
 @media (prefers-reduced-motion: reduce) {

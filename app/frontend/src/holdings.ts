@@ -27,7 +27,29 @@ export function addDecimal(a: number, b: number): number {
 
 /** Reads a number input. Blank or non-numeric text is NaN, never 0. */
 export function parseNumber(text: string): number {
-  return text.trim() === '' ? Number.NaN : Number(text)
+  const digits = text.replace(/,/g, '').trim()
+  return digits === '' ? Number.NaN : Number(digits)
+}
+
+// 入力欄は全角でも打たれるので、数字と小数点だけ半角に直してから読む（他の文字は落とす）。
+const toHalfWidth = (text: string) =>
+  text.replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0)).replace(/[．。]/g, '.')
+
+/**
+ * 入力中のテキストに 3 桁区切りを入れる。小数部と打ち途中の "1234." はそのまま残す（"1234.5" は "1,234.5"）。
+ * 区切りを入れた値は parseNumber で読む。
+ */
+export function groupDigits(text: string): string {
+  const cleaned = toHalfWidth(text).replace(/[^\d.]/g, '')
+  const point = cleaned.indexOf('.')
+  const whole = (point === -1 ? cleaned : cleaned.slice(0, point)).replace(/^0+(?=\d)/, '')
+  const fraction = point === -1 ? '' : `.${cleaned.slice(point + 1).replace(/\./g, '')}`
+  return whole.replace(/\B(?=(\d{3})+$)/g, ',') + fraction
+}
+
+/** 数値を 3 桁区切りの入力テキストにする（小さい値が "1e-7" にならないように桁で書き出す）。 */
+export function groupNumber(value: number): string {
+  return Number.isFinite(value) ? value.toLocaleString('en-US', { maximumFractionDigits: 20 }) : ''
 }
 
 /** Cost per price unit (usually 10,000 units for a fund, one share for a stock); null when nothing is held. */
