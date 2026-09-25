@@ -142,7 +142,7 @@ async def save_knowledge_file(policy: ToolPolicy, raw_path: str, build: Callable
         # Checked last, with no await before the write, so an answer stopped meanwhile never writes afterwards.
         if scope is not None and not scope.is_active():
             return _fail("回答が中断・終了したため、書き込みませんでした")
-        await asyncio.to_thread(atomic_write, target, after)
+        atomic_write(target, after)
     except OSError:
         return _fail("ファイルに書き込めませんでした")
     finally:

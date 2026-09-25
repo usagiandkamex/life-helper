@@ -308,3 +308,36 @@ async def test_write_is_refused_when_the_turn_ends_during_the_final_check(kb, tm
     out = await save_knowledge_file(policy, "notes/a.md", lambda before: "a\n")
     assert reads["count"] == 2 and out["saved"] is False and "中断" in out["error"]
     assert not (kb / "notes" / "a.md").exists() and rec.writes == []
+
+
+async def test_final_active_check_and_write_do_not_yield(kb, tmp_path, rec, monkeypatch):
+    import asyncio
+    import threading
+
+    policy = make_policy(kb, tmp_path, rec, require_approval=True)
+    loop = asyncio.get_running_loop()
+    loop_thread = threading.get_ident()
+    active = {"value": True}
+    real_write = knowledge_tools.atomic_write
+
+    def abort():
+        active["value"] = False
+
+    def is_active():
+        # An abort queued at the final check must not run until the write has finished.
+        if rec.asked:
+            loop.call_soon(abort)
+        return active["value"]
+
+    def checked_write(path, text):
+        assert threading.get_ident() == loop_thread
+        assert active["value"]
+        real_write(path, text)
+
+    monkeypatch.setattr(knowledge_tools, "atomic_write", checked_write)
+    use(policy, rec, approver(rec, Approval(True, approval_id="w")), is_active=is_active)
+    out = await save_knowledge_file(policy, "notes/a.md", lambda before: "a\n")
+    assert out["saved"] is True and content(kb / "notes" / "a.md") == "a\n"
+    assert rec.writes[0][2] == "w"
+    await asyncio.sleep(0)
+    assert active["value"] is False
