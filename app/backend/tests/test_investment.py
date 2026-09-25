@@ -766,6 +766,18 @@ def test_renaming_a_holding_clears_the_confirmed_fund_link(ctx):
     assert (stored.fund, stored.price, stored.valuation_yen, stored.market_value()) == (None, None, None, None)
 
 
+def test_changing_the_security_code_of_a_holding_clears_the_previous_instruments_data(ctx):
+    holding = _fund(500_000, price=Price(value=20_000, date="2024-05-01", source="mufg_api"), valuation_yen=1_000_000)
+    holding.code = "0331418A"
+    with portfolio_store(ctx).transaction() as portfolio:
+        portfolio.holdings = [holding]
+    # The code now identifies another instrument, so neither its NAV source nor its price may be reused.
+    recoded = UpdateHoldingParams(action="update", id=holding.id, code="03312179")
+    apply_holding_update(ctx, recoded)
+    stored = portfolio_store(ctx).load().holdings[0]
+    assert (stored.fund, stored.price, stored.valuation_yen, stored.market_value()) == (None, None, None, None)
+
+
 def test_changing_the_kind_of_a_holding_keeps_a_price_given_in_the_same_update(ctx):
     holding = _fund(500_000, price=Price(value=20_000, date="2024-05-01", source="mufg_api"))
     with portfolio_store(ctx).transaction() as portfolio:
