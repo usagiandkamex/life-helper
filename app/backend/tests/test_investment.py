@@ -1212,6 +1212,26 @@ async def test_a_quote_whose_price_unit_is_out_of_range_is_not_linked(ctx):
     assert saved.fund is None and saved.price is None
 
 
+async def test_a_refreshed_quote_whose_price_unit_is_out_of_range_keeps_the_saved_nav(ctx):
+    kept = _fund(500_000)
+    kept.apply_price(Price(value=25_000, date=OLDER_DAY.isoformat(), source="toushin_lib"))
+    daiwa = _fund(250_000, provider="daiwa_csv", code="3346", name="iFreeNEXT FANG+インデックス", manager="大和")
+    with portfolio_store(ctx).transaction() as portfolio:
+        portfolio.holdings = [kept, daiwa]
+    _funds_ready(ctx)
+    get_connectors(ctx)["toushin_lib"].price_unit = 0.001
+    with respx.mock:
+        mock_toushin({ALL_COUNTRY_ISIN: (25_341, _jp(NAV_DAY))})
+        mock_daiwa({"3346": (28_251, NAV_DAY.strftime("%Y%m%d"))})
+        result = await refresh_fund_navs(ctx)
+    # The refused fund keeps the NAV and the unit it was linked with; the fund of another source still updates.
+    assert [u["code"] for u in result["updated"]] == ["3346"]
+    assert [(e["code"], "価格単位" in e["error"]) for e in result["errors"]] == [(ALL_COUNTRY_ISIN, True)]
+    unchanged, updated = portfolio_store(ctx).load().holdings
+    assert (unchanged.price.value, unchanged.price.date) == (25_000, OLDER_DAY.isoformat())
+    assert unchanged.fund.price_unit == 10_000 and updated.price.value == 28_251
+
+
 def test_market_today_is_the_japanese_date_even_when_utc_is_still_yesterday(monkeypatch):
     """The container runs on UTC, so between 00:00 and 09:00 JST today would look like tomorrow to it."""
 

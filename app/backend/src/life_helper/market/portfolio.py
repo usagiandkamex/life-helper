@@ -274,8 +274,9 @@ def yen(value: Decimal) -> int:
 
     ``to_integral_value`` rather than ``quantize``: quantize refuses a number with more digits than the decimal
     context keeps, so a single holding with an oversized value (from a file written before the paths that save
-    one checked it, or edited by hand) would make the whole portfolio screen fail instead of only looking wrong.
-    Rounding it anyway is what keeps that holding visible, and therefore repairable from the screen.
+    one checked it) would make the whole portfolio screen fail instead of only looking wrong. Rounding it anyway
+    keeps that holding visible, and therefore repairable from the screen. A value that is not finite at all has
+    to be removed from the file: no path writes one, and it could not be shown as a number either.
     """
     return int(value.to_integral_value(rounding=ROUND_HALF_UP))
 
