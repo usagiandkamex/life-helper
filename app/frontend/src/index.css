@@ -243,6 +243,9 @@ details.hint p { margin: 0.25rem 0 0; }
 .conversations li:hover { background: var(--md-surface-container); }
 .conversations li.active { background: var(--md-secondary-container); color: var(--md-on-secondary-container); }
 .conversations .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; color: inherit; font-weight: 400; }
+.conversations li.unread .title { font-weight: 700; }
+.conversations .thread-date { display: block; color: var(--md-on-surface-variant); font-weight: 400; font-size: 0.75rem; }
+.unread-dot { color: var(--md-primary); font-size: 0.6rem; align-self: center; }
 .thread { flex: 1; display: flex; flex-direction: column; background: var(--md-surface); border-radius: var(--md-shape-l); min-width: 0; box-shadow: var(--md-elevation-1); }
 .thread-toolbar { display: flex; gap: 0.75rem; align-items: center; padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--md-outline-variant); }
 .messages { flex: 1; overflow: auto; padding: 1rem; display: flex; flex-direction: column; gap: 0.75rem; }
@@ -251,6 +254,16 @@ details.hint p { margin: 0.25rem 0 0; }
 .msg.assistant { max-width: 100%; }
 .msg.tool, .msg.file-write { font-size: 0.8rem; color: var(--muted); }
 .msg.file-write summary { color: var(--ok); }
+.msg.approval { font-size: 0.85rem; }
+.msg.approval.pending { border: 1px solid var(--warn); background: #fffbeb; border-radius: 8px; padding: 0.6rem 0.75rem; }
+.msg.approval.pending .diff { background: #fff; }
+.msg.approval:not(.pending) { color: var(--muted); font-size: 0.8rem; }
+.msg.approval.approved summary { color: var(--ok); }
+.approval-title { margin: 0 0 0.4rem; }
+.approval-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.5rem; }
+.diff .add { color: var(--ok); background: #f0fdf4; }
+.diff .del { color: var(--danger); background: #fef2f2; }
+.diff .meta { color: var(--muted); }
 .cursor { animation: blink 1s steps(2) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 .markdown table { margin: 0.5rem 0; }
@@ -259,8 +272,22 @@ details.hint p { margin: 0.25rem 0 0; }
 .composer { border-top: 1px solid var(--md-outline-variant); padding: 0.75rem; display: flex; flex-direction: column; gap: 0.5rem; }
 .composer textarea { max-height: calc(5 * 1.6em + 0.8rem + 2px); max-height: calc(5lh + 0.8rem + 2px); overflow-y: auto; resize: none; border-radius: var(--md-shape-l); }
 .composer-actions { display: flex; justify-content: space-between; gap: 0.5rem; }
+.composer.readonly { background: #f9fafb; border-radius: 0 0 10px 10px; }
+.run-transcript { display: flex; flex-direction: column; gap: 0.75rem; padding-bottom: 0.75rem; border-bottom: 1px dashed var(--border); }
+.run-heading { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; font-size: 0.8rem; color: var(--muted); }
+.run-status { padding: 0 0.4rem; border-radius: 999px; background: #f3f4f6; }
+.run-status.success { color: var(--ok); background: #f0fdf4; }
+.run-status.error, .run-status.timeout, .run-status.reauth { color: var(--danger); background: #fef2f2; }
+.run-status.skipped_limit { color: var(--warn); background: #fffbeb; }
+.run-report { border-left: 3px solid var(--primary); background: #f8fafc; padding: 0.5rem 0.75rem; border-radius: 0 6px 6px 0; }
+.run-report small { color: var(--muted); }
+.run-transcript .banner.warn { margin: 0; border-radius: 6px; }
+.load-more { align-self: center; }
+.msg-note { align-self: center; }
 .chart { margin: 0.5rem 0; }
 .chart figcaption { font-size: 0.85rem; color: var(--muted); }
+.screenshot { margin: 0.5rem 0; }
+.screenshot img { display: block; max-width: 100%; max-height: 480px; border: 1px solid var(--border); border-radius: 6px; }
 .mobile-only { display: none; }
 
 @media (max-width: 760px) {

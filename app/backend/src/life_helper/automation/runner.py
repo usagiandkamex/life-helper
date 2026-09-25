@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 KEPT_EVENT_TYPES = ("message", "tool_start", "tool_end", "file_write", "error")
 MAX_EVENTS = 200
+TRANSCRIPT_VERSION = 1
 REPORT_REMINDER = "\n\n（最後に必ず report_result ツールを呼び、要約と、利用者に通知すべきかを報告してください。）"
 REPORT_FOLLOW_UP = (
     "report_result ツールを呼んで、今回の結果の要約と、利用者に通知すべきか（notify）を報告してください。"
@@ -63,6 +64,17 @@ class RunContext:
             for key, value in data["signal"].items():
                 if isinstance(value, (int, float)) and not isinstance(value, bool):
                     self.signals[key] = float(value)
+
+
+def trim_events(events: list[dict], limit: int = MAX_EVENTS) -> tuple[list[dict], int]:
+    """Keeps the last ``limit`` events and returns how many were dropped. A dropped follow-up marker is kept, so the
+    answers after it are never read as part of the first answer."""
+    if len(events) <= limit:
+        return list(events), 0
+    dropped, kept = events[:-limit], events[-limit:]
+    markers = [e for e in dropped if e.get("type") == "follow_up"][-limit:]
+    trimmed = markers + kept[len(markers) :]
+    return trimmed, len(events) - len(trimmed)
 
 
 def build_notifier(ctx: AppContext) -> GitHubNotifier:
@@ -129,6 +141,19 @@ class AutomationRunner:
             "started_at": now.isoformat(),
             "read": False,
             "notified": False,
+            # Records carrying these fields are replayed as a conversation in the chat (older ones are not).
+            "transcript_version": TRANSCRIPT_VERSION,
+            "conversation_mode": automation.conversation_mode,
+            "prompt": self._sanitize(expand_prompt(automation.prompt, now)),
+            # Overwritten when Copilot runs; kept for runs that stop before it, so every such record has one shape.
+            "error": None,
+            "final_message": "",
+            "report": None,
+            "signals": {},
+            "events": [],
+            "events_omitted": 0,
+            "attempts": 0,
+            "requests": 0,
         }
         missing = [
             c
@@ -136,7 +161,10 @@ class AutomationRunner:
             if not get_connectors(self.ctx).get(c) or not get_connectors(self.ctx)[c].configured
         ]
         if missing:
-            record |= {"status": "error", "summary": f"コネクタの API キーが登録されていません: {', '.join(missing)}"}
+            record |= {
+                "status": "error",
+                "summary": f"使えないコネクタがあります（API キーが未登録か、機能が無効）: {', '.join(missing)}",
+            }
             await self._notify_failure(automation, record)
             return self._finish(automation, record, condition_met=None)
         if not await self._token_valid():
@@ -156,8 +184,10 @@ class AutomationRunner:
         deadline = loop.time() + automation.max_runtime_minutes * 60
         run_ctx = RunContext()
         status, error = "error", None
+        attempts = 0
         for attempt in range(2):
             run_ctx = RunContext()
+            attempts = attempt + 1
             try:
                 await self._run_session(automation, run_ctx, f"{run_id}-{attempt}", now, deadline)
                 status, error = "success", None
@@ -181,6 +211,7 @@ class AutomationRunner:
 
         final_message = next((e["content"] for e in reversed(run_ctx.events) if e["type"] == "message"), "")
         summary = (run_ctx.report or {}).get("summary") or final_message[:2000] or error or ""
+        events, omitted = trim_events(run_ctx.events)
         record |= self._sanitize(
             {
                 "status": status,
@@ -189,7 +220,9 @@ class AutomationRunner:
                 "final_message": final_message,
                 "report": run_ctx.report,
                 "signals": run_ctx.signals,
-                "events": run_ctx.events[-MAX_EVENTS:],
+                "events": events,
+                "events_omitted": omitted,
+                "attempts": attempts,
                 "requests": run_ctx.requests,
             }
         )
@@ -281,6 +314,7 @@ class AutomationRunner:
             remaining = deadline - loop.time()
             if run_ctx.report is None and needs_report and remaining > 30:
                 # The notify decision depends on the report, so ask once more within the same session.
+                run_ctx.events.append({"type": "follow_up"})
                 await asyncio.wait_for(active.session.send_and_wait(REPORT_FOLLOW_UP, timeout=remaining), remaining)
         except TimeoutError:
             try:
@@ -290,7 +324,7 @@ class AutomationRunner:
             raise
         finally:
             unsubscribe()
-            active.policy.release_all()
+            await active.release()
             # Always close: report_result is bound to this run's context, so a cached session would report into a
             # previous run. "continue" mode resumes the stored history from disk next time; "new" mode sessions are
             # deleted so per-run session state does not pile up on the volume.

@@ -6,6 +6,7 @@
 # バックエンド（http://localhost:8000）
 cd app/backend
 uv sync
+uv run playwright install --only-shell chromium   # ブラウザツール用（初回だけ。使わないなら $env:LH_BROWSER_ENABLED = "false"）
 $env:LH_ENVIRONMENT = "development"
 $env:LH_DATA_DIR = "../../.data"
 $env:LH_STATIC_DIR = "../frontend/dist"
@@ -33,6 +34,8 @@ Docker で動かす場合は、`.env.example` を `.env` にコピーして `doc
 | オートメーションを 1 回実行 | `cd app/backend; uv run life-helper-job`（Docker なら `docker compose run --rm job`） |
 
 PR を作ると同じ内容を CI が実行します（[branching.md](branching.md)）。
+
+テストは名前解決を差し替えるため、外部には接続しません。実際の Chromium を使うテストは、Chromium が入っていないと自動でスキップします（CI では実行されません）。
 
 ## パッケージのミラーを使う場合
 

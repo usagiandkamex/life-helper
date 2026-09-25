@@ -39,7 +39,8 @@ class Settings(BaseSettings):
     default_model: str = "auto"
     utility_model: str = "gpt-5-mini"
 
-    extra_fetch_domains: str = ""
+    # Headless Chromium tools (browser_*). Turn off to save memory or when Chromium is not installed.
+    browser_enabled: bool = True
 
     # External API connectors (values come from ACA secrets; never stored in files).
     rakuten_application_id: SecretStr = SecretStr("")
@@ -109,24 +110,6 @@ class Settings(BaseSettings):
     def copilot_workdir(self) -> Path:
         # Kept empty on purpose: the CLI process never starts inside the app source tree.
         return self.data_dir / "copilot-workdir"
-
-    @property
-    def fetch_domains(self) -> list[str]:
-        base = [
-            "go.jp",
-            "lg.jp",
-            "toushin.or.jp",
-            "am.mufg.jp",
-            "nikkoam.com",
-            "global-am.co.jp",
-            "sbiokasan-am.co.jp",
-            "rakuten-toushin.co.jp",
-            "nomura-am.co.jp",
-            "daiwa-am.co.jp",
-            "fidelity.co.jp",
-        ]
-        extra = [d.strip().lower() for d in self.extra_fetch_domains.split(",") if d.strip()]
-        return base + extra
 
     def secret_values(self) -> list[str]:
         """All secret values that must never appear in tool results or logs."""

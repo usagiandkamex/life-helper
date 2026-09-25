@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -14,9 +16,11 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from pydantic import SecretStr, ValidationError
 
+from life_helper.automation import chat
+from life_helper.automation import store as store_module
 from life_helper.automation.locks import FileLock
 from life_helper.automation.models import Automation, NotifySettings, Schedule, expand_prompt
-from life_helper.automation.runner import AutomationRunner
+from life_helper.automation.runner import AutomationRunner, trim_events
 from life_helper.automation.store import AutomationStore
 from life_helper.copilot_integration.manager import ActiveSession, NoTokenError
 
@@ -106,9 +110,6 @@ def test_store_roundtrip(tmp_path):
 
 class FakePolicy:
     on_tool_result = None
-
-    def release_all(self):
-        return None
 
 
 class FakeAutoSession:
@@ -496,3 +497,383 @@ def test_automation_api_rejects_secrets(client, ctx):
     body = {"name": "x", "prompt": "キーは rakuten-access-key-987654", "schedule": {"kind": "daily", "time": "09:00"}}
     resp = client.post("/api/automations", json=body, headers={"x-csrf-token": csrf})
     assert resp.status_code == 422 and resp.json()["detail"]["code"] == "secret"
+
+
+# -- chat view of finished runs (issue #31) ----------------------------------------------------------------
+
+
+def _chat_record(automation_id: str, run_id: str, *, mode: str = "new", minute: int = 0, **extra) -> dict:
+    started = datetime(2026, 9, 25, 0, 0, tzinfo=UTC) + timedelta(minutes=minute)
+    return {
+        "id": run_id,
+        "automation_id": automation_id,
+        "name": "定期チェック",
+        "started_at": started.isoformat(),
+        "finished_at": (started + timedelta(seconds=30)).isoformat(),
+        "read": False,
+        "notified": False,
+        "transcript_version": 1,
+        "conversation_mode": mode,
+        "prompt": "確認して",
+        "status": "success",
+        "summary": "要約",
+        "events": [{"type": "message", "content": "確認しました"}],
+    } | extra
+
+
+async def test_run_record_carries_a_transcript(auto_env):
+    ctx, runner, manager = auto_env
+    a = ctx.automations.upsert(Automation(name="毎朝", prompt="{{today}} の予定", conversation_mode="continue"))
+    record = await runner.run(a.id, now=datetime(2026, 9, 25, 0, 0, tzinfo=UTC))
+    assert record["transcript_version"] == 1 and record["conversation_mode"] == "continue"
+    assert record["prompt"] == "2026-09-25 の予定"  # expanded, without the report reminder sent to Copilot
+    assert "report_result" in manager.prompts[0]
+    assert record["attempts"] == 1 and record["events_omitted"] == 0
+    assert [e["type"] for e in record["events"]] == ["message"]
+
+
+async def test_runs_that_did_not_start_are_still_part_of_the_conversation(auto_env, settings):
+    ctx, runner, manager = auto_env
+    a = ctx.automations.upsert(Automation(name="楽天", prompt="空室は？", connectors=["rakuten_travel"]))
+    missing = await runner.run(a.id)
+    assert missing["status"] == "error" and missing["prompt"] == "空室は？" and missing["transcript_version"] == 1
+    settings.automation_monthly_run_limit = 0
+    b = ctx.automations.upsert(Automation(name="x", prompt="y"))
+    skipped = await runner.run(b.id)
+    assert skipped["status"] == "skipped_limit" and skipped["prompt"] == "y"
+    ctx.vault.clear()
+    c = ctx.automations.upsert(Automation(name="z", prompt="z"))
+    reauth = await runner.run(c.id)
+    assert reauth["status"] == "reauth" and manager.prompts == []
+    shape = {"events": [], "events_omitted": 0, "attempts": 0, "requests": 0, "report": None, "final_message": ""}
+    for record in (missing, skipped, reauth):
+        assert {k: record[k] for k in shape} == shape  # one shape for every transcript-bearing record
+    ids = {t["id"] for t in chat.list_threads(ctx.automations)}
+    assert {f"r-{a.id}-{missing['id']}", f"r-{b.id}-{skipped['id']}", f"r-{c.id}-{reauth['id']}"} <= ids
+
+
+async def test_run_prompt_is_sanitized(auto_env):
+    ctx, runner, manager = auto_env
+    # The API refuses such prompts; one that still reaches the file is masked in the record.
+    a = ctx.automations.upsert(Automation(name="x", prompt="口座番号: 1234567 を確認"))
+    record = await runner.run(a.id)
+    assert "1234567" not in record["prompt"]
+
+
+@respx.mock
+async def test_follow_up_request_is_marked_in_the_transcript(auto_env):
+    ctx, runner, manager = auto_env
+    _mock_github()
+    manager.report_on_call = 2
+    a = ctx.automations.upsert(Automation(name="x", prompt="y", notify=NotifySettings(github=True, condition="report")))
+    record = await runner.run(a.id)
+    assert [e["type"] for e in record["events"]] == ["message", "follow_up", "message"]
+
+
+def test_trim_events_keeps_the_follow_up_marker():
+    events = [{"type": "message", "content": str(i)} for i in range(5)] + [{"type": "follow_up"}]
+    events += [{"type": "tool_start", "id": str(i)} for i in range(300)]
+    trimmed, omitted = trim_events(events, 200)
+    assert len(trimmed) == 200 and omitted == 106
+    assert trimmed[0] == {"type": "follow_up"} and trimmed[-1] == {"type": "tool_start", "id": "299"}
+    assert trim_events(events[:10], 200) == (events[:10], 0)
+
+
+async def test_chat_threads_follow_the_conversation_setting(auto_env):
+    ctx, runner, manager = auto_env
+    new = ctx.automations.upsert(Automation(name="毎回", prompt="y"))
+    cont = ctx.automations.upsert(Automation(name="続ける", prompt="y", conversation_mode="continue"))
+    first = await runner.run(new.id, now=datetime(2026, 9, 25, 0, 0, tzinfo=UTC))
+    second = await runner.run(new.id, now=datetime(2026, 9, 25, 1, 0, tzinfo=UTC))
+    c1 = await runner.run(cont.id, now=datetime(2026, 9, 25, 2, 0, tzinfo=UTC))
+    c2 = await runner.run(cont.id, now=datetime(2026, 9, 25, 3, 0, tzinfo=UTC))
+    # Records from before transcripts existed are left to the automations page.
+    ctx.automations.save_run({"id": "0dd0000000000001", "automation_id": new.id, "started_at": "2026-09-01"})
+    ctx.automations.save_run(_chat_record(new.id, "0ab0000000000001") | {"transcript_version": None})
+
+    threads = chat.list_threads(ctx.automations)
+    by_id = {t["id"]: t for t in threads}
+    assert set(by_id) == {f"r-{new.id}-{first['id']}", f"r-{new.id}-{second['id']}", f"c-{cont.id}"}
+    assert by_id[f"c-{cont.id}"]["run_count"] == 2 and by_id[f"c-{cont.id}"]["latest_run_id"] == c2["id"]
+    assert by_id[f"c-{cont.id}"]["title"] == "続ける" and by_id[f"c-{cont.id}"]["unread"] is True
+    assert threads[0]["id"] == f"c-{cont.id}"  # most recently updated first
+
+    detail = chat.get_thread(ctx.automations, f"c-{cont.id}")
+    assert [r["id"] for r in detail["runs"]] == [c1["id"], c2["id"]]  # oldest first
+    assert detail["has_more"] is False and detail["has_newer"] is False
+
+    # Renaming follows the automation; a deleted automation keeps its conversations under the recorded name.
+    ctx.automations.upsert(cont.model_copy(update={"name": "改名"}))
+    assert chat.get_thread(ctx.automations, f"c-{cont.id}")["thread"]["title"] == "改名"
+    ctx.automations.delete(cont.id)
+    assert chat.get_thread(ctx.automations, f"c-{cont.id}")["thread"]["title"] == "続ける"
+
+
+async def test_switching_the_conversation_setting_keeps_each_run_where_it_ran(auto_env):
+    ctx, runner, manager = auto_env
+    a = ctx.automations.upsert(Automation(name="x", prompt="y", conversation_mode="continue"))
+    c1 = await runner.run(a.id, now=datetime(2026, 9, 25, 0, 0, tzinfo=UTC))
+    ctx.automations.upsert(ctx.automations.get(a.id).model_copy(update={"conversation_mode": "new"}))
+    n1 = await runner.run(a.id, now=datetime(2026, 9, 25, 1, 0, tzinfo=UTC))
+    ids = {t["id"] for t in chat.list_threads(ctx.automations)}
+    assert ids == {f"c-{a.id}", f"r-{a.id}-{n1['id']}"}
+    assert [r["id"] for r in chat.get_thread(ctx.automations, f"c-{a.id}")["runs"]] == [c1["id"]]
+
+
+def test_hidden_continue_thread_comes_back_with_its_whole_history(tmp_path):
+    store = AutomationStore(tmp_path)
+    store.save_run(_chat_record("aaaaaa000001", "a000000000000001", mode="continue", minute=0))
+    store.save_run(_chat_record("aaaaaa000001", "a000000000000002", mode="continue", minute=1))
+    assert chat.hide_thread(store, "c-aaaaaa000001", "a000000000000002")
+    assert chat.list_threads(store) == []
+
+    store.save_run(_chat_record("aaaaaa000001", "a000000000000003", mode="continue", minute=2))
+    [thread] = chat.list_threads(store)
+    assert thread["id"] == "c-aaaaaa000001" and thread["run_count"] == 3
+    runs = chat.get_thread(store, "c-aaaaaa000001")["runs"]
+    assert [r["id"] for r in runs] == ["a000000000000001", "a000000000000002", "a000000000000003"]
+
+    # Hiding with the run the user saw, while a newer one arrived meanwhile, does not hide the newer one.
+    store.save_run(_chat_record("aaaaaa000001", "a000000000000004", mode="continue", minute=3))
+    assert chat.hide_thread(store, "c-aaaaaa000001", "a000000000000003")
+    assert [t["id"] for t in chat.list_threads(store)] == ["c-aaaaaa000001"]
+    assert not chat.hide_thread(store, "c-aaaaaa000001", "b000000000000009")  # not part of the conversation
+    # Hiding never rewrites the run records.
+    assert "hidden" not in json.dumps(store.list_runs(limit=None))
+
+
+def test_hidden_new_thread_can_still_be_opened(tmp_path):
+    store = AutomationStore(tmp_path)
+    store.save_run(_chat_record("aaaaaa000001", "a000000000000001"))
+    assert chat.hide_thread(store, "r-aaaaaa000001-a000000000000001", "a000000000000001")
+    assert chat.list_threads(store) == []
+    assert chat.get_thread(store, "r-aaaaaa000001-a000000000000001")["runs"][0]["id"] == "a000000000000001"
+    assert len(store.list_runs()) == 1  # the automations page keeps the run
+
+
+def test_mark_thread_read_only_marks_the_runs_that_were_shown(tmp_path):
+    store = AutomationStore(tmp_path)
+    store.save_run(_chat_record("aaaaaa000001", "a000000000000001", mode="continue", minute=0))
+    store.save_run(_chat_record("aaaaaa000001", "a000000000000002", mode="continue", minute=1))
+    store.save_run(_chat_record("bbbbbb000001", "b000000000000001", minute=2))
+    chat.mark_thread_read(store, "c-aaaaaa000001", ["a000000000000001", "b000000000000001", "../x"])
+    assert store.get_run("aaaaaa000001", "a000000000000001")["read"] is True
+    assert store.get_run("aaaaaa000001", "a000000000000002")["read"] is False
+    assert store.get_run("bbbbbb000001", "b000000000000001")["read"] is False  # other conversation
+
+
+@pytest.mark.parametrize("anchored", [False, True])
+def test_mark_thread_read_batches_index_updates(tmp_path, anchored):
+    store = AutomationStore(tmp_path)
+    automation_id = "aaaaaa000001"
+    thread_id = f"c-{automation_id}"
+    ids = [f"a{i:015x}" for i in range(chat.ANCHOR_LIMIT + 2)]
+    for i, run_id in enumerate(ids):
+        store.save_run(_chat_record(automation_id, run_id, mode="continue", minute=i))
+    page = chat.get_thread(store, thread_id, anchor=ids[1] if anchored else None)
+    shown_ids = [r["id"] for r in page["runs"]]
+    assert len(shown_ids) == (chat.ANCHOR_LIMIT if anchored else chat.PAGE_SIZE)
+    store.mark_read(automation_id, shown_ids[0])
+    store.save_run(_chat_record(automation_id, "ffffffffffffffff", mode="continue", minute=len(ids)))
+    store.save_run(_chat_record(automation_id, "eeeeeeeeeeeeeeee"))
+    with (
+        patch.object(store, "_read_run_index", wraps=store._read_run_index) as index_reads,
+        patch.object(store_module, "atomic_write", wraps=store_module.atomic_write) as writes,
+    ):
+        assert chat.mark_thread_read(
+            store, thread_id, shown_ids + [shown_ids[-1], "eeeeeeeeeeeeeeee", "dddddddddddddddd", "../x"]
+        )
+        assert index_reads.call_count == 2  # thread metadata lookup and the single batched update
+        paths = [call.args[0] for call in writes.call_args_list]
+        assert paths.count(store.run_index_path) == 1
+        assert len(paths) == len(shown_ids)  # already-read and duplicate records are not rewritten
+
+        writes.reset_mock()
+        assert chat.mark_thread_read(store, thread_id, shown_ids)
+        assert chat.mark_thread_read(store, thread_id, [])
+        assert not chat.mark_thread_read(store, "c-bbbbbb000001", shown_ids)
+        writes.assert_not_called()
+
+    for meta in store.list_run_meta():
+        record = store.get_run(automation_id, meta["id"])
+        assert meta["read"] is (meta["id"] in shown_ids)
+        assert record["read"] == meta["read"]
+        assert record["events"] == [{"type": "message", "content": "確認しました"}]
+    assert store.unread_count() == len(ids) + 2 - len(shown_ids)
+
+
+def test_thread_paging_and_anchor(tmp_path, monkeypatch):
+    store = AutomationStore(tmp_path)
+    ids = [f"a{i:015x}" for i in range(25)]
+    for i, run_id in enumerate(ids):
+        store.save_run(_chat_record("aaaaaa000001", run_id, mode="continue", minute=i))
+    latest = chat.get_thread(store, "c-aaaaaa000001")
+    assert [r["id"] for r in latest["runs"]] == ids[5:] and latest["has_more"] is True
+    older = chat.get_thread(store, "c-aaaaaa000001", before=ids[5])
+    assert [r["id"] for r in older["runs"]] == ids[:5] and older["has_more"] is False
+    anchored = chat.get_thread(store, "c-aaaaaa000001", anchor=ids[2])
+    assert anchored["runs"][0]["id"] == ids[2] and anchored["has_more"] is True and anchored["has_newer"] is False
+    monkeypatch.setattr(chat, "ANCHOR_LIMIT", 5)
+    anchored = chat.get_thread(store, "c-aaaaaa000001", anchor=ids[2])
+    assert [r["id"] for r in anchored["runs"]] == ids[2:7] and anchored["has_newer"] is True
+    with pytest.raises(ValueError):
+        chat.get_thread(store, "c-aaaaaa000001", before="ffffffffffffffff")
+    with pytest.raises(ValueError):
+        chat.get_thread(store, "c-aaaaaa000001", anchor="ffffffffffffffff")  # a stale link must not show another run
+    with pytest.raises(ValueError):
+        chat.get_thread(store, "c-aaaaaa000001", before=ids[5], anchor=ids[2])
+    assert chat.get_thread(store, "c-cccccc000001") is None
+
+
+def test_runs_with_equal_start_times_have_a_stable_order(tmp_path):
+    store = AutomationStore(tmp_path)
+    # Written in reverse id order with identical timestamps: the latest run is still decided by id.
+    for run_id in ("a000000000000003", "a000000000000001", "a000000000000002"):
+        store.save_run(_chat_record("aaaaaa000001", run_id, mode="continue"))
+    [thread] = chat.list_threads(store)
+    assert thread["latest_run_id"] == "a000000000000003"
+    runs = chat.get_thread(store, "c-aaaaaa000001")["runs"]
+    assert [r["id"] for r in runs] == ["a000000000000001", "a000000000000002", "a000000000000003"]
+    assert chat.hide_thread(store, "c-aaaaaa000001", "a000000000000003")
+    assert chat.list_threads(store) == []
+
+
+def test_every_conversation_is_listed_beyond_the_run_history_limit(tmp_path):
+    store = AutomationStore(tmp_path)
+    for i in range(60):
+        store.save_run(_chat_record("aaaaaa000001", f"a{i:015x}", minute=i))
+    assert len(store.list_runs()) == 50  # the automations page shows the latest 50
+    assert len(chat.list_threads(store)) == 60
+
+
+def _watch_run_reads(monkeypatch, store: AutomationStore) -> list[str]:
+    """Collects the ids of the run records that are opened from here on."""
+    reads: list[str] = []
+    original = Path.read_text
+
+    def spy(self: Path, *args, **kwargs):
+        if self.is_relative_to(store.runs_dir):
+            reads.append(self.stem)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", spy)
+    return reads
+
+
+def test_listing_conversations_does_not_open_the_transcripts(tmp_path, monkeypatch):
+    store = AutomationStore(tmp_path)
+    for i in range(3):
+        store.save_run(_chat_record("aaaaaa000001", f"a{i:015x}", mode="continue", minute=i))
+    reads = _watch_run_reads(monkeypatch, store)
+    [thread] = chat.list_threads(store)
+    assert thread["run_count"] == 3 and thread["unread"] is True
+    assert reads == []  # the metadata index answers the list
+
+    # A record written before the index existed is read once and remembered.
+    legacy = _chat_record("aaaaaa000001", "a00000000000009", mode="continue", minute=9)
+    (store.runs_dir / "aaaaaa000001" / "a00000000000009.json").write_text(json.dumps(legacy), encoding="utf-8")
+    assert chat.list_threads(store)[0]["run_count"] == 4
+    assert reads == ["a00000000000009"]
+    reads.clear()
+    assert chat.list_threads(store)[0]["run_count"] == 4
+    assert reads == []
+
+
+def test_stale_and_lost_index_entries_are_repaired_from_the_records(tmp_path, monkeypatch):
+    store = AutomationStore(tmp_path)
+    store.save_run(_chat_record("aaaaaa000001", "a000000000000001", mode="continue", minute=0))
+    store.save_run(_chat_record("aaaaaa000001", "a000000000000002", mode="continue", minute=1))
+
+    # A record changed behind the index's back (or saved while the index could not be written) is picked up again.
+    monkeypatch.setattr(AutomationStore, "_with_lock", lambda *a, **k: (_ for _ in ()).throw(TimeoutError("busy")))
+    store.save_run(_chat_record("aaaaaa000001", "a000000000000002", mode="continue", minute=1, read=True))
+    monkeypatch.undo()
+    assert store.unread_count() == 1
+    assert chat.list_threads(store)[0]["unread"] is True
+
+    store.run_index_path.write_text("{ broken", encoding="utf-8")
+    assert [t["run_count"] for t in chat.list_threads(store)] == [2]
+
+    # Entries of removed records do not pile up in the index, and a scan of one automation keeps the others.
+    store.save_run(_chat_record("bbbbbb000001", "b000000000000001", minute=2))
+    (store.runs_dir / "aaaaaa000001" / "a000000000000001.json").unlink()
+    assert [m["id"] for m in store.list_run_meta("aaaaaa000001")] == ["a000000000000002"]
+    assert sorted(json.loads(store.run_index_path.read_text(encoding="utf-8"))["runs"]) == [
+        "aaaaaa000001/a000000000000002",
+        "bbbbbb000001/b000000000000001",
+    ]
+
+
+def test_a_conversation_page_only_opens_the_runs_it_shows(tmp_path, monkeypatch):
+    store = AutomationStore(tmp_path)
+    ids = [f"a{i:015x}" for i in range(25)]
+    for i, run_id in enumerate(ids):
+        store.save_run(_chat_record("aaaaaa000001", run_id, mode="continue", minute=i))
+    reads = _watch_run_reads(monkeypatch, store)
+    page = chat.get_thread(store, "c-aaaaaa000001")
+    assert [r["id"] for r in page["runs"]] == ids[5:] and page["thread"]["run_count"] == 25
+    assert reads == ids[5:]
+    reads.clear()
+    assert [r["id"] for r in store.list_runs(limit=3)] == ids[:-4:-1]  # the run history loads only what it returns
+    assert reads == ids[:-4:-1]
+
+
+@pytest.mark.parametrize(
+    "thread_id",
+    ["x", "c-", "c-../etc", "r-aaaaaa000001", "c-aaaaaa000001-a000000000000001", "C-AAAAAA000001", "c-aaaaaa000001\n"],
+)
+def test_invalid_thread_ids_are_rejected(thread_id):
+    with pytest.raises(ValueError):
+        chat.parse_thread_id(thread_id)
+
+
+def test_chat_api(client, ctx):
+    assert client.get("/api/automations/chat").status_code == 401
+    csrf = sign_in(client, ctx)
+    h = {"x-csrf-token": csrf}
+    store = ctx.automations
+    store.save_run(_chat_record("aaaaaa000001", "a000000000000001", mode="continue", minute=0))
+    store.save_run(_chat_record("aaaaaa000001", "a000000000000002", mode="continue", minute=1))
+    store.save_run(_chat_record("bbbbbb000001", "b000000000000001", minute=2))
+
+    threads = client.get("/api/automations/chat").json()
+    assert [t["id"] for t in threads] == ["r-bbbbbb000001-b000000000000001", "c-aaaaaa000001"]
+    assert all("events" not in t for t in threads)
+    detail = client.get("/api/automations/chat/c-aaaaaa000001").json()
+    assert [r["id"] for r in detail["runs"]] == ["a000000000000001", "a000000000000002"]
+    assert detail["runs"][0]["events"][0]["content"] == "確認しました" and detail["runs"][0]["prompt"] == "確認して"
+    assert client.get("/api/automations/chat/c-aaaaaa000001?anchor=a000000000000002").json()["runs"][0]["id"] == (
+        "a000000000000002"
+    )
+    assert client.get("/api/automations/chat/c-aaaaaa000001?before=ffffffffffffffff").status_code == 400
+    assert client.get("/api/automations/chat/c-aaaaaa000001?anchor=ffffffffffffffff").status_code == 400
+    assert client.get(f"/api/automations/chat/c-aaaaaa000001?anchor={'a' * 500}").status_code == 422
+    assert client.get("/api/automations/chat/bad..id").status_code == 400
+    assert client.get("/api/automations/chat/c-cccccc000001").status_code == 404
+
+    body = {"run_ids": ["a000000000000001", "a000000000000002"]}
+    assert client.post("/api/automations/chat/c-aaaaaa000001/read", json=body).status_code == 403  # no CSRF
+    assert client.post("/api/automations/chat/c-cccccc000001/read", json=body, headers=h).status_code == 404
+    too_long = {"run_ids": ["a" * 500]}
+    assert client.post("/api/automations/chat/c-aaaaaa000001/read", json=too_long, headers=h).status_code == 422
+    too_many = {"run_ids": ["a000000000000001"] * 101}
+    assert client.post("/api/automations/chat/c-aaaaaa000001/read", json=too_many, headers=h).status_code == 422
+    read = client.post("/api/automations/chat/c-aaaaaa000001/read", json=body, headers=h).json()
+    assert read["unread"] == 1 and client.get("/api/automations").json()["unread"] == 1
+
+    hide = {"run_id": "b000000000000001"}
+    assert client.post("/api/automations/chat/r-bbbbbb000001-b000000000000001/hide", json=hide).status_code == 403
+    assert client.post("/api/automations/chat/c-aaaaaa000001/hide", json=hide, headers=h).status_code == 404
+    bad_hide = {"run_id": "../../x"}
+    assert client.post("/api/automations/chat/c-aaaaaa000001/hide", json=bad_hide, headers=h).status_code == 422
+    assert (
+        client.post("/api/automations/chat/r-bbbbbb000001-b000000000000001/hide", json=hide, headers=h).status_code
+        == 200
+    )
+    assert [t["id"] for t in client.get("/api/automations/chat").json()] == ["c-aaaaaa000001"]
+    assert len(client.get("/api/automations/runs").json()) == 3  # the run history keeps hidden runs
+
+    run = client.get("/api/automations/bbbbbb000001/runs/b000000000000001").json()
+    assert run["chat_thread_id"] == "r-bbbbbb000001-b000000000000001"
+    store.save_run({"id": "0dd0000000000001", "automation_id": "bbbbbb000001", "started_at": "2026-09-01"})
+    assert client.get("/api/automations/bbbbbb000001/runs/0dd0000000000001").json()["chat_thread_id"] is None

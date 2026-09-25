@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field, field_validator
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field, StringConstraints, field_validator
 
 from ..auth import CurrentUser, require_user
 from ..connectors.registry import get_connectors
 from ..context import AppContext, get_ctx
 from ..security import SENSITIVE_LABELS, detect_sensitive
+from . import chat
 from .models import Automation, AutomationState, NotifySettings, Schedule, normalize_connectors
 from .runner import AutomationRunner, build_notifier
 from .store import AutomationStore
@@ -37,6 +38,17 @@ class AutomationBody(BaseModel):
     def _connectors(cls, v: list[str]) -> list[str]:
         # An automation opened before a connector was renamed is sent back with the old name.
         return normalize_connectors(v)
+
+
+RunId = Annotated[str, StringConstraints(pattern=chat.RUN_ID_PATTERN)]
+
+
+class ReadBody(BaseModel):
+    run_ids: list[RunId] = Field(max_length=chat.ANCHOR_LIMIT)
+
+
+class HideBody(BaseModel):
+    run_id: RunId
 
 
 def _store(ctx: AppContext) -> AutomationStore:
@@ -106,6 +118,60 @@ def create_automation(
     return _view(ctx, _store(ctx).upsert(automation))
 
 
+# -- chat view of finished runs (declared before the /{automation_id} routes) ----------------------------
+
+
+def _parse_thread(thread_id: str) -> None:
+    try:
+        chat.parse_thread_id(thread_id)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
+
+
+@router.get("/chat")
+def list_chat_threads(user: CurrentUser = Depends(require_user), ctx: AppContext = Depends(get_ctx)) -> list[dict]:
+    return chat.list_threads(_store(ctx))
+
+
+@router.get("/chat/{thread_id}")
+def get_chat_thread(
+    thread_id: str,
+    before: Annotated[str | None, Query(pattern=chat.RUN_ID_PATTERN)] = None,
+    anchor: Annotated[str | None, Query(pattern=chat.RUN_ID_PATTERN)] = None,
+    user: CurrentUser = Depends(require_user),
+    ctx: AppContext = Depends(get_ctx),
+) -> dict:
+    _parse_thread(thread_id)
+    try:
+        thread = chat.get_thread(_store(ctx), thread_id, before=before, anchor=anchor)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
+    if thread is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "conversation not found")
+    return thread
+
+
+@router.post("/chat/{thread_id}/read")
+def read_chat_thread(
+    thread_id: str, body: ReadBody, user: CurrentUser = Depends(require_user), ctx: AppContext = Depends(get_ctx)
+) -> dict:
+    _parse_thread(thread_id)
+    store = _store(ctx)
+    if not chat.mark_thread_read(store, thread_id, body.run_ids):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "conversation not found")
+    return {"ok": True, "unread": store.unread_count()}
+
+
+@router.post("/chat/{thread_id}/hide")
+def hide_chat_thread(
+    thread_id: str, body: HideBody, user: CurrentUser = Depends(require_user), ctx: AppContext = Depends(get_ctx)
+) -> dict:
+    _parse_thread(thread_id)
+    if not chat.hide_thread(_store(ctx), thread_id, body.run_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "run not found in this conversation")
+    return {"ok": True}
+
+
 @router.put("/{automation_id}")
 def update_automation(
     automation_id: str,
@@ -153,7 +219,7 @@ def get_run(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
     if record is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "run not found")
-    return record
+    return record | {"chat_thread_id": chat.thread_id_for(record)}
 
 
 @router.post("/{automation_id}/runs/{run_id}/read")

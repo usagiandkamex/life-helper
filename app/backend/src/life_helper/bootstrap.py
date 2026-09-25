@@ -49,6 +49,9 @@ def init_chat(ctx: AppContext) -> None:
 async def start_services(ctx: AppContext) -> None:
     init_core(ctx)
     init_chat(ctx)
+    from .browser.service import prune_screenshots, screenshot_dir
+
+    prune_screenshots(screenshot_dir(ctx.settings))
 
 
 async def shutdown_services(ctx: AppContext) -> None:
@@ -61,10 +64,14 @@ async def shutdown_services(ctx: AppContext) -> None:
         await ctx.turns.shutdown()
     if ctx.copilot is not None:
         await ctx.copilot.reset()
+    from .browser.service import shutdown_browser
+
+    await shutdown_browser(ctx)
 
 
 def include_routers(app: FastAPI) -> None:
     from .automation.api import router as automation_router
+    from .browser.api import router as browser_router
     from .connectors.registry import router as connectors_router
     from .copilot_integration.api import router as chat_router
     from .knowledge.api import router as knowledge_router
@@ -75,3 +82,4 @@ def include_routers(app: FastAPI) -> None:
     app.include_router(connectors_router)
     app.include_router(portfolio_router)
     app.include_router(automation_router)
+    app.include_router(browser_router)
