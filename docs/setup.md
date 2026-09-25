@@ -64,8 +64,8 @@ cd life-helper
 | 楽天ウェブサービス | 楽天トラベルの空室検索 | アプリ登録で `applicationId` と `accessKey` を取得 |
 
 投資信託の基準価額に使う運用会社の公式データは、いずれも API キー不要で設定も要りません（各社の利用規約の範囲内で個人利用）。
-対応済みは[三菱UFJアセットマネジメント 投信情報 API](https://www.am.mufg.jp/tool/webapi/)（[利用規約](https://www.am.mufg.jp/tool/webapi/agreement.html)）、
-[楽天投信投資顧問](https://www.rakuten-toushin.co.jp/fund/nav/)と[大和アセットマネジメント](https://www.daiwa-am.co.jp/funds/)の公式 CSV です。
+Phase 1 の[三菱UFJアセットマネジメント 投信情報 API](https://www.am.mufg.jp/tool/webapi/)（[利用規約](https://www.am.mufg.jp/tool/webapi/agreement.html)）と、
+Phase 2 の[楽天投信投資顧問](https://www.rakuten-toushin.co.jp/fund/nav/)・[大和アセットマネジメント](https://www.daiwa-am.co.jp/funds/)の公式 CSV に対応済みです。
 ポートフォリオ画面の「取得元を設定」で、運用会社とファンドコードを保有銘柄に紐付けます（ファンドコードの調べ方は [docs/operations.md](operations.md) 参照）。
 対応していない運用会社のファンドは「手入力」を選び、公式サイトの基準価額を入力します。
 
