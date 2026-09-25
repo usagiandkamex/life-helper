@@ -606,6 +606,25 @@ def test_fund_value_has_no_floating_point_error():
     assert half.market_value() == Decimal("500002.5") and yen(half.market_value()) == 500_003
 
 
+def test_a_value_no_longer_allowed_still_opens_the_screen(client, ctx):
+    # A file written before the paths that save a holding checked their values (or edited by hand) can hold a
+    # number too large to round with the decimal context. The screen must still open, or it could never be fixed.
+    csrf = sign_in(client, ctx)
+    oversized = Holding(account="tokutei", kind="stock", code="7203", name="トヨタ", quantity=1e30, cost_total=1e30)
+    oversized.apply_price(Price(value=3_000, date="2026-09-24", source="manual"))
+    with portfolio_store(ctx).transaction() as portfolio:
+        portfolio.holdings = [oversized]
+    view = client.get("/api/portfolio")
+    assert view.status_code == 200
+    assert view.json()["holdings"][0]["value"] == 3 * 10**33
+    repaired = client.post(
+        "/api/portfolio/holdings",
+        json={"action": "update", "id": oversized.id, "quantity": 100, "cost_total": 200_000},
+        headers={"x-csrf-token": csrf},
+    )
+    assert repaired.status_code == 200 and repaired.json()["total_value"] == 300_000
+
+
 def test_official_nav_replaces_a_broker_csv_nav_dated_with_the_import_day():
     def imported(kind: str = "fund") -> Holding:
         h = Holding(account="nisa_growth", kind=kind, name="x", quantity=10_000, cost_total=1, valuation_yen=40_000)
@@ -1156,6 +1175,41 @@ def test_manual_nav_rejects_an_excessive_value_or_future_basis_date(client, ctx)
     assert too_large.status_code == 422
     assert future.status_code == 400
     assert portfolio_store(ctx).load().holdings[0].price is None
+
+
+async def test_manual_nav_rejects_a_price_unit_the_valuation_cannot_use(client, ctx):
+    # The valuation divides by the price unit, so a unit below 1 口 would make it far larger than any holding.
+    csrf = sign_in(client, ctx)
+    holding = Holding(account="ideco", kind="fund", name="手入力ファンド", quantity=1_000, cost_total=1_000)
+    with portfolio_store(ctx).transaction() as portfolio:
+        portfolio.holdings = [holding]
+    too_small = client.post(
+        "/api/portfolio/fund-link",
+        json={"id": holding.id, "provider": "manual", "price_unit": 1e-300},
+        headers={"x-csrf-token": csrf},
+    )
+    assert too_small.status_code == 422
+    assert await link_fund(ctx, holding.id, "manual", price_unit=0.5) == {
+        "error": "価格単位は 1 以上 1,000,000 以下で指定してください"
+    }
+    assert portfolio_store(ctx).load().holdings[0].fund is None
+
+
+async def test_a_quote_whose_price_unit_is_out_of_range_is_not_linked(ctx):
+    # The connectors quote a unit of their own, so the answer is checked before a link or a refresh saves it.
+    holding = Holding(account="nisa_tsumitate", kind="fund", name=ALL_COUNTRY["fundNm"], quantity=1_000, cost_total=1)
+    with portfolio_store(ctx).transaction() as portfolio:
+        portfolio.holdings = [holding]
+    _funds_ready(ctx)
+    get_connectors(ctx)["toushin_lib"].price_unit = 0.001
+    with respx.mock:
+        mock_toushin({ALL_COUNTRY_ISIN: (25_341, _jp(NAV_DAY))})
+        linked = await link_fund(ctx, holding.id, "toushin_lib", ALL_COUNTRY_ISIN)
+        refreshed = await refresh_fund_navs(ctx)
+    assert "価格単位" in linked["error"]
+    assert refreshed["auto_link"]["errors"] and "価格単位" in refreshed["auto_link"]["errors"][0]["error"]
+    saved = portfolio_store(ctx).load().holdings[0]
+    assert saved.fund is None and saved.price is None
 
 
 def test_market_today_is_the_japanese_date_even_when_utc_is_still_yesterday(monkeypatch):

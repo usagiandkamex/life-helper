@@ -66,6 +66,10 @@ TAXABLE_ACCOUNTS = ("tokutei", "ippan")
 MAX_QUANTITY = 1_000_000_000_000
 MAX_YEN = 1_000_000_000_000_000
 MAX_PRICE = 10_000_000_000
+# A NAV is quoted per 1 unit (a few funds) up to 1 万口, and the valuation divides by it, so a unit below 1 would
+# turn an ordinary NAV into an astronomic valuation.
+MIN_PRICE_UNIT = 1
+MAX_PRICE_UNIT = 1_000_000
 
 
 def price_within_range(value: object) -> bool:
@@ -80,6 +84,17 @@ def price_within_range(value: object) -> bool:
     # Comparing is enough: NaN compares false both ways, and infinity is above the limit. ``math.isfinite`` is
     # not used because it converts to float first, which raises OverflowError for an absurdly large integer.
     return 0 < value <= MAX_PRICE
+
+
+def price_unit_within_range(value: object) -> bool:
+    """True when ``value`` can be stored as the units a NAV is quoted for (``FundRef.price_unit``).
+
+    Every path that links a fund checks this, because ``market_value()`` divides by the unit: a unit below 1 口
+    makes the valuation of an ordinary NAV far larger than any real holding.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return False
+    return MIN_PRICE_UNIT <= value <= MAX_PRICE_UNIT
 
 
 class Price(BaseModel):
@@ -255,8 +270,14 @@ class PortfolioStore:
 
 
 def yen(value: Decimal) -> int:
-    """Rounds a money amount to whole yen explicitly, instead of relying on float rounding."""
-    return int(value.quantize(Decimal(1), rounding=ROUND_HALF_UP))
+    """Rounds a money amount to whole yen explicitly, instead of relying on float rounding.
+
+    ``to_integral_value`` rather than ``quantize``: quantize refuses a number with more digits than the decimal
+    context keeps, so a single holding with an oversized value (from a file written before the paths that save
+    one checked it, or edited by hand) would make the whole portfolio screen fail instead of only looking wrong.
+    Rounding it anyway is what keeps that holding visible, and therefore repairable from the screen.
+    """
+    return int(value.to_integral_value(rounding=ROUND_HALF_UP))
 
 
 def previous_business_day(today: date) -> date:
