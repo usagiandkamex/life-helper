@@ -641,6 +641,62 @@ def test_a_value_no_longer_allowed_still_opens_the_screen(client, ctx):
     assert impossible.status_code == 422
 
 
+def test_a_value_that_is_not_a_number_does_not_close_the_screen(client, ctx):
+    # The import saved whatever the CSV held before it checked, so a cell such as "inf" became a float of its
+    # own. Rounding one to yen raises, and it is not valid JSON either, so loading clears it: the screen opens
+    # with the holding shown as empty, which is the only way to correct it.
+    csrf = sign_in(client, ctx)
+    store = portfolio_store(ctx)
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text(
+        "holdings:\n"
+        "- id: a1b2c3d4e5f6\n"
+        "  account: tokutei\n"
+        "  kind: fund\n"
+        "  name: こわれた投信\n"
+        "  quantity: 10000\n"
+        "  cost_total: 15000\n"
+        "  price: {value: 12000, date: '2026-09-24', source: toushin_lib}\n"
+        "  fund: {provider: toushin_lib, fund_code: JP90C000GKC6, price_unit: .inf}\n"
+        "- id: b2c3d4e5f6a1\n"
+        "  account: tokutei\n"
+        "  kind: stock\n"
+        "  code: MSFT\n"
+        "  name: マイクロソフト\n"
+        "  quantity: .inf\n"
+        "  cost_total: .inf\n"
+        "  valuation_yen: .nan\n"
+        "  price: {value: 60000, date: '2026-09-24', source: yahoo_finance, local_value: .nan, fx_rate: .inf}\n",
+        encoding="utf-8",
+    )
+    view = client.get("/api/portfolio")
+    assert view.status_code == 200
+    # Python's json module reads Infinity and NaN back, but the browser's JSON.parse refuses both.
+    assert "Infinity" not in view.text and "NaN" not in view.text
+    fund, stock = view.json()["holdings"]
+    # The NAV was quoted for a number of units the file does not tell, so it is dropped instead of valued on a
+    # guess: the row joins the ones whose price is missing, and a refresh saves the unit its provider quotes.
+    assert fund["price"] is None and fund["value"] is None and fund["price_unit"] == 10_000
+    assert view.json()["missing_prices"] == ["こわれた投信"]
+    # The price in yen is a number, so it stays; only the USD price and the rate it was converted with go.
+    assert stock["price"]["value"] == 60_000 and stock["price"]["local_value"] is None
+    assert (stock["quantity"], stock["cost_total"], stock["value"]) == (0, 0, 0)
+    repaired = client.post(
+        "/api/portfolio/holdings",
+        json={
+            "action": "update",
+            "id": "b2c3d4e5f6a1",
+            "quantity": 10,
+            "cost_total": 500_000,
+            "expected_quantity": 0,
+            "expected_cost_total": 0,
+        },
+        headers={"x-csrf-token": csrf},
+    )
+    assert repaired.status_code == 200
+    assert repaired.json()["holdings"][1]["value"] == 600_000
+
+
 def test_official_nav_replaces_a_broker_csv_nav_dated_with_the_import_day():
     def imported(kind: str = "fund") -> Holding:
         h = Holding(account="nisa_growth", kind=kind, name="x", quantity=10_000, cost_total=1, valuation_yen=40_000)
