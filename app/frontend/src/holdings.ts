@@ -31,25 +31,37 @@ export function parseNumber(text: string): number {
   return digits === '' ? Number.NaN : Number(digits)
 }
 
-// 入力欄は全角でも打たれるので、数字と小数点だけ半角に直してから読む（他の文字は落とす）。
+// 入力欄は全角でも打たれるので、数字・小数点・区切りを半角に直してから読む。
 const toHalfWidth = (text: string) =>
-  text.replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0)).replace(/[．。]/g, '.')
+  text
+    .replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0))
+    .replace(/[．。]/g, '.')
+    .replace(/[，、]/g, ',')
+
+const group = (digits: string) => digits.replace(/^0+(?=\d)/, '').replace(/\B(?=(\d{3})+$)/g, ',')
 
 /**
  * 入力中のテキストに 3 桁区切りを入れる。小数部と打ち途中の "1234." はそのまま残す（"1234.5" は "1,234.5"）。
+ * 数字・小数点・区切り以外が混じっていたら null（残った数字をつなげると別の数になるので、打ち直してもらう）。
  * 区切りを入れた値は parseNumber で読む。
  */
-export function groupDigits(text: string): string {
-  const cleaned = toHalfWidth(text).replace(/[^\d.]/g, '')
+export function groupDigits(text: string): string | null {
+  const cleaned = toHalfWidth(text).replace(/,/g, '')
+  if (!/^\d*\.?\d*$/.test(cleaned)) return null
   const point = cleaned.indexOf('.')
-  const whole = (point === -1 ? cleaned : cleaned.slice(0, point)).replace(/^0+(?=\d)/, '')
-  const fraction = point === -1 ? '' : `.${cleaned.slice(point + 1).replace(/\./g, '')}`
-  return whole.replace(/\B(?=(\d{3})+$)/g, ',') + fraction
+  return point === -1 ? group(cleaned) : `${group(cleaned.slice(0, point))}.${cleaned.slice(point + 1)}`
 }
 
-/** 数値を 3 桁区切りの入力テキストにする（小さい値が "1e-7" にならないように桁で書き出す）。 */
+/** 数値を 3 桁区切りの入力テキストにする（"1e-7" や丸めで別の数にならないように、桁をそのまま書き出す）。 */
 export function groupNumber(value: number): string {
-  return Number.isFinite(value) ? value.toLocaleString('en-US', { maximumFractionDigits: 20 }) : ''
+  if (!Number.isFinite(value)) return ''
+  const [digits, scale] = scaled(value)
+  const sign = digits < 0n ? '-' : ''
+  const plain = (digits < 0n ? -digits : digits).toString()
+  if (scale <= 0) return sign + group(plain + '0'.repeat(-scale))
+  const padded = plain.padStart(scale + 1, '0')
+  const fraction = padded.slice(padded.length - scale).replace(/0+$/, '')
+  return sign + group(padded.slice(0, padded.length - scale)) + (fraction ? `.${fraction}` : '')
 }
 
 /** Cost per price unit (usually 10,000 units for a fund, one share for a stock); null when nothing is held. */

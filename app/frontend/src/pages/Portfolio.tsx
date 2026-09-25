@@ -388,11 +388,16 @@ export function PortfolioPage() {
     }
   }
 
-  const importCsv = (file: File) => {
+  const importCsv = async (file: File) => {
     const form = new FormData()
     form.append('broker', broker)
     form.append('file', file)
-    run(() => api<PortfolioView>('/api/portfolio/import', { method: 'POST', body: form }), (v) => `${v.imported} 件の保有銘柄を取り込みました`)
+    const ok = await run(
+      () => api<PortfolioView>('/api/portfolio/import', { method: 'POST', body: form }),
+      (v) => `${v.imported} 件の保有銘柄を取り込みました`,
+    )
+    // 取り込むと保有銘柄が入れ替わるので、取り込み前の銘柄を選んだままの編集欄は閉じる。
+    if (ok) selectHolding('')
   }
 
   const calculate = async () => {
@@ -490,8 +495,8 @@ export function PortfolioPage() {
 
   // The manual fallback also has to set the NAV: switching the source alone would leave the old price in place.
   const setManualNav = async (target: Holding, priceUnit: number, nav: number, priceDate: string) => {
-    if (!(nav > 0) || !(priceUnit > 0)) {
-      setError('基準価額と価格単位には 0 より大きい数値を入力してください')
+    if (!(nav > 0) || !(priceUnit >= 1) || !Number.isInteger(priceUnit)) {
+      setError('基準価額には 0 より大きい数値を、価格単位には 1 以上の整数を入力してください')
       return
     }
     const ok = await run(() =>
