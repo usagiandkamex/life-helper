@@ -40,6 +40,10 @@ const MARKET_LABELS: Record<string, string> = { jp: '日本株', us: '米国株'
 const SEARCH_FAILED = '候補を取得できませんでした。時間をおいて探し直すか、コードを指定して紐付けるか、公式サイトの基準価額を手入力してください。'
 
 const amount = (value: number) => value.toLocaleString('ja-JP', { maximumFractionDigits: 2 })
+// The editor shows the totals it is about to save in full: amount() and yen() round, which would make an added
+// 0.001 口 or 0.1 円 look like no change at all.
+const exact = (value: number) => value.toLocaleString('ja-JP', { maximumSignificantDigits: 17 })
+const exactYen = (value: number) => `${exact(value)} 円`
 const label = (labels: Record<string, string>, key: string | null | undefined) => (key ? labels[key] ?? key : '')
 const marketToday = () => {
   const parts = new Intl.DateTimeFormat('en-US', {
@@ -220,7 +224,7 @@ function HoldingEditor({
     <section className="panel" id="holding-editor">
       <h2>数量・取得額の編集: {holding.name}</h2>
       <p className="hint">
-        {holding.account_label}・現在の数量 {amount(current.quantity)}・取得額 {yen(current.cost)}・平均取得単価{' '}
+        {holding.account_label}・現在の数量 {exact(current.quantity)}・取得額 {exactYen(current.cost)}・平均取得単価{' '}
         {averageText(holding, current)}
       </p>
       <div className="row wrap">
@@ -277,7 +281,7 @@ function HoldingEditor({
       {typeof result === 'string' && <p className="error-text">{result}</p>}
       {next && changed && (
         <p>
-          保存後: 数量 {amount(current.quantity)} → {amount(next.quantity)}・取得額 {yen(current.cost)} → {yen(next.cost)}・平均取得単価{' '}
+          保存後: 数量 {exact(current.quantity)} → {exact(next.quantity)}・取得額 {exactYen(current.cost)} → {exactYen(next.cost)}・平均取得単価{' '}
           {averageText(holding, next)}
         </p>
       )}
@@ -406,7 +410,7 @@ export function PortfolioPage() {
             expected_cost_total: target.cost_total_exact,
           }),
         }),
-      () => `${target.name} を数量 ${amount(totals.quantity)}・取得額 ${yen(totals.cost)} に更新しました`,
+      () => `${target.name} を数量 ${exact(totals.quantity)}・取得額 ${exactYen(totals.cost)} に更新しました`,
     )
     if (ok) setEditId(null)
     // After a conflict the editor starts over from the latest totals.

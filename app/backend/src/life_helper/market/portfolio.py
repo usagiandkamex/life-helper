@@ -68,6 +68,18 @@ MAX_YEN = 1_000_000_000_000_000
 MAX_PRICE = 10_000_000_000
 
 
+def price_within_range(value: object) -> bool:
+    """True when ``value`` can be stored as a price in yen (``Price.value``).
+
+    Every path that writes a newly fetched or hand-entered price checks this, because ``summarize()`` rounds
+    quantity × price to yen and a value outside this range makes that fail for the whole portfolio. A price that
+    is already saved is not checked again, so a portfolio written before this check still loads and can be fixed.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return False
+    return math.isfinite(value) and 0 < value <= MAX_PRICE
+
+
 class Price(BaseModel):
     """A price in yen. US stocks also keep the local (USD) price and the rate used to convert it."""
 

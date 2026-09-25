@@ -9,6 +9,7 @@ import httpx
 import pytest
 import respx
 
+from life_helper.connectors.base import ConnectorError
 from life_helper.connectors.fund_nav import MAX_NAV
 from life_helper.connectors.registry import get_connectors
 from life_helper.connectors.yahoo_finance import RATE_LIMIT_MESSAGE
@@ -423,6 +424,60 @@ async def test_us_quote_is_cached_until_the_price_or_the_rate_settles(ctx, monke
     quote = await stock_price(ctx, "MSFT", today=date.today())
     assert quote["close_jpy"] == 15_000
     assert datetime.fromisoformat(quote["valid_until"]) == soon
+
+
+async def test_quote_the_portfolio_cannot_hold_is_not_stored(ctx, settings):
+    """A price outside the stored range would make summarize() fail for every holding, not just this one."""
+    with portfolio_store(ctx).transaction() as portfolio:
+        portfolio.holdings = [
+            Holding(account="tokutei", kind="stock", code="7203", name="トヨタ", quantity=10, cost_total=20_000)
+        ]
+    _yahoo_ready(ctx)
+    with respx.mock:
+        mock_yahoo({"7203.T": 1e30})
+        result = await refresh_stock_prices(ctx)
+    assert result["updated"] == []
+    assert result["errors"] == [{"code": "7203", "error": "Yahoo Finance から取得した株価が不正です"}]
+    assert portfolio_store(ctx).load().holdings[0].price is None
+    assert portfolio_store(ctx).cached_price("7203", market_today()) is None
+
+
+async def test_converted_price_beyond_the_limit_is_refused(ctx, monkeypatch):
+    """The yen value decides: a close and a rate that are each within range can still multiply out of it."""
+    _yahoo_ready(ctx)
+    connector = get_connectors(ctx)["yahoo_finance"]
+
+    async def previous_close(code, *, today=None, now=None):
+        return _cached_quote(code="MSFT", symbol="MSFT", market="us", currency="USD", close=1e9)
+
+    async def usd_jpy(*, today=None, now=None):
+        return {"pair": "USDJPY", "symbol": "JPY=X", "date": "2026-09-24", "rate": 150, "source": "yahoo_finance"}
+
+    monkeypatch.setattr(connector, "previous_close", previous_close)
+    monkeypatch.setattr(connector, "usd_jpy", usd_jpy)
+    with pytest.raises(ConnectorError):
+        await stock_price(ctx, "MSFT", today=date.today())
+    assert portfolio_store(ctx).cached_price("MSFT", date.today()) is None
+
+
+async def test_price_cache_beyond_the_limit_is_refetched(ctx):
+    """Entries cached before prices were bounded are fetched again, instead of failing the refresh all day."""
+    today = date.today()
+    store = portfolio_store(ctx)
+    store.cache_price(
+        "MSFT",
+        today,
+        _cached_quote(code="MSFT", symbol="MSFT", market="us", currency="USD", close=100, close_jpy=1e30)
+        | {"fx_rate": 1e28},
+    )
+    store.cache_price(
+        "USDJPY", today, {"pair": "USDJPY", "symbol": "JPY=X", "date": "2026-09-24", "rate": 1e28, "source": "stooq"}
+    )
+    _yahoo_ready(ctx)
+    with respx.mock:
+        mock_yahoo({"MSFT": 120, "JPY=X": 150})
+        quote = await stock_price(ctx, "MSFT", today=today)
+    assert (quote["close_jpy"], quote["fx_rate"], quote["cached"]) == (18_000, 150, False)
 
 
 async def test_rate_limit_stops_the_refresh(ctx):
