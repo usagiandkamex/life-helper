@@ -42,7 +42,7 @@ def parse_thread_id(thread_id: str) -> tuple[str, str | None]:
 
 
 def _summary(thread_id: str, runs: list[dict], names: dict[str, str]) -> dict[str, Any]:
-    """``runs`` is newest first."""
+    """``runs`` is run metadata, newest first."""
     latest = runs[0]
     continued = thread_id.startswith("c-")
     title = (names.get(latest["automation_id"]) if continued else None) or latest.get("name") or "オートメーション"
@@ -65,13 +65,10 @@ def _chronological(record: dict) -> tuple[str, str]:
     return record.get("started_at", ""), record.get("id", "")
 
 
-def _thread_runs(store: AutomationStore, thread_id: str) -> list[dict]:
-    """The runs of one conversation, oldest first."""
-    automation_id, run_id = parse_thread_id(thread_id)
-    if run_id is not None:
-        record = store.get_run(automation_id, run_id)
-        return [record] if record and thread_id_for(record) == thread_id else []
-    runs = [r for r in store.list_runs(automation_id, limit=None) if thread_id_for(r) == thread_id]
+def _thread_meta(store: AutomationStore, thread_id: str) -> list[dict]:
+    """The metadata of one conversation's runs, oldest first (transcripts are read only for the page shown)."""
+    automation_id, _ = parse_thread_id(thread_id)
+    runs = [r for r in store.list_run_meta(automation_id) if thread_id_for(r) == thread_id]
     return sorted(runs, key=_chronological)
 
 
@@ -80,7 +77,7 @@ def list_threads(store: AutomationStore) -> list[dict]:
     names = {a.id: a.name for a in store.list()}
     hidden = store.chat_hidden()
     groups: dict[str, list[dict]] = {}
-    for record in store.list_runs(limit=None):
+    for record in store.list_run_meta():
         thread_id = thread_id_for(record)
         if thread_id:
             groups.setdefault(thread_id, []).append(record)
@@ -100,25 +97,27 @@ def get_thread(
     """One page of a conversation, oldest first. ``before`` pages back; ``anchor`` starts the page at that run."""
     if before is not None and anchor is not None:
         raise ValueError("before and anchor cannot be combined")
-    runs = _thread_runs(store, thread_id)
-    if not runs:
+    metas = _thread_meta(store, thread_id)
+    if not metas:
         return None
-    ids = [r["id"] for r in runs]
+    ids = [r["id"] for r in metas]
     for run_id in (before, anchor):
         if run_id is not None and run_id not in ids:
             raise ValueError("run is not part of this conversation")
     if anchor is not None:
         start = ids.index(anchor)
-        end = min(len(runs), start + ANCHOR_LIMIT)
+        end = min(len(metas), start + ANCHOR_LIMIT)
     else:
-        end = ids.index(before) if before is not None else len(runs)
+        end = ids.index(before) if before is not None else len(metas)
         start = max(0, end - PAGE_SIZE)
+    automation_id, _ = parse_thread_id(thread_id)
+    page = (store.get_run(automation_id, run_id) for run_id in ids[start:end])
     names = {a.id: a.name for a in store.list()}
     return {
-        "thread": _summary(thread_id, list(reversed(runs)), names),
-        "runs": runs[start:end],
+        "thread": _summary(thread_id, list(reversed(metas)), names),
+        "runs": [record for record in page if record is not None],
         "has_more": start > 0,
-        "has_newer": end < len(runs),
+        "has_newer": end < len(metas),
     }
 
 
@@ -126,7 +125,7 @@ def mark_thread_read(store: AutomationStore, thread_id: str, run_ids: list[str])
     """Marks only the given runs read, so a run that arrived after the page was loaded stays unread.
     Returns False when the conversation does not exist."""
     automation_id, _ = parse_thread_id(thread_id)
-    runs = {r["id"]: r for r in _thread_runs(store, thread_id)}
+    runs = {r["id"]: r for r in _thread_meta(store, thread_id)}
     if not runs:
         return False
     for run_id in dict.fromkeys(run_ids):
@@ -138,9 +137,7 @@ def mark_thread_read(store: AutomationStore, thread_id: str, run_ids: list[str])
 
 def hide_thread(store: AutomationStore, thread_id: str, through_run_id: str) -> bool:
     """Hides the conversation from the chat list until a run newer than ``through_run_id`` arrives."""
-    automation_id, _ = parse_thread_id(thread_id)
-    record = store.get_run(automation_id, through_run_id)
-    if record is None or thread_id_for(record) != thread_id:
+    if not any(r["id"] == through_run_id for r in _thread_meta(store, thread_id)):
         return False
     store.hide_chat_thread(thread_id, through_run_id)
     return True

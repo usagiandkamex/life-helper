@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -704,6 +705,78 @@ def test_every_conversation_is_listed_beyond_the_run_history_limit(tmp_path):
         store.save_run(_chat_record("aaaaaa000001", f"a{i:015x}", minute=i))
     assert len(store.list_runs()) == 50  # the automations page shows the latest 50
     assert len(chat.list_threads(store)) == 60
+
+
+def _watch_run_reads(monkeypatch, store: AutomationStore) -> list[str]:
+    """Collects the ids of the run records that are opened from here on."""
+    reads: list[str] = []
+    original = Path.read_text
+
+    def spy(self: Path, *args, **kwargs):
+        if self.is_relative_to(store.runs_dir):
+            reads.append(self.stem)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", spy)
+    return reads
+
+
+def test_listing_conversations_does_not_open_the_transcripts(tmp_path, monkeypatch):
+    store = AutomationStore(tmp_path)
+    for i in range(3):
+        store.save_run(_chat_record("aaaaaa000001", f"a{i:015x}", mode="continue", minute=i))
+    reads = _watch_run_reads(monkeypatch, store)
+    [thread] = chat.list_threads(store)
+    assert thread["run_count"] == 3 and thread["unread"] is True
+    assert reads == []  # the metadata index answers the list
+
+    # A record written before the index existed is read once and remembered.
+    legacy = _chat_record("aaaaaa000001", "a00000000000009", mode="continue", minute=9)
+    (store.runs_dir / "aaaaaa000001" / "a00000000000009.json").write_text(json.dumps(legacy), encoding="utf-8")
+    assert chat.list_threads(store)[0]["run_count"] == 4
+    assert reads == ["a00000000000009"]
+    reads.clear()
+    assert chat.list_threads(store)[0]["run_count"] == 4
+    assert reads == []
+
+
+def test_stale_and_lost_index_entries_are_repaired_from_the_records(tmp_path, monkeypatch):
+    store = AutomationStore(tmp_path)
+    store.save_run(_chat_record("aaaaaa000001", "a000000000000001", mode="continue", minute=0))
+    store.save_run(_chat_record("aaaaaa000001", "a000000000000002", mode="continue", minute=1))
+
+    # A record changed behind the index's back (or saved while the index could not be written) is picked up again.
+    monkeypatch.setattr(AutomationStore, "_with_lock", lambda *a, **k: (_ for _ in ()).throw(TimeoutError("busy")))
+    store.save_run(_chat_record("aaaaaa000001", "a000000000000002", mode="continue", minute=1, read=True))
+    monkeypatch.undo()
+    assert store.unread_count() == 1
+    assert chat.list_threads(store)[0]["unread"] is True
+
+    store.run_index_path.write_text("{ broken", encoding="utf-8")
+    assert [t["run_count"] for t in chat.list_threads(store)] == [2]
+
+    # Entries of removed records do not pile up in the index, and a scan of one automation keeps the others.
+    store.save_run(_chat_record("bbbbbb000001", "b000000000000001", minute=2))
+    (store.runs_dir / "aaaaaa000001" / "a000000000000001.json").unlink()
+    assert [m["id"] for m in store.list_run_meta("aaaaaa000001")] == ["a000000000000002"]
+    assert sorted(json.loads(store.run_index_path.read_text(encoding="utf-8"))["runs"]) == [
+        "aaaaaa000001/a000000000000002",
+        "bbbbbb000001/b000000000000001",
+    ]
+
+
+def test_a_conversation_page_only_opens_the_runs_it_shows(tmp_path, monkeypatch):
+    store = AutomationStore(tmp_path)
+    ids = [f"a{i:015x}" for i in range(25)]
+    for i, run_id in enumerate(ids):
+        store.save_run(_chat_record("aaaaaa000001", run_id, mode="continue", minute=i))
+    reads = _watch_run_reads(monkeypatch, store)
+    page = chat.get_thread(store, "c-aaaaaa000001")
+    assert [r["id"] for r in page["runs"]] == ids[5:] and page["thread"]["run_count"] == 25
+    assert reads == ids[5:]
+    reads.clear()
+    assert [r["id"] for r in store.list_runs(limit=3)] == ids[:-4:-1]  # the run history loads only what it returns
+    assert reads == ids[:-4:-1]
 
 
 @pytest.mark.parametrize(

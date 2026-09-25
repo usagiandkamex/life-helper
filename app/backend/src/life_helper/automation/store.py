@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from datetime import UTC, datetime
@@ -14,7 +15,24 @@ from ..knowledge.store import atomic_write
 from .locks import FileLock
 from .models import Automation
 
+logger = logging.getLogger(__name__)
+
 _ID_RE = re.compile(r"^[0-9a-f]{6,32}$")
+
+# Everything the run history and the chat view need before opening a record (which also holds the transcript).
+RUN_META_FIELDS = (
+    "name",
+    "started_at",
+    "finished_at",
+    "status",
+    "read",
+    "transcript_version",
+    "conversation_mode",
+)
+
+
+def _run_meta(record: dict) -> dict:
+    return {k: record[k] for k in RUN_META_FIELDS if k in record}
 
 
 class AutomationStore:
@@ -23,6 +41,7 @@ class AutomationStore:
         self.runs_dir = app_state_dir / "automation-runs"
         self.usage_path = app_state_dir / "automation-usage.json"
         self.chat_state_path = app_state_dir / "automation-chat.json"
+        self.run_index_path = app_state_dir / "automation-run-index.json"
         self.locks_dir = app_state_dir / "locks"
 
     # -- definitions -------------------------------------------------------------------------------------
@@ -30,8 +49,8 @@ class AutomationStore:
     def _edit_lock(self) -> FileLock:
         return FileLock(self.locks_dir / "automations-edit.lock", ttl_seconds=30)
 
-    def _with_lock(self, fn):
-        lock = self._edit_lock()
+    def _with_lock(self, fn, lock: FileLock | None = None):
+        lock = lock or self._edit_lock()
         for _ in range(50):
             if lock.try_acquire():
                 try:
@@ -102,18 +121,105 @@ class AutomationStore:
     def save_run(self, record: dict) -> None:
         path = self._run_dir(record["automation_id"]) / f"{record['id']}.json"
         atomic_write(path, json.dumps(record, ensure_ascii=False, indent=1))
+        read = self._read_run_meta(path)
+        if read is not None and read[1] is not None:
+            self._update_run_index({f"{record['automation_id']}/{record['id']}": read[1]})
+
+    # The index only caches what list_run_meta() would otherwise read from every record, so a failed or outdated
+    # update never loses anything: the next read repairs the entry from the record itself.
+
+    def _index_lock(self) -> FileLock:
+        return FileLock(self.locks_dir / "automation-run-index.lock", ttl_seconds=30)
+
+    def _fingerprint(self, path: Path) -> str | None:
+        try:
+            st = path.stat()
+        except OSError:
+            return None
+        return f"{st.st_mtime_ns}-{st.st_size}"
+
+    def _read_run_meta(self, path: Path) -> tuple[dict, dict | None] | None:
+        """The metadata of a record and the index entry for it, or None when the record cannot be read.
+
+        The entry is None when the file was written again while it was read, so cached metadata and the fingerprint
+        it is checked against always come from the same version of the file.
+        """
+        before = self._fingerprint(path)
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        meta = _run_meta(record)
+        if before is None or before != self._fingerprint(path):
+            return meta, None
+        return meta, {"fingerprint": before, "meta": meta}
+
+    def _read_run_index(self) -> dict[str, dict]:
+        try:
+            data = json.loads(self.run_index_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        runs = data.get("runs") if isinstance(data, dict) else None
+        return runs if isinstance(runs, dict) else {}
+
+    def _update_run_index(self, entries: dict[str, dict], drop: set[str] = frozenset()) -> None:
+        def op():
+            runs = self._read_run_index()
+            runs.update(entries)
+            for key in drop:
+                runs.pop(key, None)
+            atomic_write(self.run_index_path, json.dumps({"runs": runs}, ensure_ascii=False))
+
+        try:
+            self._with_lock(op, lock=self._index_lock())
+        except (TimeoutError, OSError):
+            logger.warning("could not update the automation run index")
+
+    def list_run_meta(self, automation_id: str | None = None) -> list[dict]:
+        """Run metadata without transcripts, newest first.
+
+        Records are opened only when the index has no fresh entry for them, so listing stays cheap as runs pile up.
+        """
+        dirs = [self._run_dir(automation_id)] if automation_id else [d for d in self.runs_dir.glob("*") if d.is_dir()]
+        index = self._read_run_index()
+        metas: list[dict] = []
+        refreshed: dict[str, dict] = {}
+        seen: set[str] = set()
+        for d in dirs:
+            if not _ID_RE.match(d.name):
+                continue
+            for p in d.glob("*.json"):
+                if not _ID_RE.match(p.stem):
+                    continue
+                key = f"{d.name}/{p.stem}"
+                seen.add(key)
+                cached = index.get(key) if isinstance(index.get(key), dict) else {}
+                fingerprint = self._fingerprint(p)
+                if isinstance(cached.get("meta"), dict) and cached.get("fingerprint") == fingerprint:
+                    meta = dict(cached["meta"])
+                else:
+                    read = self._read_run_meta(p)
+                    if read is None:
+                        continue
+                    meta, entry = read
+                    if entry is not None:
+                        refreshed[key] = entry
+                # The path decides the identity, so metadata always names a record that can be opened again.
+                metas.append(meta | {"id": p.stem, "automation_id": d.name})
+        stale = {k for k in index if k.startswith(f"{automation_id}/")} - seen if automation_id else set(index) - seen
+        if refreshed or stale:
+            self._update_run_index(refreshed, stale)
+        metas.sort(key=lambda r: r.get("started_at", ""), reverse=True)
+        return metas
 
     def list_runs(self, automation_id: str | None = None, limit: int | None = 50) -> list[dict]:
-        dirs = [self._run_dir(automation_id)] if automation_id else [d for d in self.runs_dir.glob("*") if d.is_dir()]
+        metas = self.list_run_meta(automation_id)
         records = []
-        for d in dirs:
-            for p in d.glob("*.json"):
-                try:
-                    records.append(json.loads(p.read_text(encoding="utf-8")))
-                except (OSError, ValueError):
-                    continue
-        records.sort(key=lambda r: r.get("started_at", ""), reverse=True)
-        return records[:limit]
+        for meta in metas[:limit] if limit is not None else metas:
+            record = self.get_run(meta["automation_id"], meta["id"])
+            if record is not None:
+                records.append(record)
+        return records
 
     def get_run(self, automation_id: str, run_id: str) -> dict | None:
         if not _ID_RE.match(run_id):
@@ -131,7 +237,7 @@ class AutomationStore:
             self.save_run(record)
 
     def unread_count(self) -> int:
-        return sum(1 for r in self.list_runs(limit=500) if not r.get("read"))
+        return sum(1 for r in self.list_run_meta() if not r.get("read"))
 
     # -- chat view state ---------------------------------------------------------------------------------
     # Kept apart from the run records so hiding a conversation never rewrites a result (or races with "read").
