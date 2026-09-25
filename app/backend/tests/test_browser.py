@@ -413,8 +413,8 @@ Object.defineProperty(Element.prototype, 'tagName', {get() { return 'TEXTAREA'; 
 Object.defineProperty(HTMLInputElement.prototype, 'form', {get() { return null; }});
 </script></head><body>
 <form><input id="u" name="user"><input id="pw" name="pw" type="password"></form>
-<form id="signin"><input type="password" name="pw2"></form>
-<input id="outside" name="other" form="signin">
+<form id="ログイン"><input type="password" name="pw2"></form>
+<input id="outside" name="other" form="ログイン">
 </body></html>"""
 
 
@@ -434,6 +434,7 @@ async def test_form_checks_survive_a_page_that_rewrites_dom_apis(tmp_path, monke
         assert "error" not in page, page
         assert "パスワード" in (await session.run(lambda: session.fill("#pw", "taro")))["error"]
         assert "ログイン" in (await session.run(lambda: session.fill("#u", "taro")))["error"]
+        # The owner form is named by the form attribute, and its id is not safe to put into a selector.
         assert "ログイン" in (await session.run(lambda: session.fill("#outside", "taro")))["error"]
     finally:
         await session.close()

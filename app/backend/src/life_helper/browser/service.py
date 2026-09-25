@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
 import time
 import uuid
@@ -117,11 +116,14 @@ SNAPSHOT_JS = """
 # Selectors handed to Playwright's engine instead of reading the element with the page's own DOM functions.
 FIELD_SELECTORS = {
     # The element itself is content-editable, or it sits inside one (isContentEditable without page JavaScript).
-    "editable": '[contenteditable=""], [contenteditable="true"], [contenteditable=""] *, [contenteditable="true"] *',
-    # Login and sign-up forms: the field's form owner also holds a password box.
+    "editable": ", ".join(
+        f"[contenteditable={value}]{suffix}" for value in ('""', '"true"', '"plaintext-only"') for suffix in ("", " *")
+    ),
+    # Login and sign-up forms: the field sits in a form that also holds a password box.
     "password_form": "form:has(input[type=password]) *",
+    "password_form_root": "form:has(input[type=password])",
 }
-LOGIN_FORM_BY_ID = "form[id={id}]:has(input[type=password])"
+MAX_CHECKED_FORMS = 50
 
 
 class BrowserError(RuntimeError):
@@ -343,12 +345,11 @@ class BrowserSession:
             if await self._matches(page, target, name):
                 tag = name
                 break
+        form_has_password = await self._matches(page, target, FIELD_SELECTORS["password_form"])
         form_id = await target.get_attribute("form")
-        if form_id:
-            # The form attribute names the owner, so the surrounding elements say nothing about it.
-            form_has_password = await page.locator(LOGIN_FORM_BY_ID.format(id=json.dumps(form_id))).count() > 0
-        else:
-            form_has_password = await self._matches(page, target, FIELD_SELECTORS["password_form"])
+        if form_id and not form_has_password:
+            # The form attribute names the owner, which may hold the password box and sit anywhere on the page.
+            form_has_password = await self._owned_by_login_form(page, form_id)
         return {
             "tag": tag,
             "type": (await target.get_attribute("type")) or "",
@@ -356,6 +357,18 @@ class BrowserSession:
             "editable": await self._matches(page, target, FIELD_SELECTORS["editable"]),
             "form_has_password": form_has_password,
         }
+
+    @staticmethod
+    async def _owned_by_login_form(page: Page, form_id: str) -> bool:
+        """Compares the ids in Python: an id may hold characters that cannot be put into a CSS selector safely."""
+        forms = page.locator(FIELD_SELECTORS["password_form_root"])
+        total = await forms.count()
+        if total > MAX_CHECKED_FORMS:
+            return True  # too many to look at one by one: refuse rather than guess
+        for index in range(total):
+            if await forms.nth(index).get_attribute("id") == form_id:
+                return True
+        return False
 
     @staticmethod
     async def _route(route: Route) -> None:
@@ -376,6 +389,8 @@ class BrowserSession:
         data = await page.evaluate(SNAPSHOT_JS, {**LIMITS, "selector": selector})
         if data is None:
             raise BrowserError(f"要素が見つかりませんでした: {selector}")
+        # The page may have navigated while it was read: nothing from a rejected destination may be returned.
+        await self._guard_url(page)
         result: dict[str, Any] = {"url": page.url, "title": await page.title()}
         if status is not None:
             result["status"] = status
@@ -455,6 +470,8 @@ class BrowserSession:
             png = await page.screenshot(type="png", full_page=True, clip=clip)
         else:
             png = await page.screenshot(type="png")
+        # The page may have navigated while it was captured: a rejected destination is not kept or shown.
+        await self._guard_url(page)
         shot_id = uuid.uuid4().hex
         await asyncio.to_thread(save_screenshot, self._screenshots, shot_id, png)
         return {
