@@ -99,7 +99,10 @@ async def link_fund(
     manual_nav: float | None = None,
     price_date: date | None = None,
 ) -> dict:
-    """Ties a holding to an official fund after the user picked it. ``manual`` keeps the hand-entered NAV."""
+    """Links a holding to a user-selected fund and optionally saves a manual NAV with its basis date.
+
+    A response received after its holding was renamed or re-linked is discarded so it cannot change a new selection.
+    """
     holding = _holding(ctx, holding_id)
     if holding is None:
         return {"error": f"id {holding_id} の銘柄が見つかりません"}
@@ -107,10 +110,12 @@ async def link_fund(
         return {"error": "基準価額の取得元は投資信託にだけ設定できます"}
     quote = None
     if provider == MANUAL_PROVIDER:
-        if manual_nav is not None and price_date is None:
-            return {"error": "手入力した基準価額の基準日を指定してください"}
+        if (manual_nav is None) != (price_date is None):
+            return {"error": "手入力する基準価額と基準日を両方指定してください"}
         fund = FundRef(provider=MANUAL_PROVIDER, price_unit=price_unit)
     else:
+        if manual_nav is not None or price_date is not None:
+            return {"error": "基準価額と基準日は手入力のときだけ指定できます"}
         connector = fund_connectors(ctx).get(provider)
         if connector is None:
             return {"error": f"対応していないデータ提供元です: {provider}"}
@@ -147,8 +152,9 @@ async def link_fund(
             else:
                 target.apply_price(price)
         elif manual_nav is not None:
-            target.price = Price(value=manual_nav, date=price_date.isoformat(), source=MANUAL_PROVIDER)
-            target.valuation_yen = None
+            # Replacing the source also replaces its price, even when the hand-entered basis date is older.
+            target.price = None
+            target.apply_price(Price(value=manual_nav, date=price_date.isoformat(), source=MANUAL_PROVIDER))
         elif unit_changed:
             target.price, target.valuation_yen = None, None
     official = quote["name"] if quote else None

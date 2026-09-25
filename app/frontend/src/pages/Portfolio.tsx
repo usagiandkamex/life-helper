@@ -30,6 +30,10 @@ const MARKET_LABELS: Record<string, string> = { jp: '日本株', us: '米国株'
 
 const amount = (value: number) => value.toLocaleString('ja-JP', { maximumFractionDigits: 2 })
 const label = (labels: Record<string, string>, key: string | null | undefined) => (key ? labels[key] ?? key : '')
+const localToday = () => {
+  const today = new Date()
+  return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
+}
 
 function PriceCell({ holding }: { holding: Holding }) {
   const price = holding.price
@@ -520,7 +524,7 @@ export function PortfolioPage() {
             </label>
             <label>
               基準日
-              <input name="price_date" type="date" defaultValue={fundTarget.price?.date ?? new Date().toISOString().slice(0, 10)} required />
+              <input name="price_date" type="date" defaultValue={fundTarget.price?.date ?? localToday()} required />
             </label>
             <button className="button small" disabled={busy}>
               自動取得を使わず手入力にする
