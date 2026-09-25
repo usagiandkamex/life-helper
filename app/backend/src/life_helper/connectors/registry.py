@@ -12,6 +12,7 @@ from ..auth import CurrentUser, require_user
 from ..context import AppContext, get_ctx
 from ..tools.registry import ToolSpec
 from .base import Connector, ConnectorError
+from .fund_nav import DaiwaFundCsvConnector, MufgFundApiConnector, RakutenFundCsvConnector
 from .rakuten_travel import RakutenTravelConnector
 from .stooq import StooqConnector
 
@@ -30,6 +31,10 @@ def get_connectors(ctx: AppContext) -> dict[str, Connector]:
     transport = ctx.extras.get("http_transport")
     connectors: dict[str, Connector] = {
         "stooq": StooqConnector({"stooq_api_key": secrets["stooq_api_key"]}, ctx.masker, state, transport=transport),
+        # No API key: the managers publish the fund API and the 基準価額 CSVs openly, under their terms of use.
+        "mufg_api": MufgFundApiConnector({}, ctx.masker, state, transport=transport),
+        "rakuten_csv": RakutenFundCsvConnector({}, ctx.masker, state, transport=transport),
+        "daiwa_csv": DaiwaFundCsvConnector({}, ctx.masker, state, transport=transport),
         "rakuten_travel": RakutenTravelConnector(
             {k: secrets[k] for k in ("rakuten_application_id", "rakuten_access_key")},
             ctx.masker,

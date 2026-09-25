@@ -42,6 +42,7 @@ td.actions { white-space: nowrap; display: flex; gap: 0.5rem; }
 .center { display: grid; place-items: center; height: 100vh; }
 .hint { color: var(--muted); font-size: 0.8rem; margin: 0.25rem 0; }
 .error-text { color: var(--danger); font-size: 0.85rem; }
+.warn-text { color: var(--warn); }
 .badge { background: var(--danger); color: #fff; border-radius: 999px; padding: 0 0.45rem; font-size: 0.7rem; margin-left: 0.3rem; }
 .banner { padding: 0.5rem 0.75rem; border-radius: 6px; margin: 0.5rem 0; font-size: 0.9rem; }
 .banner.error { background: #fef2f2; color: var(--danger); }

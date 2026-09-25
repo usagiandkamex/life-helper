@@ -78,3 +78,94 @@ def mock_stooq(bodies: dict[str, float | str]):
         return httpx.Response(200, text=body if isinstance(body, str) else stooq_csv(body))
 
     return respx.get("https://stooq.com/q/d/l/").mock(side_effect=handler)
+
+
+ALL_COUNTRY = {
+    "fund_cd": "253425",
+    "isin_cd": "JP90C000H1T1",
+    "association_fund_cd": "0331418A",
+    "fund_name": "ｅＭＡＸＩＳ Ｓｌｉｍ 全世界株式（オール・カントリー）",
+}
+SP500 = {
+    "fund_cd": "253266",
+    "isin_cd": "JP90C000FYT1",
+    "association_fund_cd": "0331C180",
+    "fund_name": "ｅＭＡＸＩＳ Ｓｌｉｍ 米国株式（Ｓ＆Ｐ５００）",
+}
+
+
+def mufg_payload(*datasets: dict) -> dict:
+    """The envelope of the 三菱UFJアセットマネジメント fund API."""
+    return {
+        "result": {"status": 200, "retcount": len(datasets), "errcd": None, "errmsg": None},
+        "errors": {"count": 0, "error_list": None},
+        "datasets": list(datasets),
+    }
+
+
+def mock_mufg(navs: dict[str, tuple[float, str]], *, code_list: list[dict] | None = None, funds=(ALL_COUNTRY, SP500)):
+    """Mocks the fund API: ``navs`` maps any code of a fund to (基準価額, 基準日 YYYYMMDD)."""
+    import httpx
+    import respx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/code_list":
+            return httpx.Response(200, json=mufg_payload(*(code_list if code_list is not None else funds)))
+        code = request.url.path.rsplit("/", 1)[-1]
+        for fund in funds:
+            if code in (fund["fund_cd"], fund["isin_cd"], fund["association_fund_cd"]) and code in navs:
+                nav, base_date = navs[code]
+                return httpx.Response(200, json=mufg_payload(fund | {"nav": nav, "base_date": base_date}))
+        return httpx.Response(200, json=mufg_payload())
+
+    return respx.get(url__startswith="https://developer.am.mufg.jp").mock(side_effect=handler)
+
+
+FANG_PLUS = "ｉＦｒｅｅＮＥＸＴ ＦＡＮＧ＋インデックス"
+DAIWA_HEADER = "基準日,基準価額（円）,前日比,純資産総額,直近決算日,直近分配金,分配金再投資基準価額"
+RAKUTEN_HEADER = "基準日,基準価額 (円),分配金再投資基準価額 (円),純資産総額 (億円),分配金 (円)"
+
+
+def daiwa_csv(nav: float, day: str = "20260924") -> str:
+    """大和アセットマネジメント の基準価額 CSV: 基準日 is YYYYMMDD and the history runs oldest first."""
+    return f"{DAIWA_HEADER}\n20180131,10000,0,500000000,0,0,10000\n{day},{nav},-18,4126016286,20260110,0,{nav}\n"
+
+
+def rakuten_csv(nav: float, day: str = "2026/09/24") -> str:
+    """楽天投信投資顧問 の基準価額 CSV: 基準日 is YYYY/MM/DD and 純資産総額 is in 億円."""
+    return f"{RAKUTEN_HEADER}\n2018/01/31,10000,10000,500.00,\n{day},{nav},{nav},412.14,\n"
+
+
+def mock_daiwa(navs: dict[str, tuple[float, str]], *, name: str = FANG_PLUS):
+    """Mocks csv_out.php. The CSV is Shift_JIS and the fund name only appears in the download name."""
+    import httpx
+    import respx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        code = request.url.params.get("code", "")
+        if code not in navs:
+            # An unknown code answers with the fund search page instead of a CSV.
+            return httpx.Response(200, text="<html><body>ファンドが見つかりません</body></html>")
+        nav, day = navs[code]
+        return httpx.Response(
+            200,
+            content=daiwa_csv(nav, day).encode("cp932"),
+            headers={b"content-disposition": f'attachment; filename="{name}.csv"'.encode("cp932")},
+        )
+
+    return respx.get(url__startswith="https://www.daiwa-am.co.jp").mock(side_effect=handler)
+
+
+def mock_rakuten(navs: dict[str, tuple[float, str]]):
+    """Mocks the chart CSV of 楽天投信投資顧問, which is filed under a 6-digit chart id."""
+    import httpx
+    import respx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        code = request.url.path.removeprefix("/assets/csv/chart_").removesuffix(".csv")
+        if code not in navs:
+            return httpx.Response(404, text="Not Found")
+        nav, day = navs[code]
+        return httpx.Response(200, content=rakuten_csv(nav, day).encode("cp932"))
+
+    return respx.get(url__startswith="https://www.rakuten-toushin.co.jp").mock(side_effect=handler)

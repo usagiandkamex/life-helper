@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { api, formatDate, json, yen } from '../api'
 import { LazyChart } from '../components/LazyChart'
 import { Disclaimer } from '../components/Markdown'
-import type { ChartData, PortfolioView, Price } from '../types'
+import type { ChartData, FundCandidates, Holding, PortfolioView } from '../types'
 
 const ACCOUNTS = [
   ['nisa_tsumitate', 'NISA つみたて投資枠'],
@@ -17,22 +17,54 @@ const KINDS = [
   ['etf', 'ETF'],
   ['reit', 'REIT'],
 ] as const
-const SOURCE_LABELS: Record<string, string> = { broker_csv: '証券会社 CSV', stooq: 'Stooq', nav_site: '基準価額サイト', manual: '手入力' }
+const SOURCE_LABELS: Record<string, string> = {
+  broker_csv: '証券会社 CSV',
+  stooq: 'Stooq',
+  nav_site: '基準価額サイト',
+  manual: '手入力',
+  mufg_api: '三菱UFJアセットマネジメント',
+  rakuten_csv: '楽天投信投資顧問',
+  daiwa_csv: '大和アセットマネジメント',
+}
 const MARKET_LABELS: Record<string, string> = { jp: '日本株', us: '米国株' }
 
 const amount = (value: number) => value.toLocaleString('ja-JP', { maximumFractionDigits: 2 })
 const label = (labels: Record<string, string>, key: string | null | undefined) => (key ? labels[key] ?? key : '')
+const marketToday = () => {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    day: '2-digit',
+    month: '2-digit',
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+  }).formatToParts(new Date())
+  const value = (type: string) => parts.find((part) => part.type === type)?.value ?? ''
+  return `${value('year')}-${value('month')}-${value('day')}`
+}
 
-function PriceCell({ price }: { price: Price | null }) {
+function PriceCell({ holding }: { holding: Holding }) {
+  const price = holding.price
   if (!price) return <>—</>
   const market = [label(MARKET_LABELS, price.market), price.symbol].filter(Boolean).join(' ')
   const converted = price.local_currency === 'USD' && price.local_value !== null && price.local_value !== undefined
+  const fund = holding.kind === 'fund'
   return (
     <>
-      <div>{amount(price.value)} 円</div>
+      <div>
+        {amount(price.value)} 円{fund && ` / ${amount(holding.price_unit)} 口`}
+      </div>
       <small>
         {market && `${market}・`}
+        {fund ? '基準日 ' : ''}
         {price.date}・{label(SOURCE_LABELS, price.source)}
+        {price.source_url && (
+          <>
+            ・
+            <a href={price.source_url} target="_blank" rel="noreferrer">
+              出典
+            </a>
+          </>
+        )}
+        {price.fetched_at && `・取得 ${formatDate(price.fetched_at)}`}
       </small>
       {converted && (
         <div>
@@ -42,6 +74,11 @@ function PriceCell({ price }: { price: Price | null }) {
               ? ` × ${amount(price.fx_rate)} 円/USD（${price.fx_date ?? '—'}・${label(SOURCE_LABELS, price.fx_source)}）`
               : '（円換算前）'}
           </small>
+        </div>
+      )}
+      {holding.stale && (
+        <div>
+          <small className="warn-text">{fund ? '基準価額が古いままです' : '価格が古いままです'}</small>
         </div>
       )}
     </>
@@ -55,6 +92,8 @@ export function PortfolioPage() {
   const [busy, setBusy] = useState(false)
   const [calculating, setCalculating] = useState(false)
   const [broker, setBroker] = useState('sbi')
+  const [fundTarget, setFundTarget] = useState<Holding | null>(null)
+  const [candidates, setCandidates] = useState<FundCandidates | null>(null)
   const [chart, setChart] = useState<ChartData | null>(null)
   const [simResult, setSimResult] = useState<{ principal: number; expected_value: number; percentiles: Record<string, number>; after_tax: Record<string, number> } | null>(null)
 
@@ -73,8 +112,10 @@ export function PortfolioPage() {
         setView(v)
         if (done) setMessage(done(v))
       }
+      return true
     } catch (e) {
       setError((e as Error).message)
+      return false
     } finally {
       setBusy(false)
     }
@@ -93,13 +134,65 @@ export function PortfolioPage() {
       await run(
         () => api<PortfolioView>('/api/portfolio/refresh-prices', { method: 'POST' }),
         (v) =>
-          `評価額を計算しました: 合計 ${yen(v.total_value)}（株価を ${v.refresh?.updated.length ?? 0} 件反映）。` +
+          `評価額を計算しました: 合計 ${yen(v.total_value)}` +
+          `（株価 ${v.refresh?.updated.length ?? 0} 件・基準価額 ${v.refresh_funds?.updated.length ?? 0} 件を反映）。` +
           `${v.refresh?.errors.length ? `${v.refresh.errors.length} 件は株価を取得できませんでした（理由は下に表示しています）。` : ''}` +
+          `${v.refresh_funds?.errors.length ? `${v.refresh_funds.errors.length} 件は基準価額を取得できませんでした（直前の基準価額を残しています）。` : ''}` +
           `${v.missing_prices.length ? `価格が未登録の ${v.missing_prices.length} 件は合計に含めていません。` : ''}` +
-          `${v.refresh?.note ?? ''}`,
+          [v.refresh?.note, v.refresh_funds?.note].filter(Boolean).join(' '),
       )
     } finally {
       setCalculating(false)
+    }
+  }
+
+  const searchFunds = (name: string) => {
+    setCandidates(null)
+    run(async () => {
+      setCandidates(await api<FundCandidates>(`/api/portfolio/fund-candidates?name=${encodeURIComponent(name)}`))
+    })
+  }
+
+  const openFundPicker = (h: Holding) => {
+    setFundTarget(h)
+    searchFunds(h.name)
+  }
+
+  // Linking always needs this click: a similar name alone never decides which fund a holding is.
+  const linkFund = async (target: Holding, provider: string, fundCode: string, priceUnit = 10000) => {
+    const ok = await run(
+      () =>
+        api<PortfolioView>('/api/portfolio/fund-link', {
+          method: 'POST',
+          body: json({ id: target.id, provider, fund_code: fundCode, price_unit: priceUnit }),
+        }),
+      (v) =>
+        provider === 'manual'
+          ? `${target.name} の基準価額を手入力に切り替えました`
+          : `${target.name} を ${v.link?.official_name || fundCode} に紐付け、基準価額を取得しました`,
+    )
+    if (ok) {
+      setFundTarget(null)
+      setCandidates(null)
+    }
+  }
+
+  // The manual fallback also has to set the NAV: switching the source alone would leave the old price in place.
+  const setManualNav = async (target: Holding, priceUnit: number, nav: number, priceDate: string) => {
+    if (!(nav > 0) || !(priceUnit > 0)) {
+      setError('基準価額と価格単位には 0 より大きい数値を入力してください')
+      return
+    }
+    const ok = await run(() =>
+      api<PortfolioView>('/api/portfolio/fund-link', {
+        method: 'POST',
+        body: json({ id: target.id, provider: 'manual', fund_code: '', price_unit: priceUnit, nav, price_date: priceDate }),
+      }),
+      () => `${target.name} の基準価額を手入力しました（${amount(nav)} 円 / ${amount(priceUnit)} 口）`,
+    )
+    if (ok) {
+      setFundTarget(null)
+      setCandidates(null)
     }
   }
 
@@ -177,8 +270,9 @@ export function PortfolioPage() {
           {calculating ? '計算中…' : '評価額を計算'}
         </button>
         <span className="hint">
-          株式・ETF・REIT の株価を更新（日本株・米国株／Stooq 前日終値）してから計算します。米国株は USD/JPY で円換算します。
-          投資信託の基準価額は手入力かチャットで更新してください。
+          株式・ETF・REIT は株価（日本株・米国株／Stooq 前日終値）、投資信託は基準価額（運用会社の公式 API・公式 CSV）を、
+          それぞれ別に更新してから計算します。米国株は USD/JPY で円換算します。
+          自動取得に対応していない投資信託は、公式サイトの基準価額を手入力してください。
         </span>
       </div>
       {view.refresh && view.refresh.errors.length > 0 && (
@@ -191,6 +285,26 @@ export function PortfolioPage() {
               </li>
             ))}
           </ul>
+        </div>
+      )}
+      {view.refresh_funds && view.refresh_funds.errors.length > 0 && (
+        <div className="banner error">
+          基準価額を取得できなかったファンド（直前の基準価額を残しています）:
+          <ul>
+            {view.refresh_funds.errors.map((e) => (
+              <li key={e.code}>
+                {e.code}: {e.error}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {(view.stale_prices.length > 0 || view.manual_funds.length > 0) && (
+        <div className="banner warn">
+          {view.stale_prices.length > 0 && <div>価格が古いままの銘柄: {view.stale_prices.join('、')}</div>}
+          {view.manual_funds.length > 0 && (
+            <div>基準価額を自動取得していない投資信託: {view.manual_funds.map((f) => f.name).join('、')}</div>
+          )}
         </div>
       )}
       <p className="hint">
@@ -229,6 +343,7 @@ export function PortfolioPage() {
                 <th>評価額</th>
                 <th>損益</th>
                 <th>価格（市場・日付・出どころ）</th>
+                <th>基準価額の取得元</th>
                 <th />
               </tr>
             </thead>
@@ -245,7 +360,25 @@ export function PortfolioPage() {
                   <td>{yen(h.value)}</td>
                   <td className={h.gain !== null && h.gain < 0 ? 'neg' : 'pos'}>{yen(h.gain)}</td>
                   <td>
-                    <PriceCell price={h.price} />
+                    <PriceCell holding={h} />
+                  </td>
+                  <td>
+                    {h.kind !== 'fund' ? (
+                      '—'
+                    ) : (
+                      <>
+                        <div>{h.auto_nav ? label(SOURCE_LABELS, h.fund?.provider) : '手入力'}</div>
+                        {h.fund?.fund_code && <small>{h.fund.fund_code}</small>}
+                        {!h.auto_nav && (
+                          <div>
+                            <small className="warn-text">自動取得未対応</small>
+                          </div>
+                        )}
+                        <button className="link small" onClick={() => openFundPicker(h)} disabled={busy}>
+                          取得元を設定
+                        </button>
+                      </>
+                    )}
                   </td>
                   <td>
                     <button className="link danger" onClick={() => removeHolding(h.id)}>
@@ -276,6 +409,148 @@ export function PortfolioPage() {
           </button>
         </form>
       </section>
+
+      {fundTarget && (
+        <section className="panel" key={fundTarget.id}>
+          <h2>基準価額の取得元: {fundTarget.name}</h2>
+          <p className="hint">
+            {candidates?.note ?? '公式ファンドの候補を探しています…'}
+            {view.fund_providers.length > 1 &&
+              `（対応運用会社: ${view.fund_providers
+                .filter((p) => p.provider !== 'manual')
+                .map((p) => p.manager)
+                .join('、')}）`}
+          </p>
+          <form
+            className="row wrap"
+            onSubmit={(e) => {
+              e.preventDefault()
+              searchFunds(new FormData(e.currentTarget).get('name') as string)
+            }}
+          >
+            <label>
+              ファンド名
+              <input name="name" defaultValue={fundTarget.name} required />
+            </label>
+            <button className="button" disabled={busy}>
+              候補を探す
+            </button>
+            <button type="button" className="button" onClick={() => setFundTarget(null)}>
+              閉じる
+            </button>
+          </form>
+          {candidates?.errors.map((e) => (
+            <p className="error-text" key={e.code}>
+              {e.code}: {e.error}
+            </p>
+          ))}
+          {candidates && candidates.candidates.length === 0 && (
+            <p className="hint">
+              候補が見つかりませんでした。運用会社とファンドコードを指定して紐付けるか、公式サイトの基準価額を手入力してください。
+            </p>
+          )}
+          {candidates && candidates.candidates.length > 0 && (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>公式のファンド名</th>
+                    <th>運用会社</th>
+                    <th>ファンドコード</th>
+                    <th>名前の一致度</th>
+                    <th />
+                  </tr>
+                </thead>
+                <tbody>
+                  {candidates.candidates.map((c) => (
+                    <tr key={`${c.provider}:${c.fund_code}`}>
+                      <td>{c.name}</td>
+                      <td>{c.manager}</td>
+                      <td>
+                        {c.fund_code}
+                        {c.isin && <small> / {c.isin}</small>}
+                      </td>
+                      <td>{Math.round(c.score * 100)}%</td>
+                      <td>
+                        <button
+                          className="button small"
+                          disabled={busy}
+                          onClick={() => linkFund(fundTarget, c.provider, c.fund_code)}
+                        >
+                          このファンドにする
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <p className="hint">
+            候補は名前が似ているだけのファンドを含みます。公式名称とファンドコードを確認してから選んでください。
+          </p>
+          <form
+            className="row wrap"
+            onSubmit={(e) => {
+              e.preventDefault()
+              const data = new FormData(e.currentTarget)
+              linkFund(fundTarget, String(data.get('provider')), String(data.get('fund_code')).trim())
+            }}
+          >
+            <label>
+              運用会社
+              <select name="provider">
+                {view.fund_providers
+                  .filter((p) => p.provider !== 'manual')
+                  .map((p) => (
+                    <option key={p.provider} value={p.provider}>
+                      {p.manager}
+                    </option>
+                  ))}
+              </select>
+            </label>
+            <label>
+              ファンドコード
+              <input name="fund_code" placeholder="ファンドコード" required />
+            </label>
+            <button className="button small" disabled={busy}>
+              コードを指定して紐付ける
+            </button>
+          </form>
+          <p className="hint">
+            運用会社によっては名前で検索できません。公式サイトのファンドページに書かれたコード（URL のファンドコード、投資信託協会コード、基準価額
+            CSV のリンクの番号）を指定してください。提供元が公式名称を返す場合は紐付け後に表示します。返さない場合は公式ページで入力したコードを確認してください。
+          </p>
+          <form
+            className="row wrap"
+            onSubmit={(e) => {
+              e.preventDefault()
+              const data = new FormData(e.currentTarget)
+              setManualNav(fundTarget, Number(data.get('price_unit')), Number(data.get('nav')), String(data.get('price_date')))
+            }}
+          >
+            <label>
+              基準価額（円）
+              <input name="nav" type="number" step="any" min="0" defaultValue={fundTarget.price?.value} required />
+            </label>
+            <label>
+              価格単位（口）
+              <input name="price_unit" type="number" min="1" step="1" defaultValue={fundTarget.price_unit} required />
+            </label>
+            <label>
+              基準日
+              <input name="price_date" type="date" defaultValue={fundTarget.price?.date ?? marketToday()} required />
+            </label>
+            <button className="button small" disabled={busy}>
+              自動取得を使わず手入力にする
+            </button>
+          </form>
+          <p className="hint">
+            公式サイトに載っている基準価額と、その口数単位（通常 1 万口）を入力してください。評価額は「保有口数 ÷ 価格単位 ×
+            基準価額」で計算します。エラーが出たときは基準価額が反映されていない場合があるので、表示されている基準価額を確認し、必要なら入力し直してください。
+          </p>
+        </section>
+      )}
 
       <section className="panel">
         <h2>積立シミュレーション</h2>

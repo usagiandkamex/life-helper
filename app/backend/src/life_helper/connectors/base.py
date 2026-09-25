@@ -68,7 +68,14 @@ class Connector:
             )
         return value
 
-    async def get(self, url: str, *, params: dict[str, Any], headers: dict[str, str] | None = None) -> httpx.Response:
+    async def get(
+        self,
+        url: str,
+        *,
+        params: dict[str, Any],
+        headers: dict[str, str] | None = None,
+        max_bytes: int | None = None,
+    ) -> httpx.Response:
         host = urlparse(url).hostname or ""
         if urlparse(url).scheme != "https" or host not in self.info.hosts:
             raise ConnectorError("接続先がこのコネクタで許可されていません")
@@ -78,7 +85,10 @@ class Connector:
                 await asyncio.sleep(wait)
             try:
                 async with httpx.AsyncClient(timeout=20, transport=self._transport, follow_redirects=False) as client:
-                    response = await client.get(url, params=params, headers=headers)
+                    if max_bytes is None:
+                        response = await client.get(url, params=params, headers=headers)
+                    else:
+                        response = await self._capped(client, url, params, headers, max_bytes)
             except httpx.HTTPError as e:
                 # Never propagate the raw exception: its message can contain the full URL with the API key.
                 logger.warning("%s request failed: %s", self.info.name, type(e).__name__)
@@ -87,6 +97,30 @@ class Connector:
                 self._last_call = time.monotonic()
         self._record_use()
         return response
+
+    async def _capped(
+        self,
+        client: httpx.AsyncClient,
+        url: str,
+        params: dict[str, Any],
+        headers: dict[str, str] | None,
+        max_bytes: int,
+    ) -> httpx.Response:
+        """Reads at most ``max_bytes`` of the body, so an oversized (or compressed) answer never fills memory."""
+        async with client.stream("GET", url, params=params, headers=headers) as streamed:
+            body = bytearray()
+            async for chunk in streamed.aiter_bytes():
+                body += chunk
+                if len(body) > max_bytes:
+                    raise ConnectorError(f"{self.info.label} の応答が想定より大きいため取り込みませんでした")
+            # aiter_bytes already decompressed the body, so the encoding and length of the wire form must go.
+            passthrough = httpx.Headers(streamed.headers)
+            for name in ("content-encoding", "content-length"):
+                if name in passthrough:
+                    del passthrough[name]
+            return httpx.Response(
+                streamed.status_code, headers=passthrough, content=bytes(body), request=streamed.request
+            )
 
     def mask(self, value: Any) -> Any:
         return self._masker.mask(value)

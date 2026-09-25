@@ -9,6 +9,8 @@ from copilot import define_tool
 from pydantic import BaseModel, Field
 
 from ..connectors.base import ConnectorError
+from ..market.clock import market_today
+from ..market.funds import fund_connectors, refresh_fund_navs
 from ..market.portfolio import (
     Account,
     CapitalGainsParams,
@@ -35,6 +37,13 @@ class StockPriceParams(BaseModel):
     code: str = Field(description="証券コードまたはティッカー（例: 7203、1306、MSFT）")
 
 
+class FundNavParams(BaseModel):
+    provider: str = Field(description="データ提供元（例: mufg_api、rakuten_csv、daiwa_csv）")
+    fund_code: str = Field(
+        max_length=32, description="運用会社のファンドコード・投資信託協会コード・ISIN（例: 0331418A）"
+    )
+
+
 class UpdateHoldingParams(BaseModel):
     action: Literal["add", "update", "delete"]
     id: str | None = Field(default=None, description="update / delete の対象 ID（get_portfolio の結果にある id）")
@@ -50,7 +59,7 @@ class UpdateHoldingParams(BaseModel):
 
 
 def apply_holding_update(ctx: AppContext, p: UpdateHoldingParams) -> dict:
-    price_date = (p.price_date or date.today()).isoformat()
+    price_date = (p.price_date or market_today()).isoformat()
     with portfolio_store(ctx).transaction() as portfolio:
         if p.action == "add":
             if not (p.account and p.kind and p.name and p.quantity is not None and p.cost_total is not None):
@@ -73,16 +82,29 @@ def apply_holding_update(ctx: AppContext, p: UpdateHoldingParams) -> dict:
         if p.action == "delete":
             portfolio.holdings.remove(target)
         else:
+            name, kind, code = target.name, target.kind, target.code
             for field in ("account", "kind", "code", "name", "quantity", "cost_total"):
                 value = getattr(p, field)
                 if value is not None:
                     setattr(target, field, value)
+            renamed = p.name is not None and p.name != name
+            retyped = p.kind is not None and p.kind != kind
+            recoded = p.code is not None and p.code != code
+            # A renamed or re-coded holding may be another fund, so its confirmed NAV source has to be picked again.
+            if target.kind != "fund" or renamed or recoded:
+                target.fund = None
+            # The old price (and the valuation computed from it) belongs to the previous instrument, so it must
+            # not value the new one. A price given in the same update replaces it below.
+            if renamed or retyped or recoded:
+                target.price, target.valuation_yen = None, None
             if p.price:
                 target.apply_price(Price(value=p.price, date=price_date, source=p.price_source))
         return {"ok": True, "id": target.id}
 
 
 def build_tools(ctx: AppContext) -> list[ToolSpec]:
+    fund_provider_names = tuple(fund_connectors(ctx))
+
     @define_tool(
         name="get_portfolio",
         description="保有銘柄、口座区分ごとの評価額・含み損益・資産配分、価格の日付と出どころを返す。",
@@ -105,10 +127,32 @@ def build_tools(ctx: AppContext) -> list[ToolSpec]:
     @define_tool(
         name="refresh_stock_prices",
         description="保有している日本株・米国株・ETF・REIT の価格を Stooq の前日終値で更新する"
-        "（証券会社 CSV より新しい場合のみ。米国株は USD/JPY で円換算）。",
+        "（証券会社 CSV より新しい場合のみ。米国株は USD/JPY で円換算。投資信託は対象外）。",
     )
     async def refresh_prices(params: EmptyParams) -> dict:
         return await refresh_stock_prices(ctx)
+
+    @define_tool(
+        name="get_fund_nav",
+        description="投資信託の基準価額を運用会社の公式 API・公式 CSV から取得する"
+        "（データ提供元とファンドコードを指定。株価の Stooq とは別）。",
+    )
+    async def get_fund_nav(params: FundNavParams) -> dict:
+        connector = fund_connectors(ctx).get(params.provider)
+        if connector is None:
+            return {"error": f"対応していないデータ提供元です: {params.provider}"}
+        try:
+            return await connector.fund_nav(params.fund_code, today=market_today())
+        except ConnectorError as e:
+            return {"error": str(e)}
+
+    @define_tool(
+        name="refresh_fund_navs",
+        description="保有している投資信託の基準価額を、紐付けた運用会社の公式 API・公式 CSV から更新して"
+        "評価額を計算し直す（紐付けていないファンドは手入力のまま）。",
+    )
+    async def refresh_navs(params: EmptyParams) -> dict:
+        return await refresh_fund_navs(ctx)
 
     @define_tool(
         name="simulate_investment",
@@ -137,6 +181,8 @@ def build_tools(ctx: AppContext) -> list[ToolSpec]:
         ToolSpec(get_portfolio),
         ToolSpec(get_stock_price, connector="stooq"),
         ToolSpec(refresh_prices, writes=True, connector="stooq"),
+        ToolSpec(get_fund_nav, connector=fund_provider_names),
+        ToolSpec(refresh_navs, writes=True, connector=fund_provider_names),
         ToolSpec(simulate_investment_tool),
         ToolSpec(estimate_tax),
         ToolSpec(update_holding, writes=True),
