@@ -42,7 +42,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   // Bumped on every change of what is shown; a response started under an older value is dropped.
   const generationRef = useRef(0)
   const threadsRequestRef = useRef(0)
-  const readRequestRef = useRef(0)
+  const readQueueRef = useRef<Promise<void>>(Promise.resolve())
   const handledLinkRef = useRef<string | null>(null)
   // Where to scroll once a loaded automation conversation is rendered ('bottom' or an element id).
   const scrollTargetRef = useRef<string | null>(null)
@@ -123,13 +123,17 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
     async (id: string, runs: RunRecord[]) => {
       const unread = runs.filter((r) => !r.read).map((r) => r.id)
       if (unread.length === 0) return
-      const request = ++readRequestRef.current
-      // Only the runs on screen: one that arrived after they were loaded stays unread.
-      const res = await api<{ unread: number }>(`/api/automations/chat/${id}/read`, {
-        method: 'POST',
-        body: json({ run_ids: unread }),
+      // Serialize mutations: unread counts follow server completion order, not request start order.
+      const request = readQueueRef.current.then(async () => {
+        // Only the runs on screen: one that arrived after they were loaded stays unread.
+        const res = await api<{ unread: number }>(`/api/automations/chat/${id}/read`, {
+          method: 'POST',
+          body: json({ run_ids: unread }),
+        })
+        onUnreadChange(res.unread)
       })
-      if (request === readRequestRef.current) onUnreadChange(res.unread)
+      readQueueRef.current = request.catch(() => undefined)
+      await request
       await loadThreads()
     },
     [loadThreads, onUnreadChange],
