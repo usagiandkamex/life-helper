@@ -47,6 +47,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   const [params, setParams] = useSearchParams()
   const [list, setList] = useState<AutomationList | null>(null)
   const [draft, setDraft] = useState<Draft | null>(null)
+  const [models, setModels] = useState<{ id: string; name: string }[]>([])
   const [runs, setRuns] = useState<RunRecord[]>([])
   const [run, setRun] = useState<RunRecord | null>(null)
   const [error, setError] = useState('')
@@ -73,6 +74,10 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
 
   useEffect(() => {
     load().catch((e) => setError(e.message))
+    // The list is only used to fill the model dropdown, so a failure (e.g. an expired token) is not shown here.
+    api<{ models: { id: string; name: string }[] }>('/api/models')
+      .then((d) => setModels(d.models))
+      .catch(() => undefined)
   }, [load])
 
   useEffect(() => {
@@ -182,7 +187,16 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
         </div>
       </section>
 
-      {draft && <Editor draft={draft} setDraft={setDraft} list={list} onSave={() => save()} onCancel={() => setDraft(null)} />}
+      {draft && (
+        <Editor
+          draft={draft}
+          setDraft={setDraft}
+          list={list}
+          models={models}
+          onSave={() => save()}
+          onCancel={() => setDraft(null)}
+        />
+      )}
 
       <section className="panel">
         <h2>実行履歴</h2>
@@ -229,12 +243,14 @@ function Editor({
   draft,
   setDraft,
   list,
+  models,
   onSave,
   onCancel,
 }: {
   draft: Draft
   setDraft: (d: Draft) => void
   list: AutomationList
+  models: { id: string; name: string }[]
   onSave: () => void
   onCancel: () => void
 }) {
@@ -243,6 +259,15 @@ function Editor({
   const setNotify = (patch: Partial<NotifySettings>) => set('notify', { ...draft.notify, ...patch })
   const s = draft.schedule
   const n = draft.notify
+  // The saved model stays selectable even when the list is unavailable or no longer offers it, so opening the
+  // editor never switches an automation to another model by itself.
+  const modelOptions = [
+    { id: 'auto', name: '自動（おまかせ）' },
+    ...models.filter((m) => m.id !== 'auto'),
+    ...(draft.model && draft.model !== 'auto' && !models.some((m) => m.id === draft.model)
+      ? [{ id: draft.model, name: draft.model }]
+      : []),
+  ]
   return (
     <section className="panel editor-panel">
       <h2>{draft.id ? 'オートメーションの編集' : '新しいオートメーション'}</h2>
@@ -311,7 +336,13 @@ function Editor({
         </label>
         <label>
           モデル
-          <input value={draft.model} onChange={(e) => set('model', e.target.value)} />
+          <select value={draft.model} onChange={(e) => set('model', e.target.value)}>
+            {modelOptions.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.name}
+              </option>
+            ))}
+          </select>
         </label>
         <label>
           最大実行時間（分、20 まで）

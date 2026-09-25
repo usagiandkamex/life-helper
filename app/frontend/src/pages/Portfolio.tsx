@@ -59,30 +59,16 @@ const marketToday = () => {
 function PriceCell({ holding }: { holding: Holding }) {
   const price = holding.price
   if (!price) return <>—</>
-  const market = [label(MARKET_LABELS, price.market), price.symbol].filter(Boolean).join(' ')
   const converted = price.local_currency === 'USD' && price.local_value !== null && price.local_value !== undefined
   const fund = holding.kind === 'fund'
   // A broker CSV is dated with the day it was imported, not with the 基準日 of the NAV inside it.
-  const datePrefix = fund ? (price.source === 'broker_csv' ? 'CSV 取込日 ' : '基準日 ') : ''
+  const date = price.source === 'broker_csv' ? `CSV 取込日 ${price.date}` : `${price.date} 時点`
   return (
     <>
       <div>
         {amount(price.value)} 円{fund && ` / ${amount(holding.price_unit)} 口`}
       </div>
-      <small>
-        {market && `${market}・`}
-        {datePrefix}
-        {price.date}・{label(SOURCE_LABELS, price.source)}
-        {price.source_url && (
-          <>
-            ・
-            <a href={price.source_url} target="_blank" rel="noreferrer">
-              出典
-            </a>
-          </>
-        )}
-        {price.fetched_at && `・取得 ${formatDate(price.fetched_at)}`}
-      </small>
+      <small>{date}</small>
       {converted && (
         <div>
           <small>
@@ -95,8 +81,60 @@ function PriceCell({ holding }: { holding: Holding }) {
       )}
       {holding.stale && (
         <div>
-          <small className="warn-text">{fund ? '基準価額が古いままです' : '価格が古いままです'}</small>
+          <small className="warn-text">価格が古いままです</small>
         </div>
+      )}
+    </>
+  )
+}
+
+// 取得元の書き方は投資信託も個別銘柄も同じにする: 1 行目が表示中の価格の出どころ、2 行目がその取得元での銘柄の識別子。
+// 投資信託は次の更新に使う取得元が表示中の価格の出どころと違うことがある（CSV を取り込んだ直後など）ので、そのときだけ続けて書く。
+function SourceCell({ holding, busy, onPick }: { holding: Holding; busy: boolean; onPick: (h: Holding) => void }) {
+  const price = holding.price
+  const fund = holding.kind === 'fund'
+  const source = price ? label(SOURCE_LABELS, price.source) : '未取得'
+  // auto_nav は「公式ファンドに紐付いていて自動更新する投資信託」だけ true。
+  const updater = holding.auto_nav && price?.source !== holding.fund?.provider ? label(SOURCE_LABELS, holding.fund?.provider) : ''
+  const code = fund
+    ? (holding.fund?.fund_code ?? '')
+    : [label(MARKET_LABELS, price?.market), price?.symbol].filter(Boolean).join(' ')
+  return (
+    <>
+      <div>
+        {source}
+        {price?.source_url && (
+          <>
+            {' '}
+            <a href={price.source_url} target="_blank" rel="noreferrer">
+              出典
+            </a>
+          </>
+        )}
+      </div>
+      {/* コードは表示中の価格の取得元での識別子。更新元が違うときは、そちらの識別子として書く。 */}
+      {code && !updater && (
+        <div>
+          <small>{code}</small>
+        </div>
+      )}
+      {updater && (
+        <div>
+          <small>
+            次の更新は {updater}
+            {code && `（${code}）`}
+          </small>
+        </div>
+      )}
+      {fund && !holding.auto_nav && (
+        <div>
+          <small className="warn-text">{holding.fund ? '自動では更新しません' : '取得元が未設定です'}</small>
+        </div>
+      )}
+      {fund && (
+        <button className="link small" onClick={() => onPick(holding)} disabled={busy}>
+          取得元を設定
+        </button>
       )}
     </>
   )
@@ -530,11 +568,14 @@ export function PortfolioPage() {
         <button className="button primary" onClick={calculate} disabled={busy || calculating}>
           {calculating ? '計算中…' : '評価額を計算'}
         </button>
-        <span className="hint">
-          株式・ETF・REIT は株価（日本株・米国株／Yahoo Finance の前日終値）、投資信託は基準価額（投資信託協会の投信総合検索ライブラリー・運用会社の公式
-          CSV）を、それぞれ別に更新してから計算します。米国株は USD/JPY で円換算します。取得元が未設定の投資信託は、ファンド名が一致する公式ファンドが
-          1 つだけなら自動で紐付けます。紐付けられなかった投資信託は「取得元を設定」から選ぶか、公式サイトの基準価額を手入力してください。
-        </span>
+        <details className="hint grow">
+          <summary>価格の更新について</summary>
+          <p>
+            株式・ETF・REIT は株価（日本株・米国株／Yahoo Finance の前日終値）、投資信託は基準価額（投資信託協会の投信総合検索ライブラリー・運用会社の公式
+            CSV）を、それぞれ別に更新してから計算します。米国株は USD/JPY で円換算します。取得元が未設定の投資信託は、ファンド名が一致する公式ファンドが
+            1 つだけなら自動で紐付けます。紐付けられなかった投資信託は「取得元を設定」から選ぶか、公式サイトの基準価額を手入力してください。
+          </p>
+        </details>
       </div>
       {view.refresh && view.refresh.errors.length > 0 && (
         <div className="banner error">
@@ -584,27 +625,6 @@ export function PortfolioPage() {
       </p>
 
       <section className="panel">
-        <h2>保有銘柄の更新</h2>
-        <div className="row wrap">
-          <select value={broker} onChange={(e) => setBroker(e.target.value)}>
-            {view.brokers.map((b) => (
-              <option key={b.name} value={b.name}>
-                {b.label}
-              </option>
-            ))}
-          </select>
-          <label className="button">
-            保有証券 CSV を取り込む
-            <input type="file" accept=".csv" hidden disabled={busy} onChange={(e) => e.target.files?.[0] && importCsv(e.target.files[0])} />
-          </label>
-        </div>
-        <p className="hint">
-          CSV の取り込みは保有銘柄を置き換えます（手で編集した数量・取得額も CSV の値になります）。CSV の評価額が最も正確です（取り込み時点）。株価・基準価額の更新は「評価額を計算」から行います。
-          積立・買い増しの後は、CSV を取り込み直すか、保有銘柄の「数量・取得額を編集」で購入分を加算してください。
-        </p>
-      </section>
-
-      <section className="panel">
         <h2>保有銘柄</h2>
         <div className="table-wrap">
           <table>
@@ -616,8 +636,8 @@ export function PortfolioPage() {
                 <th>取得額</th>
                 <th>評価額</th>
                 <th>損益</th>
-                <th>価格（市場・日付・出どころ）</th>
-                <th>基準価額の取得元</th>
+                <th>価格</th>
+                <th>取得元</th>
                 <th />
               </tr>
             </thead>
@@ -637,22 +657,7 @@ export function PortfolioPage() {
                     <PriceCell holding={h} />
                   </td>
                   <td>
-                    {h.kind !== 'fund' ? (
-                      '—'
-                    ) : (
-                      <>
-                        <div>{h.auto_nav ? label(SOURCE_LABELS, h.fund?.provider) : h.fund ? '手入力' : '未設定'}</div>
-                        {h.fund?.fund_code && <small>{h.fund.fund_code}</small>}
-                        {!h.auto_nav && (
-                          <div>
-                            <small className="warn-text">{h.fund ? '自動取得しない' : '自動取得していません'}</small>
-                          </div>
-                        )}
-                        <button className="link small" onClick={() => openFundPicker(h)} disabled={busy}>
-                          取得元を設定
-                        </button>
-                      </>
-                    )}
+                    <SourceCell holding={h} busy={busy} onPick={openFundPicker} />
                   </td>
                   <td>
                     <div>
@@ -687,6 +692,33 @@ export function PortfolioPage() {
             手入力で追加
           </button>
         </form>
+      </section>
+
+      <section className="panel">
+        <h2>保有銘柄の更新</h2>
+        <div className="row wrap">
+          <select value={broker} onChange={(e) => setBroker(e.target.value)}>
+            {view.brokers.map((b) => (
+              <option key={b.name} value={b.name}>
+                {b.label}
+              </option>
+            ))}
+          </select>
+          <label className="button">
+            保有証券 CSV を取り込む
+            <input type="file" accept=".csv" hidden disabled={busy} onChange={(e) => e.target.files?.[0] && importCsv(e.target.files[0])} />
+          </label>
+        </div>
+        <p className="hint warn-text">
+          取り込むと保有銘柄は CSV の内容に置き換わります（手で編集した数量・取得額も CSV の値になります）。
+        </p>
+        <details className="hint">
+          <summary>CSV 取り込みの使い方</summary>
+          <p>
+            CSV の評価額が最も正確です（取り込み時点）。株価・基準価額の更新は「評価額を計算」から行います。
+            積立・買い増しの後は、CSV を取り込み直すか、保有銘柄の「数量・取得額を編集」で購入分を加算してください。
+          </p>
+        </details>
       </section>
 
       {editing && (
