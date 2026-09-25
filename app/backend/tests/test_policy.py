@@ -85,7 +85,7 @@ def test_url_permissions(policy):
         "http://www.soumu.go.jp/",
         "https://evil-go.jp/",
         "https://example.com/",
-        "https://stooq.com/q/d/l/?s=7203.jp",
+        "https://query1.finance.yahoo.com/v8/finance/chart/7203.T",
         "https://openapi.rakuten.co.jp/engine/api",
     ):
         assert not approved(policy.handle_permission(req("url", url=bad), {})), bad
@@ -179,7 +179,9 @@ async def test_pre_tool_use_checks_string_paths_and_both_keys(policy, kb, tmp_pa
 
 async def test_pre_tool_use_rejects_unknown_tools_and_bad_urls(policy):
     assert (await policy.pre_tool_use({"toolName": "powershell", "toolArgs": {}}, {}))["permissionDecision"] == "deny"
-    out = await policy.pre_tool_use({"toolName": "web_fetch", "toolArgs": {"url": "https://stooq.com/?apikey=x"}}, {})
+    out = await policy.pre_tool_use(
+        {"toolName": "web_fetch", "toolArgs": {"url": "https://openapi.rakuten.co.jp/?applicationId=x"}}, {}
+    )
     assert out["permissionDecision"] == "deny"
     assert (
         await policy.pre_tool_use({"toolName": "web_fetch", "toolArgs": {"url": "https://www.nta.go.jp/"}}, {}) is None

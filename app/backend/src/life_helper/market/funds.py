@@ -1,6 +1,6 @@
 """Fund NAV lookup: linking a holding to an official fund and refreshing 基準価額.
 
-Kept apart from the Stooq stock refresh on purpose: funds are not traded on an exchange, so their prices come
+Kept apart from the Yahoo Finance stock refresh on purpose: funds are not traded on an exchange, so their prices come
 from the fund manager instead, and a failure on one side never blocks the other.
 """
 
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 MANUAL_PROVIDER = "manual"
 NOTE = (
-    "基準価額は運用会社の公式 API・公式 CSV から取得しています（株価の Stooq 更新とは別処理です）。"
+    "基準価額は運用会社の公式 API・公式 CSV から取得しています（株価の Yahoo Finance 更新とは別処理です）。"
     "自動取得に対応していないファンドは、公式サイトで確認して手入力してください。"
 )
 

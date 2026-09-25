@@ -60,8 +60,10 @@ cd life-helper
 
 | サービス | 用途 | 取得 |
 |---|---|---|
-| Stooq | 日本株・米国株・ETF の前日終値と USD/JPY | ブラウザで CAPTCHA を解いて API キーを取得 |
 | 楽天ウェブサービス | 楽天トラベルの空室検索 | アプリ登録で `applicationId` と `accessKey` を取得 |
+
+株価（日本株・米国株・ETF・REIT の前日終値）と USD/JPY は、Yahoo Finance のチャート API から取得します。API キーも設定も不要です。
+公式に公開された API ではない（yfinance などが使っているものと同じ）ため、個人利用の範囲で使い、仕様変更や利用制限で取得できないときは手入力で補ってください。
 
 投資信託の基準価額に使う運用会社の公式データは、いずれも API キー不要で設定も要りません（各社の利用規約の範囲内で個人利用）。
 Phase 1 の[三菱UFJアセットマネジメント 投信情報 API](https://www.am.mufg.jp/tool/webapi/)（[利用規約](https://www.am.mufg.jp/tool/webapi/agreement.html)）と、
@@ -141,7 +143,6 @@ Client secret はリポジトリのファイルに保存しないでください
 
 ```powershell
 # 外部サービス（ステップ 1-3）
-azd env set LH_STOOQ_API_KEY <Stooq の API キー>
 azd env set LH_RAKUTEN_APPLICATION_ID <applicationId>
 azd env set LH_RAKUTEN_ACCESS_KEY <accessKey>
 
@@ -242,7 +243,6 @@ gh variable get DEPLOY_ENABLED --repo usagiandkamex/life-helper
 | `LH_TOKEN_ENCRYPTION_KEY` | ○ | シークレット | 保存する GitHub トークンの暗号化 | 2-1 |
 | `LH_GITHUB_OAUTH_CLIENT_ID` | ○ | 変数 | GitHub ログイン | 2-2 |
 | `LH_GITHUB_OAUTH_CLIENT_SECRET` | ○ | シークレット | GitHub ログイン | 2-2 |
-| `LH_STOOQ_API_KEY` | | シークレット | 株価（Stooq） | 2-3 |
 | `LH_RAKUTEN_APPLICATION_ID` / `LH_RAKUTEN_ACCESS_KEY` | | シークレット | 楽天トラベル空室検索 | 2-3 |
 | `LH_GITHUB_APP_ID` / `LH_GITHUB_APP_INSTALLATION_ID` | | 変数 | GitHub 通知 | 2-3 |
 | `LH_GITHUB_APP_PRIVATE_KEY` | | シークレット | GitHub 通知 | 2-3 |

@@ -42,7 +42,6 @@ class Settings(BaseSettings):
     extra_fetch_domains: str = ""
 
     # External API connectors (values come from ACA secrets; never stored in files).
-    stooq_api_key: SecretStr = SecretStr("")
     rakuten_application_id: SecretStr = SecretStr("")
     rakuten_access_key: SecretStr = SecretStr("")
     # Rakuten changes endpoint versions from time to time; override without a code change if needed.
@@ -136,7 +135,6 @@ class Settings(BaseSettings):
             self.session_secret,
             self.token_encryption_key,
             self.dev_github_token,
-            self.stooq_api_key,
             self.rakuten_application_id,
             self.rakuten_access_key,
             self.github_app_private_key,

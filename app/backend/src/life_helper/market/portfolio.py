@@ -26,7 +26,10 @@ Account = Literal["nisa_tsumitate", "nisa_growth", "tokutei", "ippan", "ideco"]
 Kind = Literal["stock", "etf", "reit", "fund"]
 # Fund NAV providers double as price sources, so the screen can show where a NAV came from.
 FundProvider = Literal["mufg_api", "rakuten_csv", "daiwa_csv", "manual"]
-PriceSource = Literal["broker_csv", "stooq", "nav_site", "manual", "mufg_api", "rakuten_csv", "daiwa_csv"]
+# "stooq" is no longer fetched but stays valid, so prices saved before the switch to Yahoo Finance still load.
+PriceSource = Literal[
+    "broker_csv", "yahoo_finance", "stooq", "nav_site", "manual", "mufg_api", "rakuten_csv", "daiwa_csv"
+]
 Market = Literal["jp", "us"]
 Currency = Literal["JPY", "USD"]
 # Japanese funds quote the NAV per 10,000 units, but the unit is kept per fund because it can differ.
@@ -51,7 +54,7 @@ class Price(BaseModel):
     source: PriceSource
     # Optional, so that portfolios saved before US stocks were supported still load.
     market: Market | None = Field(default=None, description="日本株（jp）か米国株（us）か")
-    symbol: str | None = Field(default=None, description="取得に使った Stooq のシンボル（例: msft.us）")
+    symbol: str | None = Field(default=None, description="取得に使ったシンボル（例: 7203.T、MSFT）")
     local_currency: Currency = Field(default="JPY", description="現地通貨（米国株は USD）")
     local_value: float | None = Field(default=None, description="現地通貨建ての価格（米国株は USD）")
     fx_rate: float | None = Field(default=None, description="円換算に使った USD/JPY")

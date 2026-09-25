@@ -7,7 +7,7 @@ description: NISA・iDeCo・投資信託・株の保有状況の確認、積立�
 
 ## できること
 - `get_portfolio`: 保有銘柄、口座区分（NISA つみたて / 成長・特定・一般・iDeCo）ごとの評価額・含み損益・資産配分
-- `get_stock_price`: 日本株・米国株・ETF・REIT の前日終値（Stooq。キャッシュ優先。米国株は USD/JPY で円換算）
+- `get_stock_price`: 日本株・米国株・ETF・REIT の前日終値（Yahoo Finance。キャッシュ優先。米国株は USD/JPY で円換算）
 - `get_fund_nav`: 日本の投資信託の基準価額（運用会社の公式 API・公式 CSV。基準日・価格単位・出典 URL つき）
 - `refresh_fund_navs`: 紐付け済みの投資信託の基準価額をまとめて更新し、評価額を計算し直す
 - `simulate_investment`: 積立の将来シミュレーション（幅のある結果、NISA と課税口座の税引後比較）
@@ -15,7 +15,7 @@ description: NISA・iDeCo・投資信託・株の保有状況の確認、積立�
 - `update_holding`: 保有銘柄の追加・更新・削除（利用者が明確に頼んだときだけ使う）
 
 ## 進め方
-1. まず `get_portfolio` で現状を確認する。価格の日付と出どころ（証券会社 CSV / Stooq / 運用会社の公式 API・公式 CSV / 手入力）を必ず添える。
+1. まず `get_portfolio` で現状を確認する。価格の日付と出どころ（証券会社 CSV / Yahoo Finance / 運用会社の公式 API・公式 CSV / 手入力）を必ず添える。
    株・ETF・REIT の株価が古い場合は、証券会社の保有証券 CSV をポートフォリオ画面から取り込むよう勧める。
    投資信託の基準価額が古い場合は `refresh_fund_navs` で更新する。紐付けていないファンドは、ポートフォリオ画面の「取得元を設定」で
    運用会社の公式データに紐付けるか、対応していなければ公式サイトの基準価額を手入力するよう案内する。
