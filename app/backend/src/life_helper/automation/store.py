@@ -119,11 +119,18 @@ class AutomationStore:
         return self.runs_dir / automation_id
 
     def save_run(self, record: dict) -> None:
-        path = self._run_dir(record["automation_id"]) / f"{record['id']}.json"
-        atomic_write(path, json.dumps(record, ensure_ascii=False, indent=1))
-        read = self._read_run_meta(path)
-        if read is not None and read[1] is not None:
-            self._update_run_index({f"{record['automation_id']}/{record['id']}": read[1]})
+        self._save_runs([record])
+
+    def _save_runs(self, records: list[dict]) -> None:
+        entries = {}
+        for record in records:
+            path = self._run_dir(record["automation_id"]) / f"{record['id']}.json"
+            atomic_write(path, json.dumps(record, ensure_ascii=False, indent=1))
+            read = self._read_run_meta(path)
+            if read is not None and read[1] is not None:
+                entries[f"{record['automation_id']}/{record['id']}"] = read[1]
+        if entries:
+            self._update_run_index(entries)
 
     # The index only caches what list_run_meta() would otherwise read from every record, so a failed or outdated
     # update never loses anything: the next read repairs the entry from the record itself.
@@ -231,10 +238,16 @@ class AutomationStore:
             return None
 
     def mark_read(self, automation_id: str, run_id: str) -> None:
-        record = self.get_run(automation_id, run_id)
-        if record and not record.get("read"):
-            record["read"] = True
-            self.save_run(record)
+        self.mark_runs_read(automation_id, [run_id])
+
+    def mark_runs_read(self, automation_id: str, run_ids: list[str]) -> None:
+        records = []
+        for run_id in dict.fromkeys(run_ids):
+            record = self.get_run(automation_id, run_id)
+            if record and not record.get("read"):
+                record["read"] = True
+                records.append(record)
+        self._save_runs(records)
 
     def unread_count(self) -> int:
         return sum(1 for r in self.list_run_meta() if not r.get("read"))

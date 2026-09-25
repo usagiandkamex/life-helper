@@ -5,6 +5,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -16,6 +17,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from pydantic import SecretStr, ValidationError
 
 from life_helper.automation import chat
+from life_helper.automation import store as store_module
 from life_helper.automation.locks import FileLock
 from life_helper.automation.models import Automation, NotifySettings, Schedule, expand_prompt
 from life_helper.automation.runner import AutomationRunner, trim_events
@@ -661,6 +663,46 @@ def test_mark_thread_read_only_marks_the_runs_that_were_shown(tmp_path):
     assert store.get_run("aaaaaa000001", "a000000000000001")["read"] is True
     assert store.get_run("aaaaaa000001", "a000000000000002")["read"] is False
     assert store.get_run("bbbbbb000001", "b000000000000001")["read"] is False  # other conversation
+
+
+@pytest.mark.parametrize("anchored", [False, True])
+def test_mark_thread_read_batches_index_updates(tmp_path, anchored):
+    store = AutomationStore(tmp_path)
+    automation_id = "aaaaaa000001"
+    thread_id = f"c-{automation_id}"
+    ids = [f"a{i:015x}" for i in range(chat.ANCHOR_LIMIT + 2)]
+    for i, run_id in enumerate(ids):
+        store.save_run(_chat_record(automation_id, run_id, mode="continue", minute=i))
+    page = chat.get_thread(store, thread_id, anchor=ids[1] if anchored else None)
+    shown_ids = [r["id"] for r in page["runs"]]
+    assert len(shown_ids) == (chat.ANCHOR_LIMIT if anchored else chat.PAGE_SIZE)
+    store.mark_read(automation_id, shown_ids[0])
+    store.save_run(_chat_record(automation_id, "ffffffffffffffff", mode="continue", minute=len(ids)))
+    store.save_run(_chat_record(automation_id, "eeeeeeeeeeeeeeee"))
+    with (
+        patch.object(store, "_read_run_index", wraps=store._read_run_index) as index_reads,
+        patch.object(store_module, "atomic_write", wraps=store_module.atomic_write) as writes,
+    ):
+        assert chat.mark_thread_read(
+            store, thread_id, shown_ids + [shown_ids[-1], "eeeeeeeeeeeeeeee", "dddddddddddddddd", "../x"]
+        )
+        assert index_reads.call_count == 2  # thread metadata lookup and the single batched update
+        paths = [call.args[0] for call in writes.call_args_list]
+        assert paths.count(store.run_index_path) == 1
+        assert len(paths) == len(shown_ids)  # already-read and duplicate records are not rewritten
+
+        writes.reset_mock()
+        assert chat.mark_thread_read(store, thread_id, shown_ids)
+        assert chat.mark_thread_read(store, thread_id, [])
+        assert not chat.mark_thread_read(store, "c-bbbbbb000001", shown_ids)
+        writes.assert_not_called()
+
+    for meta in store.list_run_meta():
+        record = store.get_run(automation_id, meta["id"])
+        assert meta["read"] is (meta["id"] in shown_ids)
+        assert record["read"] == meta["read"]
+        assert record["events"] == [{"type": "message", "content": "確認しました"}]
+    assert store.unread_count() == len(ids) + 2 - len(shown_ids)
 
 
 def test_thread_paging_and_anchor(tmp_path, monkeypatch):

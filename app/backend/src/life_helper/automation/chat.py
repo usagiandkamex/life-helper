@@ -128,10 +128,9 @@ def mark_thread_read(store: AutomationStore, thread_id: str, run_ids: list[str])
     runs = {r["id"]: r for r in _thread_meta(store, thread_id)}
     if not runs:
         return False
-    for run_id in dict.fromkeys(run_ids):
-        record = runs.get(run_id)
-        if record is not None and not record.get("read"):
-            store.mark_read(automation_id, run_id)
+    store.mark_runs_read(
+        automation_id, [run_id for run_id in run_ids if run_id in runs and not runs[run_id].get("read")]
+    )
     return True
 
 
