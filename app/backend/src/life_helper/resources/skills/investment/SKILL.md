@@ -12,7 +12,9 @@ description: NISA・iDeCo・投資信託・株の保有状況の確認、積立�
 - `refresh_fund_navs`: 投資信託の基準価額をまとめて更新し、評価額を計算し直す（取得元が未設定のファンドは、名前が一致する公式ファンドが 1 つだけなら自動で紐付ける）
 - `simulate_investment`: 積立の将来シミュレーション（幅のある結果、NISA と課税口座の税引後比較）
 - `estimate_capital_gains_tax`: 課税口座の売却益・配当の税額の目安
-- `update_holding`: 保有銘柄の追加・更新・削除（利用者が明確に頼んだときだけ使う）
+- `update_holding`: 保有銘柄の追加・更新・削除（利用者が明確に頼んだときだけ使う）。積立・買い増しを反映するときは、
+  `get_portfolio` の `quantity`・`cost_total_exact` に購入分を足した合計を `quantity`・`cost_total` に渡し、
+  前提にした値を `expected_quantity`・`expected_cost_total` に渡す（ほかの更新と重なったら更新されない）
 
 ## 進め方
 1. まず `get_portfolio` で現状を確認する。価格の日付と出どころ（証券会社 CSV の取込日 / Yahoo Finance / 投資信託協会・運用会社の公式 CSV / 手入力）を必ず添える。

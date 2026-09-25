@@ -136,7 +136,10 @@ class AutomationRunner:
             if not get_connectors(self.ctx).get(c) or not get_connectors(self.ctx)[c].configured
         ]
         if missing:
-            record |= {"status": "error", "summary": f"コネクタの API キーが登録されていません: {', '.join(missing)}"}
+            record |= {
+                "status": "error",
+                "summary": f"使えないコネクタがあります（API キーが未登録か、機能が無効）: {', '.join(missing)}",
+            }
             await self._notify_failure(automation, record)
             return self._finish(automation, record, condition_met=None)
         if not await self._token_valid():
@@ -290,6 +293,7 @@ class AutomationRunner:
             raise
         finally:
             unsubscribe()
+            await active.release()
             # Always close: report_result is bound to this run's context, so a cached session would report into a
             # previous run. "continue" mode resumes the stored history from disk next time; "new" mode sessions are
             # deleted so per-run session state does not pile up on the volume.

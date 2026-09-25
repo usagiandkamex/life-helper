@@ -12,6 +12,7 @@ from ..auth import CurrentUser, require_user
 from ..context import AppContext, get_ctx
 from ..tools.registry import ToolSpec
 from .base import Connector, ConnectorError
+from .browser import BrowserConnector
 from .fund_nav import DaiwaFundCsvConnector, RakutenFundCsvConnector, ToushinLibConnector
 from .rakuten_travel import RakutenTravelConnector
 from .yahoo_finance import YahooFinanceConnector
@@ -43,6 +44,7 @@ def get_connectors(ctx: AppContext) -> dict[str, Connector]:
             endpoint=s.rakuten_vacant_endpoint,
             referer=s.base_url,
         ),
+        "browser": BrowserConnector(s.browser_enabled, ctx.masker, state),
     }
     ctx.extras["connectors"] = connectors
     return connectors

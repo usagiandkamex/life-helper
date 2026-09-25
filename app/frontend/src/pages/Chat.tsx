@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { api, ApiError, json } from '../api'
 import { LazyChart } from '../components/LazyChart'
 import { Disclaimer, Markdown } from '../components/Markdown'
-import type { ApprovalStatus, ChartData, Conversation, HistoryMessage, TurnEvent } from '../types'
+import type { ApprovalStatus, ChartData, Conversation, HistoryMessage, Screenshot, TurnEvent } from '../types'
 
 type ApprovalItem = {
   kind: 'approval'
@@ -20,7 +20,16 @@ type Decision = 'approve' | 'approve_all' | 'reject'
 type Item =
   | { kind: 'user'; text: string }
   | { kind: 'assistant'; text: string; streaming?: boolean }
-  | { kind: 'tool'; id?: string; name: string; args: string; success?: boolean; error?: string; chart?: ChartData }
+  | {
+      kind: 'tool'
+      id?: string
+      name: string
+      args: string
+      success?: boolean
+      error?: string
+      chart?: ChartData
+      screenshot?: Screenshot
+    }
   | { kind: 'file_write'; path: string; diff: string }
   | ApprovalItem
   | { kind: 'error'; message: string }
@@ -47,7 +56,14 @@ function applyEvent(items: Item[], ev: TurnEvent, turnId: string): Item[] {
       return next
     case 'tool_end': {
       const idx = next.findIndex((i) => i.kind === 'tool' && i.id === ev.id)
-      if (idx >= 0) next[idx] = { ...(next[idx] as Extract<Item, { kind: 'tool' }>), success: ev.success, error: ev.error, chart: ev.chart }
+      if (idx >= 0)
+        next[idx] = {
+          ...(next[idx] as Extract<Item, { kind: 'tool' }>),
+          success: ev.success,
+          error: ev.error,
+          chart: ev.chart,
+          screenshot: ev.screenshot,
+        }
       return next
     }
     case 'file_write': {
@@ -100,8 +116,14 @@ const TOOL_LABELS: Record<string, string> = {
   edit: 'ファイルを編集',
   write_knowledge_file: 'ファイルに保存',
   edit_knowledge_file: 'ファイルを編集',
-  web_fetch: '公式サイトを参照',
+  web_fetch: 'Web ページを参照',
   skill: 'スキルを使用',
+  browser_open: 'ブラウザで開く',
+  browser_read: 'ページを読む',
+  browser_click: 'ページをクリック',
+  browser_fill: 'フォームに入力',
+  browser_scroll: 'ページをスクロール',
+  browser_screenshot: 'スクリーンショット',
 }
 
 export function ChatPage() {
@@ -398,6 +420,13 @@ function MessageItem({ item, onSchedule }: { item: Item; onSchedule: (text: stri
             {item.error && <p className="error-text">{item.error}</p>}
           </details>
           {item.chart && <LazyChart chart={item.chart} />}
+          {item.screenshot && (
+            <figure className="screenshot">
+              <a href={item.screenshot.url} target="_blank" rel="noreferrer">
+                <img src={item.screenshot.url} alt="ブラウザのスクリーンショット" loading="lazy" />
+              </a>
+            </figure>
+          )}
         </div>
       )
     case 'file_write':
@@ -416,8 +445,10 @@ function MessageItem({ item, onSchedule }: { item: Item; onSchedule: (text: stri
   }
 }
 
-function diffClass(line: string): string {
-  if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('@@')) return 'meta'
+function diffClass(line: string, index: number): string {
+  // Only the two file headers start with ---/+++; a content line such as "+++ note" is an addition.
+  if (index < 2 && (line.startsWith('--- ') || line.startsWith('+++ '))) return 'meta'
+  if (line.startsWith('@@') || line.startsWith('\\')) return 'meta'
   if (line.startsWith('+')) return 'add'
   if (line.startsWith('-')) return 'del'
   return ''
@@ -427,7 +458,7 @@ function DiffView({ diff }: { diff: string }) {
   return (
     <pre className="diff">
       {diff.split('\n').map((line, i) => (
-        <span key={i} className={diffClass(line)}>
+        <span key={i} className={diffClass(line, i)}>
           {line}
           {'\n'}
         </span>

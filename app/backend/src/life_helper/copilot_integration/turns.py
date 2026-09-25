@@ -63,8 +63,8 @@ class Turn:
     conversation_id: str
     events: list[dict] = field(default_factory=list)
     done: bool = False
-    # Set as soon as the turn is being stopped (中断・タイムアウト), before the SDK abort is awaited.
-    aborting: bool = False
+    # Set as soon as the turn is stopping (中断・タイムアウト・終了), before anything is awaited: no write may go on.
+    stopping: bool = False
     finished_at: float | None = None
     changed: asyncio.Event = field(default_factory=asyncio.Event)
     active: ActiveSession | None = None
@@ -155,7 +155,7 @@ class TurnManager:
             on_write=lambda path, diff, approval_id: self._emit_threadsafe(
                 turn, {"type": "file_write", "path": path, "diff": diff[:4000], "approval_id": approval_id}
             ),
-            is_active=lambda: not turn.done and not turn.aborting,
+            is_active=lambda: not turn.done and not turn.stopping,
         )
         try:
             if conversation is None:
@@ -189,8 +189,12 @@ class TurnManager:
                 await self.manager.close_session(turn.conversation_id)
             self._emit(turn, {"type": "error", "message": self.masker.mask_text(str(exc)) or "エラーが発生しました"})
         finally:
-            # Settle open approval cards before "end" so every card receives its result on the stream.
+            # From here on no approval or approved write may go on (the release below awaits); settle the open
+            # cards before "end" so every card receives its result on the stream.
+            turn.stopping = True
             self._cancel_approvals(turn)
+            if turn.active is not None:
+                await turn.active.release()
             turn.done = True
             policy = turn.active.policy if turn.active is not None else None
             if policy is not None and policy.write_scope is scope:
@@ -210,7 +214,7 @@ class TurnManager:
 
     async def _approve(self, turn: Turn, path: str, diff: str) -> Approval:
         """Shows an approval card for a knowledge-base write and waits for the user's decision."""
-        if turn.done or turn.aborting:
+        if turn.done or turn.stopping:
             return Approval(False, APPROVAL_REASONS["cancelled"])
         if turn.approve_all:
             return Approval(True)
@@ -262,7 +266,7 @@ class TurnManager:
 
     async def _abort_quietly(self, turn: Turn) -> None:
         # First of all: an already approved write may be waiting for the write lock and must not save any more.
-        turn.aborting = True
+        turn.stopping = True
         self._cancel_approvals(turn)
         if turn.active is not None:
             try:

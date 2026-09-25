@@ -14,13 +14,15 @@ export type Conversation = {
 
 export type ChartData = { type: string; x: string; series: string[]; data: Record<string, number | null>[] }
 
+export type Screenshot = { url: string }
+
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'expired' | 'cancelled'
 
 export type TurnEvent =
   | { type: 'delta'; text: string }
   | { type: 'message'; content: string }
   | { type: 'tool_start'; id: string; name: string; args: string }
-  | { type: 'tool_end'; id: string; success: boolean; error: string; result: string; chart?: ChartData }
+  | { type: 'tool_end'; id: string; success: boolean; error: string; result: string; chart?: ChartData; screenshot?: Screenshot }
   | { type: 'file_write'; path: string; diff: string; approval_id?: string | null }
   | { type: 'approval_request'; id: string; path: string; diff: string }
   | { type: 'approval_result'; id: string; status: Exclude<ApprovalStatus, 'pending'> }
@@ -70,6 +72,7 @@ export type Holding = {
   name: string
   quantity: number
   cost_total: number
+  cost_total_exact: number
   value: number | null
   gain: number | null
   price: Price | null

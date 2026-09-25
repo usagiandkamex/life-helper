@@ -42,7 +42,6 @@ def make_policy(kb, tmp_path, rec: Recorder, *, require_approval: bool = False, 
     policy = ToolPolicy(
         knowledge_root=kb,
         skills_root=skills,
-        fetch_domains=["go.jp"],
         masker=SecretMasker(["SUPERSECRETKEY"]),
         allow_write=allow_write,
         require_approval=require_approval,

@@ -18,10 +18,10 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 
+from ..netguard import outbound_rejection, url_rejection
 from ..security import SecretMasker
 
 logger = logging.getLogger(__name__)
@@ -32,8 +32,6 @@ READ_TOOLS = ("view", "grep", "rg", "glob")
 COPILOT_WRITABLE_DIRS = ("memories", "notes", "plans")
 COPILOT_WRITABLE_FILES = ("INDEX.md",)
 WRITABLE_SUFFIXES = (".md", ".txt")
-# Hosts that carry API keys in the URL: only connectors may call them, never web_fetch.
-CONNECTOR_HOSTS = ("openapi.rakuten.co.jp", "app.rakuten.co.jp", "api.github.com")
 
 
 def has_hidden_chars(raw: str) -> bool:
@@ -43,11 +41,6 @@ def has_hidden_chars(raw: str) -> bool:
     diff headers or hide part of the path: the user would approve a write to something else than what is shown.
     """
     return any(unicodedata.category(ch) in {"Cc", "Cf", "Zl", "Zp"} for ch in raw)
-
-
-def host_matches(host: str, domains: list[str] | tuple[str, ...]) -> bool:
-    host = host.lower().rstrip(".")
-    return any(host == d or host.endswith("." + d) for d in domains)
 
 
 def knowledge_write_lock_path(settings: Any) -> Path:
@@ -86,7 +79,6 @@ class WriteScope:
 class ToolPolicy:
     knowledge_root: Path
     skills_root: Path
-    fetch_domains: list[str]
     masker: SecretMasker
     custom_tools: set[str] = field(default_factory=set)
     write_custom_tools: set[str] = field(default_factory=set)
@@ -130,15 +122,6 @@ class ToolPolicy:
         p = self.resolve_path(raw)
         return p.relative_to(self.knowledge_root).as_posix() if p.is_relative_to(self.knowledge_root) else str(p)
 
-    def _url_allowed(self, url: str) -> bool:
-        parsed = urlparse(url)
-        host = parsed.hostname or ""
-        if parsed.scheme != "https" or not host:
-            return False
-        if host_matches(host, CONNECTOR_HOSTS):
-            return False
-        return host_matches(host, self.fetch_domains)
-
     def _deny(self, reason: str) -> PermissionDecisionReject:
         reason = self.masker.mask_text(reason)
         self.denials.append(reason)
@@ -161,9 +144,9 @@ class ToolPolicy:
                 f"{request.resolved_path or request.file_name}"
             )
         if kind == "url":
-            if self._url_allowed(request.url):
-                return PermissionDecisionApproveOnce()
-            return self._deny(f"このサイトは参照が許可されていません: {request.url}")
+            # DNS is checked in pre_tool_use: this handler is synchronous and must not block the event loop.
+            reason = url_rejection(str(request.url or ""), self.masker)
+            return self._deny(reason) if reason else PermissionDecisionApproveOnce()
         if kind == "custom-tool":
             name = request.tool_name
             if name not in self.custom_tools:
@@ -204,8 +187,8 @@ class ToolPolicy:
             return self._hook_deny(f"ツールの引数を確認できませんでした: {tool}")
         args = dict(raw_args or {})
         if tool == "web_fetch":
-            url = str(args.get("url", ""))
-            return None if self._url_allowed(url) else self._hook_deny(f"このサイトは参照が許可されていません: {url}")
+            reason = await outbound_rejection(str(args.get("url", "")), self.masker)
+            return self._hook_deny(reason) if reason else None
         if tool in READ_TOOLS:
             return self._check_read_args(tool, args)
         return None

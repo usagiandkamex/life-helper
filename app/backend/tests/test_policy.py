@@ -5,8 +5,9 @@ from types import SimpleNamespace
 import pytest
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 
-from life_helper.copilot_integration.policy import ToolPolicy, host_matches
+from life_helper.copilot_integration.policy import ToolPolicy
 from life_helper.copilot_integration.system_prompt import build_system_message
+from life_helper.netguard import host_matches
 from life_helper.security import SecretMasker
 
 
@@ -45,7 +46,6 @@ def policy(kb, tmp_path):
     p = ToolPolicy(
         knowledge_root=kb,
         skills_root=skills,
-        fetch_domains=["go.jp", "lg.jp"],
         masker=SecretMasker(["SUPERSECRETKEY"]),
         custom_tools={"calculate", "update_holding"},
         write_custom_tools={"update_holding"},
@@ -97,16 +97,30 @@ def test_writable_locations(policy, kb, tmp_path):
 
 
 def test_url_permissions(policy):
-    assert approved(policy.handle_permission(req("url", url="https://www.soumu.go.jp/main_sosiki/"), {}))
-    assert approved(policy.handle_permission(req("url", url="https://www.city.example.lg.jp/x"), {}))
-    for bad in (
+    for ok in (
+        "https://www.soumu.go.jp/main_sosiki/",
         "http://www.soumu.go.jp/",
-        "https://evil-go.jp/",
         "https://example.com/",
         "https://query1.finance.yahoo.com/v8/finance/chart/7203.T",
+        "https://93.184.215.14/",
+    ):
+        assert approved(policy.handle_permission(req("url", url=ok), {})), ok
+    for bad in (
         "https://openapi.rakuten.co.jp/engine/api",
+        "https://api.github.com/user",
+        "https://api.github.com。/user",
+        "https://ａｐｐ.rakuten.co.jp/",
+        "http://127.0.0.1:8000/healthz",
+        "http://localhost:8000/",
+        "http://169.254.169.254/metadata/instance",
+        "http://10.0.0.5/",
+        "http://[::1]/",
+        "http://2130706433/",
+        "file:///etc/passwd",
+        "https://example.com/?card=4111111111111111",
     ):
         assert not approved(policy.handle_permission(req("url", url=bad), {})), bad
+    assert all("4111111111111111" not in d for d in policy.denials)
 
 
 def test_custom_tool_and_other_kinds(policy):
@@ -220,6 +234,16 @@ async def test_pre_tool_use_rejects_unknown_tools_and_bad_urls(policy):
         await policy.pre_tool_use({"toolName": "web_fetch", "toolArgs": {"url": "https://www.nta.go.jp/"}}, {}) is None
     )
     assert await policy.pre_tool_use({"toolName": "calculate", "toolArgs": {"expression": "1+1"}}, {}) is None
+
+
+async def test_pre_tool_use_web_fetch_checks_dns(policy, fake_dns):
+    fake_dns["rebind.example.com"] = ["93.184.215.14", "127.0.0.1"]
+    fake_dns["missing.example.com"] = []
+    for url in ("https://rebind.example.com/", "https://missing.example.com/", "http://127.0.0.1/"):
+        out = await policy.pre_tool_use({"toolName": "web_fetch", "toolArgs": {"url": url}}, {})
+        assert out["permissionDecision"] == "deny", url
+    out = await policy.pre_tool_use({"toolName": "web_fetch", "toolArgs": {"url": "https://news.example.com/"}}, {})
+    assert out is None
 
 
 async def test_post_tool_use_masks_secrets(policy):

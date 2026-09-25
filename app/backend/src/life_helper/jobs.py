@@ -10,6 +10,7 @@ import sys
 
 from .automation.runner import AutomationRunner
 from .bootstrap import init_core
+from .browser.service import shutdown_browser
 from .config import get_settings
 from .context import build_context
 from .security import install_log_masking
@@ -27,6 +28,7 @@ async def run_due() -> int:
         results = await runner.run_due()
     finally:
         await runner.manager.reset()
+        await shutdown_browser(ctx)
     summary = [{k: r.get(k) for k in ("automation_id", "id", "status", "notified")} for r in results]
     logger.info("automation job finished: %s", json.dumps(summary, ensure_ascii=False))
     return 0

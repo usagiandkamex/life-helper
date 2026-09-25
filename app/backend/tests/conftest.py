@@ -13,6 +13,25 @@ from life_helper.context import build_context
 from life_helper.main import create_app
 
 ALLOWED_ID = 134019422
+PUBLIC_TEST_IP = "93.184.215.14"
+
+
+@pytest.fixture(autouse=True)
+def fake_dns(monkeypatch):
+    """No real DNS in tests: every name resolves to a public address unless a test maps it elsewhere."""
+    from life_helper import netguard
+
+    answers: dict[str, list[str]] = {}
+
+    async def lookup(host: str) -> list[str]:
+        if host in answers and not answers[host]:
+            raise OSError("no such host")
+        return answers.get(host, [PUBLIC_TEST_IP])
+
+    netguard.clear_dns_cache()
+    monkeypatch.setattr(netguard, "_lookup", lookup)
+    yield answers
+    netguard.clear_dns_cache()
 
 
 @pytest.fixture

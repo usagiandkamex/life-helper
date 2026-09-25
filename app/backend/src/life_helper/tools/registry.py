@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -17,6 +18,8 @@ class ToolSpec:
     writes: bool = False
     # External services this tool can call; automations only receive it when they selected every one of them.
     connector: str | tuple[str, ...] | None = None
+    # Frees per-session resources (such as a browser page) when a turn or automation run ends.
+    release: Callable[[], Awaitable[None]] | None = None
 
     def allowed(self, connectors: list[str]) -> bool:
         if self.connector is None:
@@ -39,7 +42,8 @@ def build_tools(
 
 
 def _builders():
+    from ..browser import tools as browser_tools
     from ..connectors import registry as connector_registry
     from . import finance, portfolio_tools
 
-    return (finance.build_tools, portfolio_tools.build_tools, connector_registry.build_tools)
+    return (finance.build_tools, portfolio_tools.build_tools, connector_registry.build_tools, browser_tools.build_tools)
