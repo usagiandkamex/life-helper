@@ -117,7 +117,7 @@ foreach ($name in $variables.Keys) {
   Invoke-Checked gh variable set $name --env production --repo $Repo --body $value | Out-Null
   Write-Host "   変数 $name"
 }
-$secretNames = 'LH_GITHUB_OAUTH_CLIENT_SECRET', 'LH_SESSION_SECRET', 'LH_TOKEN_ENCRYPTION_KEY', 'LH_STOOQ_API_KEY',
+$secretNames = 'LH_GITHUB_OAUTH_CLIENT_SECRET', 'LH_SESSION_SECRET', 'LH_TOKEN_ENCRYPTION_KEY',
   'LH_RAKUTEN_APPLICATION_ID', 'LH_RAKUTEN_ACCESS_KEY', 'LH_GITHUB_APP_PRIVATE_KEY'
 foreach ($name in $secretNames) {
   $value = $envValues.$name

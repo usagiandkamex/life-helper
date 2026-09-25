@@ -374,6 +374,21 @@ def test_automation_api(client, ctx):
     assert client.get("/api/automations/x/runs/y").status_code in (400, 404)
 
 
+def test_automations_saved_with_stooq_keep_the_stock_tools(client, ctx):
+    """Stooq was replaced by Yahoo Finance; automations that selected it keep getting the stock-price tools."""
+    saved = Automation.model_validate({"name": "株価", "prompt": "更新", "connectors": ["stooq", "yahoo_finance"]})
+    assert saved.connectors == ["yahoo_finance"]
+    csrf = sign_in(client, ctx)
+    body = {
+        "name": "株価",
+        "prompt": "株価を更新",
+        "schedule": {"kind": "daily", "time": "09:00"},
+        "connectors": ["stooq"],
+    }
+    created = client.post("/api/automations", json=body, headers={"x-csrf-token": csrf})
+    assert created.status_code == 200 and created.json()["connectors"] == ["yahoo_finance"]
+
+
 # -- regression tests for the second review round -----------------------------------------------------------
 
 

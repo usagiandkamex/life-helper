@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from datetime import date, datetime, time
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 from cryptography.fernet import Fernet
@@ -62,22 +64,62 @@ def sign_in(client: TestClient, ctx, login: str = "usagiandkamex") -> str:
     return client.get("/api/me").json()["csrf_token"]
 
 
-def stooq_csv(close: float, day: str = "2026-09-24") -> str:
-    return f"Date,Open,High,Low,Close,Volume\n{day},1,1,1,{close},1\n"
+def yahoo_chart(
+    bars: list[tuple[str, float | None]],
+    *,
+    currency: str = "JPY",
+    zone: str = "Asia/Tokyo",
+    instrument: str = "EQUITY",
+    hour: int | time = 9,
+    period: tuple[datetime, datetime] | None = None,
+) -> dict:
+    """A Yahoo Finance chart answer with one daily bar per (YYYY-MM-DD, close), stamped at ``hour`` local time.
+
+    Yahoo stamps a daily bar with the start of its session (09:00 in Tokyo, 09:30 in New York). ``period`` is the
+    current trading period; by default one that settled long ago, so every bar counts as a close.
+    """
+    tz = ZoneInfo(zone)
+    at = hour if isinstance(hour, time) else time(hour)
+    stamps = [int(datetime.combine(date.fromisoformat(d), at, tz).timestamp()) for d, _ in bars]
+    start, end = period or (datetime(2000, 1, 4, 9, tzinfo=tz), datetime(2000, 1, 4, 15, tzinfo=tz))
+    meta: dict = {
+        "currency": currency,
+        "exchangeTimezoneName": zone,
+        "instrumentType": instrument,
+        "currentTradingPeriod": {"regular": {"start": int(start.timestamp()), "end": int(end.timestamp())}},
+    }
+    result = {"meta": meta, "timestamp": stamps, "indicators": {"quote": [{"close": [c for _, c in bars]}]}}
+    return {"chart": {"result": [result], "error": None}}
 
 
-def mock_stooq(bodies: dict[str, float | str]):
-    """Mocks the Stooq CSV endpoint per symbol. Unknown symbols answer "No data", like Stooq does."""
+YAHOO_NOT_FOUND = {"chart": {"result": None, "error": {"code": "Not Found", "description": "No data found"}}}
+
+
+def yahoo_market(symbol: str) -> dict:
+    """The currency, exchange timezone and instrument type Yahoo reports for a symbol, by its shape."""
+    if symbol == "JPY=X":
+        return {"currency": "JPY", "zone": "Europe/London", "instrument": "CURRENCY"}
+    if symbol.endswith(".T"):
+        return {"currency": "JPY", "zone": "Asia/Tokyo"}
+    return {"currency": "USD", "zone": "America/New_York"}
+
+
+def mock_yahoo(closes: dict[str, float], day: str = "2026-09-24"):
+    """Mocks the Yahoo Finance chart API per symbol. Unknown symbols answer 404 "Not Found", like Yahoo does."""
     import httpx
     import respx
 
     def handler(request: httpx.Request) -> httpx.Response:
-        body = bodies.get(request.url.params["s"])
-        if body is None:
-            return httpx.Response(200, text="No data")
-        return httpx.Response(200, text=body if isinstance(body, str) else stooq_csv(body))
+        symbol = request.url.path.rsplit("/", 1)[-1]
+        if symbol not in closes:
+            return httpx.Response(404, json=YAHOO_NOT_FOUND)
+        return httpx.Response(200, json=yahoo_chart([(day, closes[symbol])], **yahoo_market(symbol)))
 
-    return respx.get("https://stooq.com/q/d/l/").mock(side_effect=handler)
+    return respx.get(url__startswith="https://query1.finance.yahoo.com/v8/finance/chart/").mock(side_effect=handler)
+
+
+def yahoo_symbols(route) -> list[str]:
+    return [call.request.url.path.rsplit("/", 1)[-1] for call in route.calls]
 
 
 ALL_COUNTRY = {

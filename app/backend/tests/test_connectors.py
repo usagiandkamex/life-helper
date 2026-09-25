@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import gzip
 import logging
-from datetime import date
+from datetime import date, datetime, time
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -18,7 +19,15 @@ from life_helper.connectors.fund_nav import (
     match_score,
 )
 from life_helper.connectors.rakuten_travel import RakutenTravelConnector, parse_vacancies
-from life_helper.connectors.stooq import StooqConnector, symbol_candidates, to_stooq_symbol
+from life_helper.connectors.registry import get_connectors
+from life_helper.connectors.yahoo_finance import (
+    CHART_URL,
+    MAX_CHART_BYTES,
+    RateLimitedError,
+    YahooFinanceConnector,
+    symbol_candidates,
+    to_yahoo_symbol,
+)
 from life_helper.security import SecretMasker
 
 from .conftest import (
@@ -27,19 +36,22 @@ from .conftest import (
     FANG_PLUS,
     RAKUTEN_HEADER,
     SP500,
+    YAHOO_NOT_FOUND,
     daiwa_csv,
     mock_daiwa,
     mock_mufg,
     mock_rakuten,
-    mock_stooq,
+    mock_yahoo,
     mufg_payload,
     sign_in,
-    stooq_csv,
+    yahoo_chart,
+    yahoo_symbols,
 )
 
-STOOQ_KEY = "stooqkey-ABCDEF123456"
 APP_ID = "e5e2671a-b454-4e6f-aaaa-bbbbccccdddd"
 ACCESS_KEY = "rakuten-access-key-987654"
+JST = ZoneInfo("Asia/Tokyo")
+NEW_YORK = ZoneInfo("America/New_York")
 
 
 @pytest.fixture
@@ -48,8 +60,10 @@ def masker():
 
 
 @pytest.fixture
-def stooq(tmp_path, masker):
-    return StooqConnector({"stooq_api_key": STOOQ_KEY}, masker, tmp_path / "state.json")
+def yahoo(tmp_path, masker):
+    connector = YahooFinanceConnector({}, masker, tmp_path / "state.json")
+    connector.min_interval_seconds = 0
+    return connector
 
 
 @pytest.fixture
@@ -78,137 +92,252 @@ def rakuten(tmp_path, masker):
 
 
 def test_symbol_conversion():
-    assert to_stooq_symbol("7203") == "7203.jp"
-    assert to_stooq_symbol("130a") == "130a.jp"
-    assert to_stooq_symbol("7203.T") == "7203.jp"
-    assert to_stooq_symbol("7203.JP") == "7203.jp"
-    assert to_stooq_symbol("MSFT") == "msft.us"
-    assert to_stooq_symbol("aapl") == "aapl.us"
-    assert to_stooq_symbol("MSFT.US") == "msft.us"
+    assert to_yahoo_symbol("7203") == "7203.T"
+    assert to_yahoo_symbol("130a") == "130A.T"
+    assert to_yahoo_symbol("7203.T") == "7203.T"
+    assert to_yahoo_symbol("7203.JP") == "7203.T"
+    assert to_yahoo_symbol("MSFT") == "MSFT"
+    assert to_yahoo_symbol("aapl") == "AAPL"
+    assert to_yahoo_symbol("MSFT.US") == "MSFT"
     # The code shape only picks the market to try first; the other one stays available as a fallback.
-    assert symbol_candidates("7203") == [("jp", "7203.jp"), ("us", "7203.us")]
-    assert symbol_candidates("MSFT") == [("us", "msft.us"), ("jp", "msft.jp")]
-    assert symbol_candidates("MSFT.JP") == [("jp", "msft.jp"), ("us", "msft.us")]
-    for bad in ("../x", "", "1", "TOOLONG", "７２０３"):
+    assert symbol_candidates("7203") == [("jp", "7203.T"), ("us", "7203")]
+    assert symbol_candidates("MSFT") == [("us", "MSFT"), ("jp", "MSFT.T")]
+    assert symbol_candidates("MSFT.JP") == [("jp", "MSFT.T"), ("us", "MSFT")]
+    for bad in ("../x", "", "1", "TOOLONG", "７２０３", "JPY=X"):
         with pytest.raises(ConnectorError):
-            to_stooq_symbol(bad)
+            to_yahoo_symbol(bad)
+
+
+def _settled(bars, **kwargs) -> httpx.Response:
+    return httpx.Response(200, json=yahoo_chart(bars, **kwargs))
 
 
 @respx.mock
-async def test_stooq_previous_close(stooq, masker):
-    csv_body = (
-        "Date,Open,High,Low,Close,Volume\n2026-09-22,3000,3050,2990,3020,100\n2026-09-24,3020,3100,3010,3080,120\n"
+async def test_yahoo_previous_close(yahoo):
+    route = respx.get(url__startswith=CHART_URL).mock(
+        return_value=_settled([("2026-09-22", 3020), ("2026-09-24", 3080)])
     )
-    route = respx.get("https://stooq.com/q/d/l/").mock(return_value=httpx.Response(200, text=csv_body))
-    result = await stooq.previous_close("7203", today=date(2026, 9, 25))
+    result = await yahoo.previous_close("7203", today=date(2026, 9, 25))
     assert result == {
         "code": "7203",
-        "symbol": "7203.jp",
+        "symbol": "7203.T",
         "market": "jp",
         "currency": "JPY",
         "date": "2026-09-24",
         "close": 3080.0,
-        "source": "stooq",
+        "source": "yahoo_finance",
+        "valid_until": None,
     }
-    sent = route.calls.last.request.url
-    assert sent.params["apikey"] == STOOQ_KEY and sent.params["s"] == "7203.jp"
-    assert STOOQ_KEY not in str(result)
-    # The key is registered with the masker as soon as the connector is created.
-    assert masker.mask_text(f"x?apikey={STOOQ_KEY}") == "x?apikey=***"
-    assert stooq.last_used() is not None
+    sent = route.calls.last.request
+    assert sent.url.path == "/v8/finance/chart/7203.T"
+    assert (sent.url.params["range"], sent.url.params["interval"]) == ("1mo", "1d")
+    # Yahoo answers 429 to the default httpx User-Agent, so the connector always names itself.
+    assert sent.headers["user-agent"].startswith("life-helper/")
+    assert yahoo.last_used() is not None
+
+
+def test_yahoo_needs_no_key(yahoo, ctx):
+    assert yahoo.configured
+    assert get_connectors(ctx)["yahoo_finance"].configured
+    assert "stooq" not in get_connectors(ctx)
 
 
 @respx.mock
-async def test_stooq_previous_close_us_ticker(stooq):
-    route = mock_stooq({"msft.us": 517.93})
-    result = await stooq.previous_close("MSFT", today=date(2026, 9, 25))
-    assert (result["market"], result["symbol"], result["currency"], result["close"]) == ("us", "msft.us", "USD", 517.93)
-    assert [c.request.url.params["s"] for c in route.calls] == ["msft.us"]
+async def test_yahoo_previous_close_us_ticker(yahoo):
+    route = mock_yahoo({"MSFT": 517.93})
+    result = await yahoo.previous_close("MSFT", today=date(2026, 9, 25))
+    assert (result["market"], result["symbol"], result["currency"], result["close"]) == ("us", "MSFT", "USD", 517.93)
+    assert yahoo_symbols(route) == ["MSFT"]
 
 
 @respx.mock
-async def test_stooq_falls_back_to_the_other_market(stooq):
-    stooq.min_interval_seconds = 0
-    route = mock_stooq({"7203.us": 12.5})
-    result = await stooq.previous_close("7203", today=date(2026, 9, 25))
-    assert (result["market"], result["symbol"], result["currency"]) == ("us", "7203.us", "USD")
-    assert [c.request.url.params["s"] for c in route.calls] == ["7203.jp", "7203.us"]
+async def test_single_precision_noise_is_rounded(yahoo):
+    mock_yahoo({"1306.T": 424.79998779296875, "JPY=X": 158.26499938964844})
+    assert (await yahoo.previous_close("1306", today=date(2026, 9, 25)))["close"] == 424.8
+    assert (await yahoo.usd_jpy(today=date(2026, 9, 25)))["rate"] == 158.265
 
 
 @respx.mock
-async def test_stooq_reports_the_symbols_it_tried(stooq):
-    stooq.min_interval_seconds = 0
-    mock_stooq({})
+async def test_yahoo_falls_back_to_the_other_market(yahoo):
+    route = mock_yahoo({"7203": 12.5})
+    result = await yahoo.previous_close("7203", today=date(2026, 9, 25))
+    assert (result["market"], result["symbol"], result["currency"]) == ("us", "7203", "USD")
+    assert yahoo_symbols(route) == ["7203.T", "7203"]
+
+
+@respx.mock
+async def test_yahoo_reports_the_symbols_it_tried(yahoo):
+    mock_yahoo({})
     with pytest.raises(ConnectorError) as e:
-        await stooq.previous_close("MSFT", today=date(2026, 9, 25))
-    assert "msft.us と msft.jp を照会しました" in str(e.value)
+        await yahoo.previous_close("MSFT", today=date(2026, 9, 25))
+    assert "MSFT と MSFT.T を照会しました" in str(e.value)
 
 
 @respx.mock
-async def test_stooq_usd_jpy(stooq):
-    mock_stooq({"usdjpy": 150.25})
-    assert await stooq.usd_jpy(today=date(2026, 9, 25)) == {
+async def test_yahoo_price_in_another_currency_is_not_used_for_that_market(yahoo):
+    """A symbol that answers in an unexpected currency or exchange is some other instrument, not this market's."""
+    route = respx.get(url__startswith=CHART_URL)
+    route.mock(
+        side_effect=[
+            _settled([("2026-09-24", 25)], currency="USD", zone="Asia/Tokyo"),
+            _settled([("2026-09-24", 12.5)], currency="USD", zone="Europe/London"),
+        ]
+    )
+    with pytest.raises(ConnectorError, match="7203.T と 7203 を照会しましたが"):
+        await yahoo.previous_close("7203", today=date(2026, 9, 25))
+
+
+@respx.mock
+async def test_funds_are_not_priced_as_stocks(yahoo):
+    """US mutual funds (VFIAX) are not listed securities; funds are priced from the fund managers."""
+    route = respx.get(url__startswith=CHART_URL)
+    route.mock(
+        side_effect=[
+            _settled([("2026-09-24", 600)], currency="USD", zone="America/New_York", instrument="MUTUALFUND"),
+            httpx.Response(404, json=YAHOO_NOT_FOUND),
+        ]
+    )
+    with pytest.raises(ConnectorError, match="VFIAX と VFIAX.T を照会しましたが"):
+        await yahoo.previous_close("VFIAX", today=date(2026, 9, 25))
+
+
+@respx.mock
+async def test_yahoo_usd_jpy(yahoo):
+    route = mock_yahoo({"JPY=X": 150.25})
+    assert await yahoo.usd_jpy(today=date(2026, 9, 25)) == {
         "pair": "USDJPY",
-        "symbol": "usdjpy",
+        "symbol": "JPY=X",
         "date": "2026-09-24",
         "rate": 150.25,
-        "source": "stooq",
+        "source": "yahoo_finance",
+        "valid_until": None,
     }
+    assert route.calls.last.request.url.path == "/v8/finance/chart/JPY=X"
 
 
 @respx.mock
-async def test_stooq_failures_are_distinguished(stooq):
-    stooq.min_interval_seconds = 0
-    route = respx.get("https://stooq.com/q/d/l/")
-    for body, message in (
-        ("Exceeded the daily hits limit", "利用上限"),
-        ("<html>get your apikey</html>", "API キーが無効"),
-        ("<html>maintenance</html>", "想定外の応答"),
-        ("", "想定外の応答"),
-        ("Date,Open,High,Low\n2026-09-24,1,1,1\n", "想定外の応答"),
-        (stooq_csv(0), "株価が不正"),
-        ("Date,Open,High,Low,Close,Volume\n2026-99-99,1,1,1,10,1\n", "日付が不正"),
-        (stooq_csv(10, "2026-10-05"), "日付が不正"),
-    ):
-        route.mock(return_value=httpx.Response(200, text=body))
-        with pytest.raises(ConnectorError, match=message):
-            await stooq.previous_close("7203", today=date(2026, 9, 25))
-    route.mock(return_value=httpx.Response(503, text=""))
-    with pytest.raises(ConnectorError, match="HTTP 503"):
-        await stooq.previous_close("7203", today=date(2026, 9, 25))
-    # A bad key or a broken answer must not be retried on the other market.
-    assert all(call.request.url.params["s"] == "7203.jp" for call in route.calls)
-
-
-@respx.mock
-async def test_stooq_html_response_is_reported_without_key(stooq):
-    respx.get("https://stooq.com/q/d/l/").mock(return_value=httpx.Response(200, text="<html>get your apikey</html>"))
-    with pytest.raises(ConnectorError) as e:
-        await stooq.previous_close("7203")
-    assert STOOQ_KEY not in str(e.value)
-
-
-@respx.mock
-async def test_network_error_does_not_leak_url(stooq):
-    respx.get("https://stooq.com/q/d/l/").mock(
-        side_effect=httpx.ConnectError(f"failed https://stooq.com/?apikey={STOOQ_KEY}")
+async def test_running_session_is_not_a_close(yahoo):
+    """Today's bar only carries the latest trade until the session ends and the close settles."""
+    session = (datetime(2026, 9, 25, 9, 0, tzinfo=JST), datetime(2026, 9, 25, 15, 30, tzinfo=JST))
+    respx.get(url__startswith=CHART_URL).mock(
+        return_value=_settled([("2026-09-24", 3000), ("2026-09-25", None), ("2026-09-25", 3100)], period=session)
     )
-    with pytest.raises(ConnectorError) as e:
-        await stooq.previous_close("7203")
-    assert STOOQ_KEY not in str(e.value)
+    for now in (datetime(2026, 9, 25, 11, 0, tzinfo=JST), datetime(2026, 9, 25, 15, 45, tzinfo=JST)):
+        result = await yahoo.previous_close("7203", today=date(2026, 9, 25), now=now)
+        assert (result["date"], result["close"]) == ("2026-09-24", 3000)
+        # The answer is only good until the running session settles.
+        assert datetime.fromisoformat(result["valid_until"]) == datetime(2026, 9, 25, 16, 0, tzinfo=JST)
+    settled = await yahoo.previous_close("7203", today=date(2026, 9, 25), now=datetime(2026, 9, 25, 16, 5, tzinfo=JST))
+    assert (settled["date"], settled["close"], settled["valid_until"]) == ("2026-09-25", 3100, None)
+
+
+@respx.mock
+async def test_closed_market_uses_the_last_session(yahoo):
+    """On a weekend Yahoo reports the next session, which no bar belongs to yet."""
+    monday = (datetime(2026, 9, 28, 9, 0, tzinfo=JST), datetime(2026, 9, 28, 15, 30, tzinfo=JST))
+    respx.get(url__startswith=CHART_URL).mock(
+        return_value=_settled([("2026-09-24", 3000), ("2026-09-25", 3100)], period=monday)
+    )
+    result = await yahoo.previous_close("7203", today=date(2026, 9, 26), now=datetime(2026, 9, 26, 10, tzinfo=JST))
+    assert (result["date"], result["close"]) == ("2026-09-25", 3100)
+
+
+@respx.mock
+async def test_us_close_is_dated_in_new_york(yahoo):
+    """A US session ends after midnight in Japan, but the close keeps the New York trading date."""
+    session = (datetime(2026, 9, 24, 9, 30, tzinfo=NEW_YORK), datetime(2026, 9, 24, 16, 0, tzinfo=NEW_YORK))
+    respx.get(url__startswith=CHART_URL).mock(
+        return_value=_settled(
+            [("2026-09-23", 337.02), ("2026-09-24", 335.92)],
+            currency="USD",
+            zone="America/New_York",
+            hour=time(9, 30),
+            period=session,
+        )
+    )
+    early = await yahoo.previous_close("AAPL", today=date(2026, 9, 25), now=datetime(2026, 9, 25, 1, tzinfo=JST))
+    assert (early["date"], early["close"]) == ("2026-09-23", 337.02)
+    later = await yahoo.previous_close("AAPL", today=date(2026, 9, 25), now=datetime(2026, 9, 25, 7, tzinfo=JST))
+    assert (later["date"], later["close"]) == ("2026-09-24", 335.92)
+
+
+@respx.mock
+async def test_fx_bar_is_dated_with_the_exchange_timezone_across_dst(yahoo):
+    """Midnight bars in London fall on the previous UTC day during summer time; the offset of today must not be used."""
+    summer_midnight = int(datetime(2026, 10, 23, 0, 0, tzinfo=ZoneInfo("Europe/London")).timestamp())
+    chart = yahoo_chart([("2026-10-23", 157.5)], zone="Europe/London", instrument="CURRENCY")
+    chart["chart"]["result"][0]["timestamp"] = [summer_midnight]
+    chart["chart"]["result"][0]["meta"]["gmtoffset"] = 0  # winter time again when the chart is read
+    respx.get(url__startswith=CHART_URL).mock(return_value=httpx.Response(200, json=chart))
+    result = await yahoo.usd_jpy(today=date(2026, 10, 27), now=datetime(2026, 10, 27, 12, tzinfo=JST))
+    assert (result["date"], result["rate"]) == ("2026-10-23", 157.5)
+
+
+@respx.mock
+async def test_bars_after_today_are_ignored(yahoo):
+    respx.get(url__startswith=CHART_URL).mock(return_value=_settled([("2026-09-24", 3000), ("2026-09-25", 3100)]))
+    result = await yahoo.previous_close("7203", today=date(2026, 9, 24))
+    assert (result["date"], result["close"]) == ("2026-09-24", 3000)
+
+
+@respx.mock
+async def test_yahoo_failures_are_distinguished(yahoo):
+    route = respx.get(url__startswith=CHART_URL)
+    no_zone = yahoo_chart([("2026-09-24", 10)])
+    del no_zone["chart"]["result"][0]["meta"]["exchangeTimezoneName"]
+    no_period = yahoo_chart([("2026-09-25", 10)])
+    del no_period["chart"]["result"][0]["meta"]["currentTradingPeriod"]
+    half_period = yahoo_chart([("2026-09-25", 10)])
+    del half_period["chart"]["result"][0]["meta"]["currentTradingPeriod"]["regular"]["end"]
+    no_currency = yahoo_chart([("2026-09-24", 10)])
+    del no_currency["chart"]["result"][0]["meta"]["currency"]
+    uneven = yahoo_chart([("2026-09-24", 10)])
+    uneven["chart"]["result"][0]["indicators"]["quote"][0]["close"] = [10, 11]
+    for response, message in (
+        (httpx.Response(200, text="<html>maintenance</html>"), "想定外の応答"),
+        (httpx.Response(200, json={"chart": {"result": None, "error": None}}), "想定外の応答"),
+        (httpx.Response(200, json={"chart": {"result": None, "error": {"code": "Bad Request"}}}), "想定外の応答"),
+        (httpx.Response(200, json=no_zone), "タイムゾーン"),
+        # Without the trading period a running session cannot be told apart, so the answer is refused.
+        (httpx.Response(200, json=no_period), "取引時間"),
+        (httpx.Response(200, json=half_period), "取引時間"),
+        (httpx.Response(200, json=no_currency), "通貨"),
+        (httpx.Response(200, json=uneven), "価格の系列"),
+        (_settled([("2026-09-24", 0)]), "株価が不正"),
+        (_settled([("2026-09-24", "3000")]), "株価が不正"),
+        (httpx.Response(503, text=""), "HTTP 503"),
+    ):
+        route.mock(return_value=response)
+        with pytest.raises(ConnectorError, match=message):
+            await yahoo.previous_close("7203", today=date(2026, 9, 25))
+    route.mock(return_value=httpx.Response(429, text="Too Many Requests"))
+    with pytest.raises(RateLimitedError, match="利用制限"):
+        await yahoo.previous_close("7203", today=date(2026, 9, 25))
+    # A broken answer or a rate limit must not be retried on the other market.
+    assert set(yahoo_symbols(route)) == {"7203.T"}
+
+
+@respx.mock
+async def test_oversized_answer_is_refused(yahoo):
+    respx.get(url__startswith=CHART_URL).mock(return_value=httpx.Response(200, content=b"x" * (MAX_CHART_BYTES + 1)))
+    with pytest.raises(ConnectorError, match="想定より大きい"):
+        await yahoo.previous_close("7203", today=date(2026, 9, 25))
+
+
+@respx.mock
+async def test_network_error_does_not_leak_url(yahoo):
+    respx.get(url__startswith=CHART_URL).mock(side_effect=httpx.ConnectError(f"failed {CHART_URL}7203.T?x=1"))
+    with pytest.raises(ConnectorError, match="接続できませんでした") as e:
+        await yahoo.previous_close("7203")
+    assert CHART_URL not in str(e.value)
     assert e.value.__cause__ is None and e.value.__suppress_context__
 
 
-async def test_missing_key_message(tmp_path, masker):
-    empty = StooqConnector({"stooq_api_key": ""}, masker, tmp_path / "s.json")
-    assert not empty.configured
-    with pytest.raises(ConnectorError, match="API キーが登録されていません"):
-        await empty.previous_close("7203")
-
-
-async def test_connector_refuses_other_hosts(stooq):
+async def test_connector_refuses_other_hosts(yahoo):
     with pytest.raises(ConnectorError):
-        await stooq.get("https://evil.example/", params={})
+        await yahoo.get("https://evil.example/", params={})
+    with pytest.raises(ConnectorError):
+        await yahoo.get("https://stooq.com/q/d/l/", params={})
 
 
 def test_httpx_logger_is_silenced():
@@ -563,10 +692,15 @@ def test_tool_registered_only_when_configured(ctx, settings):
 def test_connectors_api_never_returns_secret_values(client, ctx, settings):
     from pydantic import SecretStr
 
-    settings.stooq_api_key = SecretStr(STOOQ_KEY)
+    settings.rakuten_application_id = SecretStr(APP_ID)
+    settings.rakuten_access_key = SecretStr(ACCESS_KEY)
     ctx.extras.pop("connectors", None)
     sign_in(client, ctx)
     body = client.get("/api/connectors").json()
-    stooq = next(c for c in body if c["name"] == "stooq")
-    assert stooq["configured"] is True
-    assert STOOQ_KEY not in str(body)
+    rakuten = next(c for c in body if c["name"] == "rakuten_travel")
+    assert rakuten["configured"] is True
+    assert APP_ID not in str(body) and ACCESS_KEY not in str(body)
+    # Stock prices need no key, so the connector is always ready.
+    yahoo = next(c for c in body if c["name"] == "yahoo_finance")
+    assert yahoo["configured"] is True
+    assert all(c["name"] != "stooq" for c in body)

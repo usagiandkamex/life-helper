@@ -10,7 +10,6 @@
     "githubOauthClientSecret": { "value": "${LH_GITHUB_OAUTH_CLIENT_SECRET=}" },
     "sessionSecret": { "value": "${LH_SESSION_SECRET}" },
     "tokenEncryptionKey": { "value": "${LH_TOKEN_ENCRYPTION_KEY}" },
-    "stooqApiKey": { "value": "${LH_STOOQ_API_KEY=}" },
     "rakutenApplicationId": { "value": "${LH_RAKUTEN_APPLICATION_ID=}" },
     "rakutenAccessKey": { "value": "${LH_RAKUTEN_ACCESS_KEY=}" },
     "githubAppId": { "value": "${LH_GITHUB_APP_ID=}" },

@@ -52,7 +52,7 @@
 
 ## 投資信託の基準価額（運用会社の追加）
 
-基準価額は株価（Stooq）とは別に、運用会社が公式に公開している API・CSV から取得します（`POST /api/portfolio/refresh-prices` が両方を別々に実行）。
+基準価額は株価（Yahoo Finance）とは別に、運用会社が公式に公開している API・CSV から取得します（`POST /api/portfolio/refresh-prices` が両方を別々に実行）。
 対応済みの運用会社とファンドコード（Phase 1 の公式 API と Phase 2 の公式 CSV の両方に対応済み）:
 
 | 運用会社 | 段階 | 取得元 | ファンドコード | どこで分かるか |

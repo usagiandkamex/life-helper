@@ -14,7 +14,7 @@ from ..tools.registry import ToolSpec
 from .base import Connector, ConnectorError
 from .fund_nav import DaiwaFundCsvConnector, MufgFundApiConnector, RakutenFundCsvConnector
 from .rakuten_travel import RakutenTravelConnector
-from .stooq import StooqConnector
+from .yahoo_finance import YahooFinanceConnector
 
 
 def get_connectors(ctx: AppContext) -> dict[str, Connector]:
@@ -24,13 +24,13 @@ def get_connectors(ctx: AppContext) -> dict[str, Connector]:
     s = ctx.settings
     state = s.app_state_dir / "connectors.json"
     secrets = {
-        "stooq_api_key": s.stooq_api_key.get_secret_value(),
         "rakuten_application_id": s.rakuten_application_id.get_secret_value(),
         "rakuten_access_key": s.rakuten_access_key.get_secret_value(),
     }
     transport = ctx.extras.get("http_transport")
     connectors: dict[str, Connector] = {
-        "stooq": StooqConnector({"stooq_api_key": secrets["stooq_api_key"]}, ctx.masker, state, transport=transport),
+        # No API key: the chart API behind finance.yahoo.com is open (unofficial, for personal use).
+        "yahoo_finance": YahooFinanceConnector({}, ctx.masker, state, transport=transport),
         # No API key: the managers publish the fund API and the 基準価額 CSVs openly, under their terms of use.
         "mufg_api": MufgFundApiConnector({}, ctx.masker, state, transport=transport),
         "rakuten_csv": RakutenFundCsvConnector({}, ctx.masker, state, transport=transport),

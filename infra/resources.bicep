@@ -11,8 +11,6 @@ param sessionSecret string
 @secure()
 param tokenEncryptionKey string
 @secure()
-param stooqApiKey string
-@secure()
 param rakutenApplicationId string
 @secure()
 param rakutenAccessKey string
@@ -141,7 +139,6 @@ var secrets = [
   { name: 'oauth-client-secret', value: empty(githubOauthClientSecret) ? 'unset' : githubOauthClientSecret }
   { name: 'session-secret', value: sessionSecret }
   { name: 'token-encryption-key', value: tokenEncryptionKey }
-  { name: 'stooq-api-key', value: empty(stooqApiKey) ? 'unset' : stooqApiKey }
   { name: 'rakuten-application-id', value: empty(rakutenApplicationId) ? 'unset' : rakutenApplicationId }
   { name: 'rakuten-access-key', value: empty(rakutenAccessKey) ? 'unset' : rakutenAccessKey }
   { name: 'github-app-private-key', value: empty(githubAppPrivateKey) ? 'unset' : githubAppPrivateKey }
@@ -149,7 +146,6 @@ var secrets = [
 
 var optionalSecretEnv = concat(
   empty(githubOauthClientSecret) ? [] : [{ name: 'LH_GITHUB_OAUTH_CLIENT_SECRET', secretRef: 'oauth-client-secret' }],
-  empty(stooqApiKey) ? [] : [{ name: 'LH_STOOQ_API_KEY', secretRef: 'stooq-api-key' }],
   empty(rakutenApplicationId) ? [] : [{ name: 'LH_RAKUTEN_APPLICATION_ID', secretRef: 'rakuten-application-id' }],
   empty(rakutenAccessKey) ? [] : [{ name: 'LH_RAKUTEN_ACCESS_KEY', secretRef: 'rakuten-access-key' }],
   empty(githubAppPrivateKey) ? [] : [{ name: 'LH_GITHUB_APP_PRIVATE_KEY', secretRef: 'github-app-private-key' }]

@@ -13,6 +13,13 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 JST = ZoneInfo("Asia/Tokyo")
 MAX_RUNTIME_MINUTES = 20
+# Connectors that were replaced, so automations saved with the old name keep their tools.
+RENAMED_CONNECTORS = {"stooq": "yahoo_finance"}
+
+
+def normalize_connectors(names: list[str]) -> list[str]:
+    """Current connector names, in the given order and without duplicates."""
+    return list(dict.fromkeys(RENAMED_CONNECTORS.get(name, name) for name in names))
 
 
 class Schedule(BaseModel):
@@ -116,6 +123,11 @@ class Automation(BaseModel):
     notify: NotifySettings = Field(default_factory=NotifySettings)
     max_runtime_minutes: int = Field(default=MAX_RUNTIME_MINUTES, ge=1, le=MAX_RUNTIME_MINUTES)
     state: AutomationState = Field(default_factory=AutomationState)
+
+    @field_validator("connectors")
+    @classmethod
+    def _connectors(cls, v: list[str]) -> list[str]:
+        return normalize_connectors(v)
 
     def is_due(self, now: datetime) -> bool:
         if not self.enabled or not self.state.next_run_at:

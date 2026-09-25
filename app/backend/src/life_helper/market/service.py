@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 
 from ..connectors.base import ConnectorError
 from ..connectors.registry import get_connectors
+from ..connectors.yahoo_finance import RATE_LIMIT_MESSAGE, RateLimitedError
 from .clock import market_today
 from .portfolio import PortfolioStore, Price
 
@@ -16,7 +17,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-PRICED_BY_STOOQ = ("stock", "etf", "reit")
+PRICED_BY_MARKET = ("stock", "etf", "reit")
 # Six characters, so it can never clash with a security code in the per-day price cache.
 FX_CACHE_CODE = "USDJPY"
 QUOTE_KEYS = frozenset(
@@ -34,9 +35,23 @@ def portfolio_store(ctx: AppContext) -> PortfolioStore:
 
 
 def _cached(store: PortfolioStore, code: str, on: date, keys: frozenset[str]) -> dict | None:
-    """Same-day cache entry, ignored when it was written before the current fields existed."""
+    """Same-day cache entry, ignored when it lacks the current fields or its session has settled since."""
     cached = store.cached_price(code, on)
-    return cached if isinstance(cached, dict) and keys <= cached.keys() else None
+    if not isinstance(cached, dict) or not keys <= cached.keys():
+        return None
+    valid_until = cached.get("valid_until")
+    if valid_until is not None:
+        try:
+            if datetime.fromisoformat(valid_until) <= datetime.now(UTC):
+                return None
+        except (TypeError, ValueError):
+            return None
+    return cached
+
+
+def _earliest(*moments: str | None) -> str | None:
+    known = [m for m in moments if m]
+    return min(known, key=datetime.fromisoformat) if known else None
 
 
 async def usd_jpy_rate(ctx: AppContext, *, today: date | None = None, memo: dict | None = None) -> dict:
@@ -49,7 +64,7 @@ async def usd_jpy_rate(ctx: AppContext, *, today: date | None = None, memo: dict
     if cached:
         return cached
     try:
-        rate = await get_connectors(ctx)["stooq"].usd_jpy(today=today)
+        rate = await get_connectors(ctx)["yahoo_finance"].usd_jpy(today=today)
     except ConnectorError as e:
         if memo is not None:
             memo["error"] = e
@@ -65,7 +80,9 @@ async def _in_yen(ctx: AppContext, quote: dict, *, today: date, fx_memo: dict | 
     try:
         fx = await usd_jpy_rate(ctx, today=today, memo=fx_memo)
     except ConnectorError as e:
-        raise ConnectorError(
+        # A rate limit keeps its type, so the refresh knows to stop instead of trying every other holding.
+        error = RateLimitedError if isinstance(e, RateLimitedError) else ConnectorError
+        raise error(
             f"米国株の価格（{quote['close']} {quote['currency']}）は取得できましたが、"
             f"USD/JPY を取得できなかったため円換算できませんでした（{e}）"
         ) from None
@@ -74,6 +91,8 @@ async def _in_yen(ctx: AppContext, quote: dict, *, today: date, fx_memo: dict | 
         "fx_rate": fx["rate"],
         "fx_date": fx["date"],
         "fx_source": fx["source"],
+        # The yen value goes stale as soon as either the price or the rate does.
+        "valid_until": _earliest(quote.get("valid_until"), fx.get("valid_until")),
     }
 
 
@@ -85,7 +104,7 @@ async def stock_price(ctx: AppContext, code: str, *, today: date | None = None, 
     cached = _cached(store, key, today, QUOTE_KEYS)
     if cached:
         return cached | {"cached": True}
-    quote = await get_connectors(ctx)["stooq"].previous_close(code, today=today)
+    quote = await get_connectors(ctx)["yahoo_finance"].previous_close(code, today=today)
     quote = await _in_yen(ctx, quote, today=today, fx_memo=fx_memo)
     store.cache_price(key, today, quote)
     return quote | {"cached": False}
@@ -95,7 +114,7 @@ def _price(quote: dict) -> Price:
     return Price(
         value=quote["close_jpy"],
         date=quote["date"],
-        source="stooq",
+        source=quote["source"],
         market=quote["market"],
         symbol=quote["symbol"],
         local_currency=quote["currency"],
@@ -109,15 +128,20 @@ def _price(quote: dict) -> Price:
 async def refresh_stock_prices(ctx: AppContext) -> dict:
     store = portfolio_store(ctx)
     today = market_today()
-    codes = sorted({h.code for h in store.load().holdings if h.kind in PRICED_BY_STOOQ and h.code})
+    codes = sorted({h.code for h in store.load().holdings if h.kind in PRICED_BY_MARKET and h.code})
     prices: dict[str, Price] = {}
     errors = []
     fx_memo: dict = {}
     # Fetch first, then apply under the file lock, so the lock is never held across network calls.
     # A failure for one code only removes that code from the update.
-    for code in codes:
+    for index, code in enumerate(codes):
         try:
             prices[code] = _price(await stock_price(ctx, code, today=today, fx_memo=fx_memo))
+        except RateLimitedError as e:
+            # Every further request would be refused as well; the remaining codes keep their current prices.
+            errors.append({"code": code, "error": str(e)})
+            errors.extend({"code": c, "error": RATE_LIMIT_MESSAGE} for c in codes[index + 1 :])
+            break
         except ConnectorError as e:
             errors.append({"code": code, "error": str(e)})
         except (ValueError, KeyError, TypeError):
@@ -126,7 +150,7 @@ async def refresh_stock_prices(ctx: AppContext) -> dict:
     updated = []
     with store.transaction() as portfolio:
         for holding in portfolio.holdings:
-            price = prices.get(holding.code) if holding.kind in PRICED_BY_STOOQ else None
+            price = prices.get(holding.code) if holding.kind in PRICED_BY_MARKET else None
             if price and holding.apply_price(price.model_copy()):
                 updated.append(
                     {
@@ -145,7 +169,7 @@ async def refresh_stock_prices(ctx: AppContext) -> dict:
     return {
         "updated": updated,
         "errors": errors,
-        "note": "株価は Stooq の前日終値（日本株・米国株）です。米国株は USD/JPY で円換算しています。"
-        "投資信託は Stooq の対象外のため、紐付け済みの基準価額は運用会社の公式 API・公式 CSV で別途更新します。"
+        "note": "株価は Yahoo Finance の前日終値（日本株・米国株）です。米国株は USD/JPY で円換算しています。"
+        "投資信託は Yahoo Finance の対象外のため、紐付け済みの基準価額は運用会社の公式 API・公式 CSV で別途更新します。"
         "未紐付け・未対応のファンドは取得元を設定するか、公式サイトの基準価額を手入力してください。",
     }

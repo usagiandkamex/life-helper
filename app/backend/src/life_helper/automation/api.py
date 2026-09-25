@@ -7,13 +7,13 @@ from datetime import UTC, datetime
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from ..auth import CurrentUser, require_user
 from ..connectors.registry import get_connectors
 from ..context import AppContext, get_ctx
 from ..security import SENSITIVE_LABELS, detect_sensitive
-from .models import Automation, AutomationState, NotifySettings, Schedule
+from .models import Automation, AutomationState, NotifySettings, Schedule, normalize_connectors
 from .runner import AutomationRunner, build_notifier
 from .store import AutomationStore
 
@@ -31,6 +31,12 @@ class AutomationBody(BaseModel):
     connectors: list[str] = Field(default_factory=list)
     notify: NotifySettings = Field(default_factory=NotifySettings)
     max_runtime_minutes: int = Field(default=20, ge=1, le=20)
+
+    @field_validator("connectors")
+    @classmethod
+    def _connectors(cls, v: list[str]) -> list[str]:
+        # An automation opened before a connector was renamed is sent back with the old name.
+        return normalize_connectors(v)
 
 
 def _store(ctx: AppContext) -> AutomationStore:
