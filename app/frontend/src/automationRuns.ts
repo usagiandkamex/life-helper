@@ -10,8 +10,9 @@ export const STATUS_LABELS: Record<string, string> = {
   skipped_limit: '上限のため未実行',
 }
 
-// Leaves room for the question within the 20,000-character limit of a chat message.
-const QUOTE_PROMPT_LIMIT = 2000
+// The instruction is quoted in full (automation prompts are capped at 8,000) and the result is clipped so both,
+// plus the question, stay within the 20,000-character limit of a chat message.
+const QUOTE_PROMPT_LIMIT = 8000
 const QUOTE_RESULT_LIMIT = 8000
 
 export const statusLabel = (status: string) => STATUS_LABELS[status] ?? status

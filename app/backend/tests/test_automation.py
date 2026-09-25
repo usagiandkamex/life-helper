@@ -261,7 +261,7 @@ async def test_report_condition_and_include_summary(auto_env):
 
 
 @respx.mock
-async def test_missing_report_triggers_one_follow_up_when_notify_depends_on_it(auto_env):
+async def test_missing_report_triggers_one_follow_up(auto_env):
     ctx, runner, manager = auto_env
     _mock_github()
     manager.report_on_call = 2
@@ -272,9 +272,15 @@ async def test_missing_report_triggers_one_follow_up_when_notify_depends_on_it(a
     assert "report_result" in manager.prompts[0]  # the reminder is appended to the unattended prompt
     assert record["report"]["notify"] is True and record["notified"] is True
 
-    # Without GitHub notify there is no need to spend an extra request on a follow-up.
+    # The report is also the result shown in the app, so it is asked for again without GitHub notify too (issue #41).
     manager.prompts.clear()
     b = ctx.automations.upsert(Automation(name="z", prompt="y"))
+    record = await runner.run(b.id)
+    assert len(manager.prompts) == 2 and record["report"]["summary"] == "要約"
+
+    # A run that reported on the first call does not spend an extra request.
+    manager.prompts.clear()
+    manager.report_on_call = 1
     await runner.run(b.id)
     assert len(manager.prompts) == 1
 

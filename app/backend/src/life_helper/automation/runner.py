@@ -321,10 +321,10 @@ class AutomationRunner:
             if remaining <= 0:
                 raise TimeoutError
             await asyncio.wait_for(active.session.send_and_wait(prompt, timeout=remaining), remaining)
-            needs_report = automation.notify.github and automation.notify.condition == "report"
             remaining = deadline - loop.time()
-            if run_ctx.report is None and needs_report and remaining > 30:
-                # The notify decision depends on the report, so ask once more within the same session.
+            if run_ctx.report is None and remaining > 30:
+                # The report carries the result the user reads in the run history (and the notify decision),
+                # so ask once more within the same session.
                 run_ctx.events.append({"type": "follow_up"})
                 await asyncio.wait_for(active.session.send_and_wait(REPORT_FOLLOW_UP, timeout=remaining), remaining)
         except TimeoutError:
