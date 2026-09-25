@@ -1,17 +1,11 @@
 import { useCallback, useEffect, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { api, ApiError, formatDate, json } from '../api'
+import { STATUS_LABELS } from '../automationRuns'
 import { Markdown } from '../components/Markdown'
 import type { Automation, AutomationList, NotifySettings, RunRecord, Schedule } from '../types'
 
 const WEEKDAYS = ['月', '火', '水', '木', '金', '土', '日']
-const STATUS_LABELS: Record<string, string> = {
-  success: '成功',
-  error: '失敗',
-  timeout: 'タイムアウト',
-  reauth: '再ログインが必要',
-  skipped_limit: '上限のため未実行',
-}
 
 type Draft = Omit<Automation, 'id' | 'state' | 'estimated_runs_per_month' | 'cron'> & { id?: string }
 
@@ -202,6 +196,13 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
             <h3>
               {run.name}（{formatDate(run.started_at)}・{STATUS_LABELS[run.status] ?? run.status}）
             </h3>
+            {run.chat_thread_id && (
+              <p>
+                <Link to={`/chat?thread=${encodeURIComponent(run.chat_thread_id)}&run=${encodeURIComponent(run.id)}`}>
+                  チャットで見る
+                </Link>
+              </p>
+            )}
             {run.error && <div className="banner error">{run.error}</div>}
             <Markdown text={run.final_message || run.summary || ''} />
             {run.signals && Object.keys(run.signals).length > 0 && <p className="hint">ツールの結果: {JSON.stringify(run.signals)}</p>}

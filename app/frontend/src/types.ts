@@ -28,6 +28,7 @@ export type TurnEvent =
   | { type: 'approval_result'; id: string; status: Exclude<ApprovalStatus, 'pending'> }
   | { type: 'error'; message: string; code?: string }
   | { type: 'usage'; model: string }
+  | { type: 'follow_up' }
   | { type: 'done' }
   | { type: 'end' }
 
@@ -226,6 +227,34 @@ export type RunRecord = {
   read: boolean
   requests?: number
   events?: TurnEvent[]
+  transcript_version?: number
+  conversation_mode?: 'new' | 'continue'
+  prompt?: string
+  report?: { summary: string; notify: boolean } | null
+  events_omitted?: number
+  attempts?: number
+  chat_thread_id?: string | null
+}
+
+// Finished automation runs shown in the chat, following the automation's conversation setting.
+export type AutomationThread = {
+  id: string
+  mode: 'new' | 'continue'
+  automation_id: string
+  title: string
+  updated_at: string
+  latest_run_id: string
+  latest_started_at: string
+  latest_status: string | null
+  unread: boolean
+  run_count: number
+}
+
+export type AutomationThreadDetail = {
+  thread: AutomationThread
+  runs: RunRecord[]
+  has_more: boolean
+  has_newer: boolean
 }
 
 export type ConnectorStatus = { name: string; label: string; configured: boolean; last_used: string | null; cost: string }
