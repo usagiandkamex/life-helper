@@ -27,6 +27,21 @@ export const hasAnswer = (items: Item[]) => items.some((i) => i.kind === 'assist
 // Why a run did not succeed, for runs that stopped before or during the Copilot session.
 export const runProblem = (run: RunRecord) => (run.status === 'success' ? '' : run.error || run.summary || statusLabel(run.status))
 
+// What the run produced. report_result carries the result the user is meant to read, but older runs and runs that
+// stopped early have only summary or the last message, so all three are combined without repeating the same text.
+export function runAnswer(run: RunRecord): string {
+  const parts: string[] = []
+  for (const value of [run.report?.summary, run.summary, run.final_message]) {
+    const text = (value ?? '').trim()
+    if (!text || parts.some((p) => p.includes(text))) continue
+    // summary is a clipped copy of the last message in runs recorded without a report, so the full text wins.
+    const clipped = parts.findIndex((p) => text.includes(p))
+    if (clipped >= 0) parts[clipped] = text
+    else parts.push(text)
+  }
+  return parts.join('\n\n')
+}
+
 function clip(text: string, limit: number): string {
   const trimmed = text.trim()
   return trimmed.length > limit ? `${trimmed.slice(0, limit)}\n…（長いため以降を省略）` : trimmed
@@ -34,9 +49,9 @@ function clip(text: string, limit: number): string {
 
 export function quoteDraft(run: RunRecord): string {
   // A run can answer and still fail afterwards, so the answer is quoted together with the reason.
-  const answer = run.final_message || run.report?.summary || (run.status === 'success' ? run.summary : '') || ''
+  const answer = runAnswer(run)
   const problem = runProblem(run)
-  const result = [answer, problem && problem !== answer ? `（${problem}）` : ''].filter(Boolean).join('\n\n')
+  const result = [answer, problem && !answer.includes(problem) ? `（${problem}）` : ''].filter(Boolean).join('\n\n')
   const status = run.status === 'success' ? '' : `（${statusLabel(run.status)}）`
   return [
     `オートメーション「${run.name}」（${formatDate(run.started_at)}）の結果について質問です。`,

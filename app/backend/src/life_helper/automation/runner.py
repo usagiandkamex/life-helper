@@ -32,15 +32,26 @@ logger = logging.getLogger(__name__)
 KEPT_EVENT_TYPES = ("message", "tool_start", "tool_end", "file_write", "error")
 MAX_EVENTS = 200
 TRANSCRIPT_VERSION = 1
-REPORT_REMINDER = "\n\n（最後に必ず report_result ツールを呼び、要約と、利用者に通知すべきかを報告してください。）"
+REPORT_REMINDER = (
+    "\n\n（最後に必ず report_result ツールを呼び、結果の本文（summary）と、利用者に通知すべきかを報告してください。"
+    "summary はアプリの「実行履歴」に Markdown で表示されます。上の指示で形式（表など）が指定されていればそのとおりに、"
+    "指定がなければ表や箇条書きで、あとから読んでも分かるようにまとめてください。）"
+)
 REPORT_FOLLOW_UP = (
-    "report_result ツールを呼んで、今回の結果の要約と、利用者に通知すべきか（notify）を報告してください。"
+    "report_result ツールを呼んで、今回の結果の本文（summary。指示どおりの形式の Markdown）と、"
+    "利用者に通知すべきか（notify）を報告してください。"
 )
 REAUTH_MESSAGE = "GitHub への再ログインが必要です。アプリを開いてログインし直してください。"
 
 
 class ReportParams(BaseModel):
-    summary: str = Field(max_length=4000, description="結果の要約（利用者が読む文章）")
+    summary: str = Field(
+        max_length=4000,
+        description=(
+            "利用者が「実行履歴」で読む結果の本文（Markdown、4000 文字以内）。"
+            "指示で表などの形式が指定されていればその形式で、完成した結果を書く。"
+        ),
+    )
     notify: bool = Field(description="利用者に知らせるべき結果か（例: 条件を満たした、要確認の事項がある）")
 
 
@@ -273,7 +284,7 @@ class AutomationRunner:
     ) -> None:
         @define_tool(
             name="report_result",
-            description="オートメーションの最後に必ず呼び、要約と通知すべきかを報告する。",
+            description="オートメーションの最後に必ず呼び、利用者が読む結果の本文（Markdown）と通知すべきかを報告する。",
             skip_permission=True,
             is_terminal=True,
         )

@@ -270,6 +270,8 @@ def test_system_message_contains_kb_profile_and_rules(kb):
     assert "承認" in chat and "繰り返さない" in chat
     auto = build_system_message(kb, automation=True, allow_write=False, approval=True)
     assert "report_result" in auto and "読み取り専用" in auto
+    # The result is read later in the run history, so the rules say how to write it (issue #41).
+    assert "実行履歴" in auto and "Markdown" in auto and "表" in auto
     assert "承認ボタン" not in auto  # unattended runs never wait for a user
 
 

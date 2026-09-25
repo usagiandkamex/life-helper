@@ -527,7 +527,8 @@ async def test_run_record_carries_a_transcript(auto_env):
     record = await runner.run(a.id, now=datetime(2026, 9, 25, 0, 0, tzinfo=UTC))
     assert record["transcript_version"] == 1 and record["conversation_mode"] == "continue"
     assert record["prompt"] == "2026-09-25 の予定"  # expanded, without the report reminder sent to Copilot
-    assert "report_result" in manager.prompts[0]
+    # The reminder says where the result is shown, so it is written for the run history (issue #41).
+    assert "report_result" in manager.prompts[0] and "実行履歴" in manager.prompts[0]
     assert record["attempts"] == 1 and record["events_omitted"] == 0
     assert [e["type"] for e in record["events"]] == ["message"]
 

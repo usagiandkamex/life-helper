@@ -13,6 +13,12 @@ export function Markdown({ text }: { text: string }) {
               {children}
             </a>
           ),
+          // Results often come back as a table; wrapping it keeps a wide table scrollable instead of breaking the layout.
+          table: ({ children }) => (
+            <div className="table-wrap">
+              <table>{children}</table>
+            </div>
+          ),
         }}
       >
         {text}
