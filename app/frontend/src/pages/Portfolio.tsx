@@ -481,7 +481,7 @@ export function PortfolioPage() {
                     )}
                   </td>
                   <td>
-                    <button className="link danger" onClick={() => removeHolding(h.id)}>
+                    <button className="link danger" onClick={() => removeHolding(h.id)} disabled={busy}>
                       削除
                     </button>
                   </td>
