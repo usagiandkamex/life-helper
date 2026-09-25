@@ -102,6 +102,8 @@ async def _verified_quote(ctx: AppContext, candidate: dict) -> dict:
     listed = candidate.get("association_code")
     if quote["fund_code"] != candidate["fund_code"] or quote["association_code"] != listed:
         raise ConnectorError("検索結果とファンドページで協会コードが一致しないため、紐付けませんでした")
+    if normalize_name(quote["name"]) != normalize_name(candidate["name"]):
+        raise ConnectorError("検索結果とファンドページでファンド名が一致しないため、紐付けませんでした")
     return quote
 
 

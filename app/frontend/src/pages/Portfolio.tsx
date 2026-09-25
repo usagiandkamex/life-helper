@@ -95,13 +95,21 @@ function PriceCell({ holding }: { holding: Holding }) {
   )
 }
 
-function AutoLinkReport({ report, onPick }: { report: FundAutoLink; onPick: (id: string) => void }) {
+function AutoLinkReport({
+  report,
+  busy,
+  onPick,
+}: {
+  report: FundAutoLink
+  busy: boolean
+  onPick: (id: string) => void
+}) {
   const pending = [...report.ambiguous, ...report.unmatched]
   if (report.linked.length === 0 && pending.length === 0 && report.errors.length === 0) return null
   const pick = (id: string) => (
     <>
       {' '}
-      <button className="link small" onClick={() => onPick(id)}>
+      <button className="link small" onClick={() => onPick(id)} disabled={busy}>
         候補を見る
       </button>
     </>
@@ -378,6 +386,7 @@ export function PortfolioPage() {
       {view.refresh_funds?.auto_link && (
         <AutoLinkReport
           report={view.refresh_funds.auto_link}
+          busy={busy}
           onPick={(id) => {
             const target = view.holdings.find((h) => h.id === id)
             if (target) openFundPicker(target)

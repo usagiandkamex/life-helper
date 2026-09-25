@@ -848,6 +848,26 @@ async def test_auto_link_fails_closed_when_the_search_omits_the_association_code
     assert portfolio_store(ctx).load().holdings[0].fund is None
 
 
+async def test_auto_link_needs_the_search_and_the_fund_page_to_agree_on_the_name(ctx):
+    # The search returns the S&P 500 fund's ISIN and 協会コード under another fund's name; the fund page says
+    # otherwise, so the name the search claimed must not be enough to link the holding.
+    mislabeled = SP500 | {"fundNm": "ひふみプラス"}
+    with portfolio_store(ctx).transaction() as portfolio:
+        portfolio.holdings = [_imported("ひふみプラス", 43_966)]
+    _funds_ready(ctx)
+    with respx.mock:
+        search = mock_toushin({}, funds=(mislabeled,)).side_effect
+        pages = mock_toushin({SP500_ISIN: (44_842, _jp(NAV_DAY))}).side_effect
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return (search if request.method == "POST" else pages)(request)
+
+        respx.route(url__startswith="https://toushin-lib.fwg.ne.jp").mock(side_effect=handler)
+        result = await auto_link_funds(ctx)
+    assert result["linked"] == [] and "ファンド名が一致しない" in result["errors"][0]["error"]
+    assert portfolio_store(ctx).load().holdings[0].fund is None
+
+
 async def test_auto_link_never_overrides_a_change_made_while_searching(ctx, monkeypatch):
     with portfolio_store(ctx).transaction() as portfolio:
         portfolio.holdings = [_imported(SBI_SP500, 43_966), _imported(SBI_SCHD, 13_248)]
