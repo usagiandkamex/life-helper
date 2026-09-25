@@ -35,6 +35,8 @@ const CODE_HINTS: Record<string, string> = {
   daiwa_csv: '4 桁のファンドコード',
 }
 const MARKET_LABELS: Record<string, string> = { jp: '日本株', us: '米国株' }
+// A search that failed says nothing about whether the fund exists, so it must not read as "no such fund".
+const SEARCH_FAILED = '候補を取得できませんでした。時間をおいて探し直すか、コードを指定して紐付けるか、公式サイトの基準価額を手入力してください。'
 
 const amount = (value: number) => value.toLocaleString('ja-JP', { maximumFractionDigits: 2 })
 const label = (labels: Record<string, string>, key: string | null | undefined) => (key ? labels[key] ?? key : '')
@@ -172,6 +174,7 @@ export function PortfolioPage() {
   const [broker, setBroker] = useState('sbi')
   const [fundTarget, setFundTarget] = useState<Holding | null>(null)
   const [candidates, setCandidates] = useState<FundCandidates | null>(null)
+  const [searching, setSearching] = useState(false)
   const [chart, setChart] = useState<ChartData | null>(null)
   const [simResult, setSimResult] = useState<{ principal: number; expected_value: number; percentiles: Record<string, number>; after_tax: Record<string, number> } | null>(null)
 
@@ -231,9 +234,10 @@ export function PortfolioPage() {
 
   const searchFunds = (name: string) => {
     setCandidates(null)
+    setSearching(true)
     run(async () => {
       setCandidates(await api<FundCandidates>(`/api/portfolio/fund-candidates?name=${encodeURIComponent(name)}`))
-    })
+    }).finally(() => setSearching(false))
   }
 
   const openFundPicker = (h: Holding) => {
@@ -510,7 +514,7 @@ export function PortfolioPage() {
         <section className="panel" id="fund-picker" key={fundTarget.id}>
           <h2>基準価額の取得元: {fundTarget.name}</h2>
           <p className="hint">
-            {candidates?.note ?? '公式ファンドの候補を探しています…'}
+            {candidates?.note ?? (searching ? '公式ファンドの候補を探しています…' : SEARCH_FAILED)}
             {view.fund_providers.length > 1 &&
               `（取得元: ${view.fund_providers
                 .filter((p) => p.provider !== 'manual')
@@ -543,8 +547,7 @@ export function PortfolioPage() {
           {candidates && candidates.candidates.length === 0 && (
             <p className="hint">
               {candidates.errors.length > 0
-                ? // A search that failed says nothing about whether the fund exists, so it must not read as "no such fund".
-                  '候補を取得できませんでした。時間をおいて探し直すか、コードを指定して紐付けるか、公式サイトの基準価額を手入力してください。'
+                ? SEARCH_FAILED
                 : '候補が見つかりませんでした。ファンド名を短くして探し直すか、コードを指定して紐付けるか、公式サイトの基準価額を手入力してください。'}
             </p>
           )}
