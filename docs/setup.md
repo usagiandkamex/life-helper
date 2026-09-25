@@ -63,7 +63,7 @@ cd life-helper
 | 楽天ウェブサービス | 楽天トラベルの空室検索 | アプリ登録で `applicationId` と `accessKey` を取得 |
 
 株価（日本株・米国株・ETF・REIT の前日終値）と USD/JPY は、Yahoo Finance のチャート API から取得します。API キーも設定も不要です。
-公式に公開された API ではない（yfinance などが使っているものと同じ）ため、個人利用の範囲で使い、仕様変更や利用制限で取得できないときは手入力で補ってください。
+公式に公開された API ではない（yfinance などが使っているものと同じ）ため、個人利用の範囲で使い、仕様変更や利用制限で取得できないときは証券会社の保有証券 CSV の取り込みで補ってください。
 
 投資信託の基準価額に使う運用会社の公式データは、いずれも API キー不要で設定も要りません（各社の利用規約の範囲内で個人利用）。
 Phase 1 の[三菱UFJアセットマネジメント 投信情報 API](https://www.am.mufg.jp/tool/webapi/)（[利用規約](https://www.am.mufg.jp/tool/webapi/agreement.html)）と、
@@ -267,6 +267,8 @@ gh workflow run Deploy                           # 3. デプロイして Azure �
 - `LH_TOKEN_ENCRYPTION_KEY` を変えると保存済みの GitHub トークンを復号できなくなります。変更後にもう一度ログインしてください。
 - `LH_SESSION_SECRET` を変えると全ブラウザがログアウトされます。
 - `LH_BUDGET_START_DATE` は変更しないでください（予算を作り直す場合は Azure Portal で予算を削除してから）。
+- 以前 Stooq 用に登録した `LH_STOOQ_API_KEY` は使われなくなりました（株価は Yahoo Finance から API キーなしで取得します）。
+  残っていても害はありませんが、`gh secret delete LH_STOOQ_API_KEY --env production --repo usagiandkamex/life-helper` で削除できます。
 
 ## 困ったとき
 
@@ -277,6 +279,7 @@ gh workflow run Deploy                           # 3. デプロイして Azure �
 | DeployのProvisionがContainer Appの`Circular dependency detected`で失敗する | 修正版のBicepとDeployワークフローを`main`へマージし、古い実行の再実行ではなく、新しいDeployを手動実行する |
 | ログイン画面に「OAuth App が未設定」と出る | ステップ 2-2 の登録後に `azd provision` を実行したか |
 | ログイン後に「再ログインが必要」と出る | GitHub 側でトークンを取り消していないか。ログインし直す |
+| 株価の更新で「Yahoo Finance の利用制限」「想定外の応答」と出る | 非公式 API のため、時間をおいて再実行する。続く場合は仕様変更の可能性があるので、その間は証券会社の保有証券 CSV を取り込んで評価額を更新する |
 | Deploy ワークフローが実行されない | リポジトリ変数 `DEPLOY_ENABLED` が `true` か。`main` の CI が合格しているか |
 | Deploy がサインインで失敗する | ステップ 3 を実行したか。リポジトリ名を変えた場合はフェデレーション資格情報のサブジェクトも変わるため、スクリプトを再実行する |
 | オートメーションが動かない | 画面の実行履歴、Azure Portal のジョブ `caj-lifehelper-…` の実行履歴とログ |
