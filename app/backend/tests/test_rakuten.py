@@ -303,6 +303,28 @@ async def test_the_lock_is_not_held_during_the_request(rakuten, tmp_path):
 
 
 @respx.mock
+async def test_timestamp_write_failure_aborts_request_and_releases_lock(rakuten, tmp_path, monkeypatch):
+    route = respx.get(ICHIBA).mock(return_value=httpx.Response(200, json={"count": 0, "Items": []}))
+
+    def fail_write(path, content):
+        raise OSError(f"cannot write {path}: {ACCESS_KEY}")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(rakuten_module, "atomic_write", fail_write)
+        with pytest.raises(ConnectorError, match="呼び出し間隔を記録できませんでした") as e:
+            await rakuten.search_items(keyword="x")
+    assert not route.called
+    assert ACCESS_KEY not in str(e.value) and str(tmp_path) not in str(e.value)
+    assert e.value.__cause__ is None and e.value.__suppress_context__
+    assert not (tmp_path / "locks" / "rakuten-throttle.lock").exists()
+    assert rakuten.last_used() is None
+
+    await rakuten.search_items(keyword="x")
+    assert route.call_count == 1
+    assert json.loads((tmp_path / "rakuten-throttle.json").read_text(encoding="utf-8"))["last_request_at"] > 0
+
+
+@respx.mock
 async def test_busy_lock_is_reported(rakuten, tmp_path):
     other = FileLock(tmp_path / "locks" / "rakuten-throttle.lock", ttl_seconds=60)
     assert other.try_acquire()

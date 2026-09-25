@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import re
 import time
 import unicodedata
@@ -22,8 +21,6 @@ from zoneinfo import ZoneInfo
 from ..automation.locks import FileLock, wait_acquire
 from ..knowledge.store import atomic_write
 from .base import Connector, ConnectorError, ConnectorInfo
-
-logger = logging.getLogger(__name__)
 
 BASE_URL = "https://openapi.rakuten.co.jp"
 # Rakuten raises API versions from time to time: update these (LH_RAKUTEN_ENDPOINTS overrides them for local trials).
@@ -356,7 +353,9 @@ class RakutenConnector(Connector):
             try:
                 atomic_write(self._throttle_path, json.dumps({"last_request_at": time.time()}))
             except OSError:
-                logger.debug("could not record the last Rakuten request", exc_info=True)
+                raise ConnectorError(
+                    "楽天ウェブサービスの呼び出し間隔を記録できませんでした。時間をおいてから試してください"
+                ) from None
         finally:
             lock.release()
 
