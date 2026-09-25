@@ -91,6 +91,9 @@ td.actions { white-space: nowrap; display: flex; gap: 0.5rem; }
 .conversations li { display: flex; justify-content: space-between; gap: 0.25rem; padding: 0.3rem 0.2rem; border-radius: 6px; }
 .conversations li.active { background: #eff6ff; }
 .conversations .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; color: var(--text); }
+.conversations li.unread .title { font-weight: 700; }
+.conversations .thread-date { display: block; color: var(--muted); font-weight: 400; font-size: 0.75rem; }
+.unread-dot { color: var(--primary); font-size: 0.6rem; align-self: center; }
 .thread { flex: 1; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; min-width: 0; }
 .thread-toolbar { display: flex; gap: 0.5rem; align-items: center; padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); }
 .messages { flex: 1; overflow: auto; padding: 1rem; display: flex; flex-direction: column; gap: 0.75rem; }
@@ -107,6 +110,18 @@ td.actions { white-space: nowrap; display: flex; gap: 0.5rem; }
 .composer { border-top: 1px solid var(--border); padding: 0.75rem; display: flex; flex-direction: column; gap: 0.5rem; }
 .composer textarea { max-height: calc(5 * 1.6em + 0.8rem + 2px); max-height: calc(5lh + 0.8rem + 2px); overflow-y: auto; resize: none; }
 .composer-actions { display: flex; justify-content: space-between; gap: 0.5rem; }
+.composer.readonly { background: #f9fafb; border-radius: 0 0 10px 10px; }
+.run-transcript { display: flex; flex-direction: column; gap: 0.75rem; padding-bottom: 0.75rem; border-bottom: 1px dashed var(--border); }
+.run-heading { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; font-size: 0.8rem; color: var(--muted); }
+.run-status { padding: 0 0.4rem; border-radius: 999px; background: #f3f4f6; }
+.run-status.success { color: var(--ok); background: #f0fdf4; }
+.run-status.error, .run-status.timeout, .run-status.reauth { color: var(--danger); background: #fef2f2; }
+.run-status.skipped_limit { color: var(--warn); background: #fffbeb; }
+.run-report { border-left: 3px solid var(--primary); background: #f8fafc; padding: 0.5rem 0.75rem; border-radius: 0 6px 6px 0; }
+.run-report small { color: var(--muted); }
+.run-transcript .banner.warn { margin: 0; border-radius: 6px; }
+.load-more { align-self: center; }
+.msg-note { align-self: center; }
 .chart { margin: 0.5rem 0; }
 .chart figcaption { font-size: 0.85rem; color: var(--muted); }
 .mobile-only { display: none; }

@@ -22,6 +22,7 @@ class AutomationStore:
         self.path = app_state_dir / "automations.yaml"
         self.runs_dir = app_state_dir / "automation-runs"
         self.usage_path = app_state_dir / "automation-usage.json"
+        self.chat_state_path = app_state_dir / "automation-chat.json"
         self.locks_dir = app_state_dir / "locks"
 
     # -- definitions -------------------------------------------------------------------------------------
@@ -102,7 +103,7 @@ class AutomationStore:
         path = self._run_dir(record["automation_id"]) / f"{record['id']}.json"
         atomic_write(path, json.dumps(record, ensure_ascii=False, indent=1))
 
-    def list_runs(self, automation_id: str | None = None, limit: int = 50) -> list[dict]:
+    def list_runs(self, automation_id: str | None = None, limit: int | None = 50) -> list[dict]:
         dirs = [self._run_dir(automation_id)] if automation_id else [d for d in self.runs_dir.glob("*") if d.is_dir()]
         records = []
         for d in dirs:
@@ -131,6 +132,31 @@ class AutomationStore:
 
     def unread_count(self) -> int:
         return sum(1 for r in self.list_runs(limit=500) if not r.get("read"))
+
+    # -- chat view state ---------------------------------------------------------------------------------
+    # Kept apart from the run records so hiding a conversation never rewrites a result (or races with "read").
+
+    def _chat_state(self) -> dict:
+        try:
+            data = json.loads(self.chat_state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def chat_hidden(self) -> dict[str, str]:
+        """Thread id -> id of the latest run the user saw when hiding it."""
+        hidden = self._chat_state().get("hidden")
+        return hidden if isinstance(hidden, dict) else {}
+
+    def hide_chat_thread(self, thread_id: str, through_run_id: str) -> None:
+        def op():
+            state = self._chat_state()
+            hidden = state.get("hidden") if isinstance(state.get("hidden"), dict) else {}
+            hidden[thread_id] = through_run_id
+            state["hidden"] = hidden
+            atomic_write(self.chat_state_path, json.dumps(state, ensure_ascii=False))
+
+        self._with_lock(op)
 
     # -- monthly usage -----------------------------------------------------------------------------------
 

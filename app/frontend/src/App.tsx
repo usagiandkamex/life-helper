@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom'
 import { api, ApiError, onAuthError, setCsrfToken } from './api'
 import type { Me } from './types'
@@ -14,6 +14,12 @@ export default function App() {
   const [startupError, setStartupError] = useState('')
   const [reauth, setReauth] = useState(false)
   const [unread, setUnread] = useState(0)
+  // Pages report the count after marking runs read; a poll that started before that must not undo it.
+  const unreadVersion = useRef(0)
+  const updateUnread = useCallback((n: number) => {
+    unreadVersion.current += 1
+    setUnread(n)
+  }, [])
 
   const loadMe = useCallback(async () => {
     setStartupError('')
@@ -38,10 +44,15 @@ export default function App() {
 
   useEffect(() => {
     if (!me?.authenticated) return
-    const refresh = () =>
+    const refresh = () => {
+      // Started polls and page updates share one counter: only the latest of them sets the count.
+      const version = ++unreadVersion.current
       api<{ unread: number }>('/api/automations')
-        .then((d) => setUnread(d.unread))
+        .then((d) => {
+          if (version === unreadVersion.current) setUnread(d.unread)
+        })
         .catch(() => undefined)
+    }
     refresh()
     const timer = window.setInterval(refresh, 60_000)
     return () => window.clearInterval(timer)
@@ -93,10 +104,10 @@ export default function App() {
       <main className="content">
         <Routes>
           <Route path="/" element={<Navigate to="/chat" replace />} />
-          <Route path="/chat" element={<ChatPage />} />
+          <Route path="/chat" element={<ChatPage onUnreadChange={updateUnread} />} />
           <Route path="/knowledge" element={<KnowledgePage />} />
           <Route path="/portfolio" element={<PortfolioPage />} />
-          <Route path="/automations" element={<AutomationsPage onUnreadChange={setUnread} />} />
+          <Route path="/automations" element={<AutomationsPage onUnreadChange={updateUnread} />} />
           <Route path="/settings" element={<SettingsPage login={me.login} />} />
           <Route path="*" element={<Navigate to="/chat" replace />} />
         </Routes>
