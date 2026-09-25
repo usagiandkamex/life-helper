@@ -77,7 +77,9 @@ def price_within_range(value: object) -> bool:
     """
     if isinstance(value, bool) or not isinstance(value, int | float):
         return False
-    return math.isfinite(value) and 0 < value <= MAX_PRICE
+    # Comparing is enough: NaN compares false both ways, and infinity is above the limit. ``math.isfinite`` is
+    # not used because it converts to float first, which raises OverflowError for an absurdly large integer.
+    return 0 < value <= MAX_PRICE
 
 
 class Price(BaseModel):

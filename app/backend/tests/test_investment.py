@@ -433,13 +433,15 @@ async def test_quote_the_portfolio_cannot_hold_is_not_stored(ctx, settings):
             Holding(account="tokutei", kind="stock", code="7203", name="トヨタ", quantity=10, cost_total=20_000)
         ]
     _yahoo_ready(ctx)
-    with respx.mock:
-        mock_yahoo({"7203.T": 1e30})
-        result = await refresh_stock_prices(ctx)
-    assert result["updated"] == []
-    assert result["errors"] == [{"code": "7203", "error": "Yahoo Finance から取得した株価が不正です"}]
-    assert portfolio_store(ctx).load().holdings[0].price is None
-    assert portfolio_store(ctx).cached_price("7203", market_today()) is None
+    # A number too large to round to yen, and one too large to even be turned into a float.
+    for close in (1e30, 10**400):
+        with respx.mock:
+            mock_yahoo({"7203.T": close})
+            result = await refresh_stock_prices(ctx)
+        assert result["updated"] == []
+        assert result["errors"] == [{"code": "7203", "error": "Yahoo Finance から取得した株価が不正です"}]
+        assert portfolio_store(ctx).load().holdings[0].price is None
+        assert portfolio_store(ctx).cached_price("7203", market_today()) is None
 
 
 async def test_converted_price_beyond_the_limit_is_refused(ctx, monkeypatch):
