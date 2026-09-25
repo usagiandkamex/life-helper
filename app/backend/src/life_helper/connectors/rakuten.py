@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import re
 import time
 import unicodedata
@@ -340,13 +341,25 @@ class RakutenConnector(Connector):
         shares the data volume (web app and automation job). Only start times are coordinated: the lock is held for
         the wait alone, never during the request, so a slow response cannot outlive it."""
         lock = FileLock(self._throttle_lock_path, ttl_seconds=THROTTLE_LOCK_TTL_SECONDS)
-        if not await wait_acquire(lock, self.lock_wait_seconds):
+        try:
+            acquired = await wait_acquire(lock, self.lock_wait_seconds)
+        except OSError:
+            raise ConnectorError(
+                "楽天ウェブサービスの呼び出し間隔のロックを取得できませんでした。時間をおいてから試してください"
+            ) from None
+        if not acquired:
             raise ConnectorError("楽天ウェブサービスへの問い合わせが混み合っています。時間をおいてから試してください")
         try:
             try:
                 last = float(json.loads(self._throttle_path.read_text(encoding="utf-8"))["last_request_at"])
-            except (OSError, ValueError, KeyError, TypeError):
+                if not math.isfinite(last) or last < 0:
+                    raise ValueError("invalid timestamp")
+            except FileNotFoundError:
                 last = 0.0
+            except (OSError, ValueError, KeyError, TypeError, OverflowError):
+                raise ConnectorError(
+                    "楽天ウェブサービスの呼び出し間隔を読み取れませんでした。時間をおいてから試してください"
+                ) from None
             wait = self.min_interval_seconds - (time.time() - last)
             if wait > 0:
                 await asyncio.sleep(min(wait, self.min_interval_seconds))

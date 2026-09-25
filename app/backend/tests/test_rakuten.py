@@ -7,6 +7,7 @@ import itertools
 import json
 import time
 from datetime import date
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -322,6 +323,93 @@ async def test_timestamp_write_failure_aborts_request_and_releases_lock(rakuten,
     await rakuten.search_items(keyword="x")
     assert route.call_count == 1
     assert json.loads((tmp_path / "rakuten-throttle.json").read_text(encoding="utf-8"))["last_request_at"] > 0
+
+
+@respx.mock
+@pytest.mark.parametrize("error_type", [PermissionError, OSError])
+async def test_timestamp_read_failure_aborts_request_and_releases_lock(rakuten, tmp_path, monkeypatch, error_type):
+    route = respx.get(ICHIBA).mock(return_value=httpx.Response(200, json={"count": 0, "Items": []}))
+    shared = tmp_path / "rakuten-throttle.json"
+    original = json.dumps({"last_request_at": time.time()})
+    shared.write_text(original, encoding="utf-8")
+    read_text = Path.read_text
+
+    def fail_read(path, *args, **kwargs):
+        if path == shared:
+            raise error_type(f"cannot read {path}: {ACCESS_KEY}")
+        return read_text(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_text", fail_read)
+        with pytest.raises(ConnectorError, match="呼び出し間隔を読み取れませんでした") as e:
+            await rakuten.search_items(keyword="x")
+    assert not route.called
+    assert ACCESS_KEY not in str(e.value) and str(tmp_path) not in str(e.value)
+    assert e.value.__cause__ is None and e.value.__suppress_context__
+    assert not (tmp_path / "locks" / "rakuten-throttle.lock").exists()
+    assert shared.read_text(encoding="utf-8") == original
+    assert rakuten.last_used() is None
+
+    await rakuten.search_items(keyword="x")
+    assert route.call_count == 1
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"\xff",
+        b"{",
+        b"{}",
+        b"[]",
+        b"null",
+        b'{"last_request_at": null}',
+        b'{"last_request_at": "invalid"}',
+        b'{"last_request_at": NaN}',
+        b'{"last_request_at": Infinity}',
+        b'{"last_request_at": -Infinity}',
+        b'{"last_request_at": -1}',
+        ('{"last_request_at": ' + "9" * 400 + "}").encode(),
+    ],
+)
+async def test_invalid_timestamp_aborts_request_and_releases_lock(rakuten, tmp_path, content):
+    route = respx.get(ICHIBA).mock(return_value=httpx.Response(200, json={"count": 0, "Items": []}))
+    shared = tmp_path / "rakuten-throttle.json"
+    shared.write_bytes(content)
+
+    with pytest.raises(ConnectorError, match="呼び出し間隔を読み取れませんでした") as e:
+        await rakuten.search_items(keyword="x")
+    assert not route.called
+    assert e.value.__cause__ is None and e.value.__suppress_context__
+    assert not (tmp_path / "locks" / "rakuten-throttle.lock").exists()
+    assert shared.read_bytes() == content
+    assert rakuten.last_used() is None
+
+    shared.write_text(json.dumps({"last_request_at": time.time()}), encoding="utf-8")
+    await rakuten.search_items(keyword="x")
+    assert route.call_count == 1
+
+
+@respx.mock
+@pytest.mark.parametrize("error_type", [PermissionError, OSError])
+async def test_lock_acquisition_failure_aborts_request(rakuten, tmp_path, monkeypatch, error_type):
+    route = respx.get(ICHIBA).mock(return_value=httpx.Response(200, json={"count": 0, "Items": []}))
+
+    def fail_acquire(lock):
+        raise error_type(f"cannot acquire {lock.path}: {ACCESS_KEY}")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(FileLock, "try_acquire", fail_acquire)
+        with pytest.raises(ConnectorError, match="ロックを取得できませんでした") as e:
+            await rakuten.search_items(keyword="x")
+    assert not route.called
+    assert ACCESS_KEY not in str(e.value) and str(tmp_path) not in str(e.value)
+    assert e.value.__cause__ is None and e.value.__suppress_context__
+    assert not (tmp_path / "rakuten-throttle.json").exists()
+    assert rakuten.last_used() is None
+
+    await rakuten.search_items(keyword="x")
+    assert route.call_count == 1
 
 
 @respx.mock
