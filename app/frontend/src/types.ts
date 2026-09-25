@@ -66,6 +66,7 @@ export type Holding = {
   name: string
   quantity: number
   cost_total: number
+  cost_total_exact: number
   value: number | null
   gain: number | null
   price: Price | null

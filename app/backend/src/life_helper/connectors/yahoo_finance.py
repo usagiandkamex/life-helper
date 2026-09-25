@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import httpx
 
 from ..market.clock import market_today
-from ..market.portfolio import Market
+from ..market.portfolio import Market, price_within_range
 from .base import Connector, ConnectorError, ConnectorInfo
 
 CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/"
@@ -77,13 +77,12 @@ def to_yahoo_symbol(code: str) -> str:
 
 
 def _number(raw: Any, label: str) -> float:
-    if isinstance(raw, bool) or not isinstance(raw, int | float):
-        raise ConnectorError(f"Yahoo Finance から取得した{label}が不正です")
-    value = float(raw)
-    if not math.isfinite(value) or value <= 0:
+    # The same bound as a stored price: a quote that could not be rounded to yen would break the whole
+    # portfolio screen, so it is refused here, before it is cached.
+    if not price_within_range(raw):
         raise ConnectorError(f"Yahoo Finance から取得した{label}が不正です")
     # Yahoo sends single-precision artifacts (424.79998779296875 for 424.8); no quote has more than 4 decimals.
-    return round(value, PRICE_DECIMALS)
+    return round(float(raw), PRICE_DECIMALS)
 
 
 def _epoch(raw: Any) -> datetime | None:

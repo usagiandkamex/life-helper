@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+import math
 import re
 from datetime import date
 from pathlib import Path
@@ -11,7 +12,7 @@ from pathlib import Path
 import yaml
 
 from .clock import market_today
-from .portfolio import Holding, Price
+from .portfolio import MAX_PRICE, MAX_QUANTITY, MAX_YEN, Holding, Price
 
 
 class BrokerCsvError(ValueError):
@@ -53,6 +54,19 @@ def _number(value: str | None) -> float | None:
         return float(cleaned)
     except ValueError:
         return None
+
+
+def _checked(value: float | None, limit: float, label: str, row_name: str) -> float | None:
+    """Rejects a value the portfolio cannot hold, with the same limits as the hand-entered update.
+
+    ``Holding`` keeps plain floats, so an infinite or absurd number from a CSV would be saved and only fail later,
+    when ``summarize()`` rounds it to yen. The whole import is refused instead, leaving the saved portfolio as is.
+    """
+    if value is None:
+        return None
+    if not math.isfinite(value) or not 0 <= value <= limit:
+        raise BrokerCsvError(f"{row_name} の{label}が扱える範囲を超えているため取り込みませんでした")
+    return value
 
 
 def _match_account(text: str, accounts: dict[str, list[str]]) -> str | None:
@@ -115,12 +129,17 @@ def parse_broker_csv(data: bytes, mapping: dict, *, as_of: date | None = None) -
         if cost_total is None and avg_cost is not None:
             cost_total = avg_cost * quantity / (10_000 if kind == "fund" else 1)
         price_value = _number(cell("price"))
+        row_name = name.strip() or code.strip() or "（名称不明）"
+        quantity = _checked(quantity, MAX_QUANTITY, "数量", row_name)
+        valuation = _checked(valuation, MAX_YEN, "評価額", row_name)
+        cost_total = _checked(cost_total, MAX_YEN, "取得金額", row_name)
+        price_value = _checked(price_value, MAX_PRICE, "現在値", row_name)
         holdings.append(
             Holding(
                 account=account,
                 kind=kind,
                 code=code.strip(),
-                name=name.strip() or code.strip() or "（名称不明）",
+                name=row_name,
                 quantity=quantity,
                 cost_total=cost_total or 0.0,
                 price=Price(value=price_value, date=as_of.isoformat(), source="broker_csv") if price_value else None,

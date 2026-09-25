@@ -10,7 +10,7 @@ from ..connectors.base import ConnectorError
 from ..connectors.registry import get_connectors
 from ..connectors.yahoo_finance import RATE_LIMIT_MESSAGE, RateLimitedError
 from .clock import market_today
-from .portfolio import PortfolioStore, Price
+from .portfolio import PortfolioStore, Price, price_within_range
 
 if TYPE_CHECKING:
     from ..context import AppContext
@@ -61,7 +61,9 @@ async def usd_jpy_rate(ctx: AppContext, *, today: date | None = None, memo: dict
         raise memo["error"]
     store = portfolio_store(ctx)
     cached = _cached(store, FX_CACHE_CODE, today, FX_KEYS)
-    if cached:
+    # The connector checks a rate it fetches; a cached one is checked here, so an entry written before the bound
+    # existed is fetched again instead of turning every US holding into an error for the rest of the day.
+    if cached and price_within_range(cached["rate"]):
         return cached
     try:
         rate = await get_connectors(ctx)["yahoo_finance"].usd_jpy(today=today)
@@ -96,16 +98,40 @@ async def _in_yen(ctx: AppContext, quote: dict, *, today: date, fx_memo: dict | 
     }
 
 
+def _checked(quote: dict) -> dict:
+    """Refuses a quote whose yen value cannot be stored as a price.
+
+    A US close is converted with USD/JPY, so the yen value can be out of range even when the close and the rate
+    are not. ``summarize()`` rounds quantity × price to yen, and a price it cannot round would make the whole
+    portfolio screen fail, so such a quote is rejected before it is cached or applied to a holding.
+    """
+    value = quote["close_jpy"]
+    if not price_within_range(value):
+        raise ConnectorError(f"円換算した株価（{value}）が想定の範囲を超えているため取り込めませんでした")
+    return quote
+
+
+def _usable(quote: dict) -> bool:
+    """True when a cached quote still holds numbers a price may be made of (an older entry may not)."""
+    rate = quote.get("fx_rate")
+    return (
+        price_within_range(quote["close"])
+        and price_within_range(quote["close_jpy"])
+        and (rate is None or price_within_range(rate))
+    )
+
+
 async def stock_price(ctx: AppContext, code: str, *, today: date | None = None, fx_memo: dict | None = None) -> dict:
     """Previous close of a Japanese or US stock, in its own currency and in yen (cached per day)."""
     today = today or market_today()
     key = code.strip().upper()
     store = portfolio_store(ctx)
     cached = _cached(store, key, today, QUOTE_KEYS)
-    if cached:
+    # An entry cached before the yen value was bounded is fetched again instead of failing the refresh.
+    if cached and _usable(cached):
         return cached | {"cached": True}
     quote = await get_connectors(ctx)["yahoo_finance"].previous_close(code, today=today)
-    quote = await _in_yen(ctx, quote, today=today, fx_memo=fx_memo)
+    quote = _checked(await _in_yen(ctx, quote, today=today, fx_memo=fx_memo))
     store.cache_price(key, today, quote)
     return quote | {"cached": False}
 
