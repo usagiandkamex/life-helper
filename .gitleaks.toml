@@ -11,4 +11,6 @@ regexes = [
   '''e5e2671a-b454-4e6f-aaaa-bbbbccccdddd''',
   '''(client-secret-value|test-session-secret-0123456789|SUPERSECRETKEY|SECRET-API-KEY-123|apikey-123456)''',
   '''(app-id-123456|access-key-123456)''',
+  # RFC 6455 の例に載っている Sec-WebSocket-Key（"the sample nonce" の Base64）。
+  '''dGhlIHNhbXBsZSBub25jZQ==''',
 ]

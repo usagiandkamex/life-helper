@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -38,6 +38,17 @@ class ActiveSession:
     policy: ToolPolicy
     model: str
     extra: dict[str, Any] = field(default_factory=dict)
+    releasers: list[Callable[[], Awaitable[None]]] = field(default_factory=list)
+
+    async def release(self) -> None:
+        """Ends a turn or run: frees the write lock and per-session tool resources. The session stays usable."""
+        if self.policy is not None:
+            self.policy.release_all()
+        for release in self.releasers:
+            try:
+                await release()
+            except Exception:  # noqa: BLE001
+                logger.warning("failed to release tool resources")
 
 
 def available_toolset(has_skills: bool) -> ToolSet:
@@ -104,6 +115,7 @@ class CopilotManager:
         self._sessions.clear()
         self._stale.clear()
         for active in sessions:
+            await active.release()
             await _disconnect_quietly(active.session)
         if self._client is not None:
             try:
@@ -124,7 +136,6 @@ class CopilotManager:
         return ToolPolicy(
             knowledge_root=s.knowledge_dir,
             skills_root=s.skills_dir,
-            fetch_domains=s.fetch_domains,
             masker=self.ctx.masker,
             custom_tools={spec.tool.name for spec in specs},
             write_custom_tools={spec.tool.name for spec in specs if spec.writes},
@@ -145,7 +156,12 @@ class CopilotManager:
             "available_tools": available_toolset(has_skills),
             "system_message": {
                 "mode": "append",
-                "content": build_system_message(s.knowledge_dir, automation=self.automation, allow_write=allow_write),
+                "content": build_system_message(
+                    s.knowledge_dir,
+                    automation=self.automation,
+                    allow_write=allow_write,
+                    browser=any(spec.tool.name.startswith("browser_") for spec in specs),
+                ),
             },
             "working_directory": str(s.knowledge_dir),
             "streaming": True,
@@ -205,6 +221,9 @@ class CopilotManager:
                 await _disconnect_quietly(session)
                 raise SessionStateError("Copilot の接続が切り替わったため、もう一度お試しください")
             active = ActiveSession(session=session, policy=policy, model=model, extra={"fingerprint": fingerprint})
+            for spec in specs:
+                if spec.release is not None and spec.release not in active.releasers:
+                    active.releasers.append(spec.release)
             self._sessions[session_id] = active
             return active
 
@@ -216,6 +235,7 @@ class CopilotManager:
         self._stale.discard(session_id)
         active = self._sessions.pop(session_id, None)
         if active is not None:
+            await active.release()
             await _disconnect_quietly(active.session)
 
     def mark_sessions_stale(self) -> None:

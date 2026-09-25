@@ -14,11 +14,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 
 from ..automation.locks import FileLock
+from ..netguard import outbound_rejection, url_rejection
 from ..security import SENSITIVE_LABELS, SecretMasker, detect_sensitive
 
 logger = logging.getLogger(__name__)
@@ -29,13 +29,6 @@ WRITE_TOOLS = ("create", "edit")
 COPILOT_WRITABLE_DIRS = ("memories", "notes", "plans")
 COPILOT_WRITABLE_FILES = ("INDEX.md",)
 WRITABLE_SUFFIXES = (".md", ".txt")
-# Hosts that carry API keys in the URL: only connectors may call them, never web_fetch.
-CONNECTOR_HOSTS = ("openapi.rakuten.co.jp", "app.rakuten.co.jp", "api.github.com")
-
-
-def host_matches(host: str, domains: list[str] | tuple[str, ...]) -> bool:
-    host = host.lower().rstrip(".")
-    return any(host == d or host.endswith("." + d) for d in domains)
 
 
 def knowledge_write_lock_path(settings: Any) -> Path:
@@ -51,7 +44,6 @@ WRITE_LOCK_WAIT_SECONDS = 15
 class ToolPolicy:
     knowledge_root: Path
     skills_root: Path
-    fetch_domains: list[str]
     masker: SecretMasker
     custom_tools: set[str] = field(default_factory=set)
     write_custom_tools: set[str] = field(default_factory=set)
@@ -90,15 +82,6 @@ class ToolPolicy:
             return rel.parts[0] in COPILOT_WRITABLE_FILES
         return rel.parts[0] in COPILOT_WRITABLE_DIRS and p.suffix.lower() in WRITABLE_SUFFIXES
 
-    def _url_allowed(self, url: str) -> bool:
-        parsed = urlparse(url)
-        host = parsed.hostname or ""
-        if parsed.scheme != "https" or not host:
-            return False
-        if host_matches(host, CONNECTOR_HOSTS):
-            return False
-        return host_matches(host, self.fetch_domains)
-
     def _deny(self, reason: str) -> PermissionDecisionReject:
         reason = self.masker.mask_text(reason)
         self.denials.append(reason)
@@ -131,9 +114,9 @@ class ToolPolicy:
                 self.on_write(self._display_path(path), request.diff or "")
             return PermissionDecisionApproveOnce()
         if kind == "url":
-            if self._url_allowed(request.url):
-                return PermissionDecisionApproveOnce()
-            return self._deny(f"このサイトは参照が許可されていません: {request.url}")
+            # DNS is checked in pre_tool_use: this handler is synchronous and must not block the event loop.
+            reason = url_rejection(str(request.url or ""), self.masker)
+            return self._deny(reason) if reason else PermissionDecisionApproveOnce()
         if kind == "custom-tool":
             name = request.tool_name
             if name not in self.custom_tools:
@@ -161,8 +144,8 @@ class ToolPolicy:
         if tool == "skill":
             return None
         if tool == "web_fetch":
-            url = str(args.get("url", ""))
-            return None if self._url_allowed(url) else self._hook_deny(f"このサイトは参照が許可されていません: {url}")
+            reason = await outbound_rejection(str(args.get("url", "")), self.masker)
+            return self._hook_deny(reason) if reason else None
         if tool in READ_TOOLS:
             return self._check_read_args(tool, args)
         if tool in WRITE_TOOLS:
