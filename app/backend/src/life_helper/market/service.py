@@ -146,6 +146,6 @@ async def refresh_stock_prices(ctx: AppContext) -> dict:
         "updated": updated,
         "errors": errors,
         "note": "株価は Stooq の前日終値（日本株・米国株）です。米国株は USD/JPY で円換算しています。"
-        "投資信託は Stooq の対象外です。"
-        "基準価額はチャットで運用会社のサイトから取得するか、手入力してください。",
+        "投資信託は Stooq の対象外のため、紐付け済みの基準価額は運用会社の公式 API・公式 CSV で別途更新します。"
+        "未紐付け・未対応のファンドは取得元を設定するか、公式サイトの基準価額を手入力してください。",
     }

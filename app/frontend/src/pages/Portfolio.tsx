@@ -30,9 +30,15 @@ const MARKET_LABELS: Record<string, string> = { jp: '日本株', us: '米国株'
 
 const amount = (value: number) => value.toLocaleString('ja-JP', { maximumFractionDigits: 2 })
 const label = (labels: Record<string, string>, key: string | null | undefined) => (key ? labels[key] ?? key : '')
-const localToday = () => {
-  const today = new Date()
-  return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
+const marketToday = () => {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    day: '2-digit',
+    month: '2-digit',
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+  }).formatToParts(new Date())
+  const value = (type: string) => parts.find((part) => part.type === type)?.value ?? ''
+  return `${value('year')}-${value('month')}-${value('day')}`
 }
 
 function PriceCell({ holding }: { holding: Holding }) {
@@ -133,7 +139,7 @@ export function PortfolioPage() {
           `${v.refresh?.errors.length ? `${v.refresh.errors.length} 件は株価を取得できませんでした（理由は下に表示しています）。` : ''}` +
           `${v.refresh_funds?.errors.length ? `${v.refresh_funds.errors.length} 件は基準価額を取得できませんでした（直前の基準価額を残しています）。` : ''}` +
           `${v.missing_prices.length ? `価格が未登録の ${v.missing_prices.length} 件は合計に含めていません。` : ''}` +
-          `${v.refresh?.note ?? ''}`,
+          [v.refresh?.note, v.refresh_funds?.note].filter(Boolean).join(' '),
       )
     } finally {
       setCalculating(false)
@@ -422,7 +428,10 @@ export function PortfolioPage() {
               searchFunds(new FormData(e.currentTarget).get('name') as string)
             }}
           >
-            <input name="name" defaultValue={fundTarget.name} required />
+            <label>
+              ファンド名
+              <input name="name" defaultValue={fundTarget.name} required />
+            </label>
             <button className="button" disabled={busy}>
               候補を探す
             </button>
@@ -488,23 +497,29 @@ export function PortfolioPage() {
               linkFund(fundTarget, String(data.get('provider')), String(data.get('fund_code')).trim())
             }}
           >
-            <select name="provider">
-              {view.fund_providers
-                .filter((p) => p.provider !== 'manual')
-                .map((p) => (
-                  <option key={p.provider} value={p.provider}>
-                    {p.manager}
-                  </option>
-                ))}
-            </select>
-            <input name="fund_code" placeholder="ファンドコード" required />
+            <label>
+              運用会社
+              <select name="provider">
+                {view.fund_providers
+                  .filter((p) => p.provider !== 'manual')
+                  .map((p) => (
+                    <option key={p.provider} value={p.provider}>
+                      {p.manager}
+                    </option>
+                  ))}
+              </select>
+            </label>
+            <label>
+              ファンドコード
+              <input name="fund_code" placeholder="ファンドコード" required />
+            </label>
             <button className="button small" disabled={busy}>
               コードを指定して紐付ける
             </button>
           </form>
           <p className="hint">
             運用会社によっては名前で検索できません。公式サイトのファンドページに書かれたコード（URL のファンドコード、投資信託協会コード、基準価額
-            CSV のリンクの番号）を指定してください。紐付け後に公式名称を表示します。
+            CSV のリンクの番号）を指定してください。提供元が公式名称を返す場合は紐付け後に表示します。返さない場合は公式ページで入力したコードを確認してください。
           </p>
           <form
             className="row wrap"
@@ -524,7 +539,7 @@ export function PortfolioPage() {
             </label>
             <label>
               基準日
-              <input name="price_date" type="date" defaultValue={fundTarget.price?.date ?? localToday()} required />
+              <input name="price_date" type="date" defaultValue={fundTarget.price?.date ?? marketToday()} required />
             </label>
             <button className="button small" disabled={busy}>
               自動取得を使わず手入力にする
