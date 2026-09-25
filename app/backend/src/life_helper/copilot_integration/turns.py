@@ -63,6 +63,8 @@ class Turn:
     conversation_id: str
     events: list[dict] = field(default_factory=list)
     done: bool = False
+    # Set as soon as the turn is being stopped (中断・タイムアウト), before the SDK abort is awaited.
+    aborting: bool = False
     finished_at: float | None = None
     changed: asyncio.Event = field(default_factory=asyncio.Event)
     active: ActiveSession | None = None
@@ -153,7 +155,7 @@ class TurnManager:
             on_write=lambda path, diff, approval_id: self._emit_threadsafe(
                 turn, {"type": "file_write", "path": path, "diff": diff[:4000], "approval_id": approval_id}
             ),
-            is_active=lambda: not turn.done,
+            is_active=lambda: not turn.done and not turn.aborting,
         )
         try:
             if conversation is None:
@@ -208,7 +210,7 @@ class TurnManager:
 
     async def _approve(self, turn: Turn, path: str, diff: str) -> Approval:
         """Shows an approval card for a knowledge-base write and waits for the user's decision."""
-        if turn.done:
+        if turn.done or turn.aborting:
             return Approval(False, APPROVAL_REASONS["cancelled"])
         if turn.approve_all:
             return Approval(True)
@@ -259,6 +261,8 @@ class TurnManager:
         return approval.status
 
     async def _abort_quietly(self, turn: Turn) -> None:
+        # First of all: an already approved write may be waiting for the write lock and must not save any more.
+        turn.aborting = True
         self._cancel_approvals(turn)
         if turn.active is not None:
             try:

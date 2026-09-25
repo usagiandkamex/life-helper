@@ -88,6 +88,10 @@ def test_writable_locations(policy, kb, tmp_path):
         assert not policy.writable(str(bad)), bad
     assert not policy.writable("memories/../profile/about-me.md")
     assert not policy.writable("") and not policy.writable("memories/a\x00.md")
+    # Control/formatting characters would forge the path and the diff headers shown on the approval card.
+    assert policy.writable("memories/家計.md")
+    for hidden in ("\n", "\r", "\t", "\x1b", "\x7f", "\x85", "\u2028", "\u2029", "\u202e", "\u200b"):
+        assert not policy.writable(f"notes/safe{hidden}+++ b-forged.md"), repr(hidden)
     policy.allow_write = False
     assert not policy.writable("memories/money.md")
 

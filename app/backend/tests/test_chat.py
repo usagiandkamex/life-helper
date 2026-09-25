@@ -421,6 +421,47 @@ def test_abort_rejects_pending_approvals(client, ctx):
     assert decide(client, h, turn_id, card["id"], "approve").status_code == 409
 
 
+class AbortAfterApprovalSession(FakeSession):
+    """Approves a write, then keeps it waiting (as the write lock would) until 中断 is pressed."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.manager: FakeManager | None = None
+        self.approval = None
+        self.active_after_abort: bool | None = None
+        self.aborted_gate = asyncio.Event()
+
+    async def abort(self):
+        self.aborted = True
+        self.aborted_gate.set()
+
+    async def send_and_wait(self, prompt: str, timeout: float = 60):
+        assert self.manager is not None
+        self.approval = await self.manager.approver("memories/a.md", "+++ b/memories/a.md\n+fact")
+        await self.aborted_gate.wait()
+        # save_knowledge_file checks the scope again just before writing the file.
+        self.active_after_abort = self.manager.scope.is_active()
+        self._fire(AssistantMessageData(content="完了", message_id="m1"))
+
+
+def test_abort_stops_an_already_approved_write(client, ctx):
+    session = AbortAfterApprovalSession()
+    csrf = sign_in(client, ctx)
+    h = {"x-csrf-token": csrf}
+    fake = install_fake(ctx, session)
+    session.manager = fake
+    conv = client.post("/api/conversations", json={}, headers=h).json()
+    turn_id = client.post(f"/api/conversations/{conv['id']}/turns", json={"prompt": "メモリにして"}, headers=h).json()[
+        "turn_id"
+    ]
+    card = wait_approvals(ctx, turn_id, 1)[0]
+    assert decide(client, h, turn_id, card["id"], "approve").json() == {"status": "approved"}
+    assert client.post(f"/api/turns/{turn_id}/abort", headers=h).json() == {"aborted": True}
+    wait_turn_done(ctx, turn_id)
+    assert session.approval.approved  # the write was approved, but must not be saved after 中断
+    assert session.active_after_abort is False
+
+
 def test_unanswered_approval_expires(client, ctx, monkeypatch):
     from life_helper.copilot_integration import turns
 

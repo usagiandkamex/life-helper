@@ -13,6 +13,7 @@ take the shared write lock and write the file themselves, so no path depends on 
 from __future__ import annotations
 
 import logging
+import unicodedata
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,6 +34,15 @@ COPILOT_WRITABLE_FILES = ("INDEX.md",)
 WRITABLE_SUFFIXES = (".md", ".txt")
 # Hosts that carry API keys in the URL: only connectors may call them, never web_fetch.
 CONNECTOR_HOSTS = ("openapi.rakuten.co.jp", "app.rakuten.co.jp", "api.github.com")
+
+
+def has_hidden_chars(raw: str) -> bool:
+    """Control, formatting (bidi overrides included) and line/paragraph separators.
+
+    The approval card shows the path and the unified diff, so such a character could inject extra lines into the
+    diff headers or hide part of the path: the user would approve a write to something else than what is shown.
+    """
+    return any(unicodedata.category(ch) in {"Cc", "Cf", "Zl", "Zp"} for ch in raw)
 
 
 def host_matches(host: str, domains: list[str] | tuple[str, ...]) -> bool:
@@ -106,7 +116,7 @@ class ToolPolicy:
         return p.is_relative_to(self.knowledge_root) or p.is_relative_to(self.skills_root)
 
     def writable(self, raw: str) -> bool:
-        if not self.allow_write or not raw or "\x00" in raw:
+        if not self.allow_write or not raw or has_hidden_chars(raw):
             return False
         p = self.resolve_path(raw)
         if not p.is_relative_to(self.knowledge_root):
