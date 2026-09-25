@@ -11,7 +11,7 @@ from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 
 from ..connectors.base import ConnectorError
-from ..connectors.fund_nav import MAX_CANDIDATES, FundNavConnector
+from ..connectors.fund_nav import MAX_CANDIDATES, FundNavConnector, nav_amount, nav_date
 from ..connectors.registry import get_connectors
 from .portfolio import DEFAULT_PRICE_UNIT, FundRef, Holding, Price
 from .service import portfolio_store
@@ -112,6 +112,12 @@ async def link_fund(
     if provider == MANUAL_PROVIDER:
         if (manual_nav is None) != (price_date is None):
             return {"error": "手入力する基準価額と基準日を両方指定してください"}
+        if manual_nav is not None:
+            try:
+                manual_nav = nav_amount(manual_nav)
+                nav_date(price_date, latest=date.today())
+            except ConnectorError as e:
+                return {"error": str(e)}
         fund = FundRef(provider=MANUAL_PROVIDER, price_unit=price_unit)
     else:
         if manual_nav is not None or price_date is not None:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -9,6 +9,7 @@ import pytest
 import respx
 from pydantic import SecretStr
 
+from life_helper.connectors.fund_nav import MAX_NAV
 from life_helper.connectors.registry import get_connectors
 from life_helper.market.broker_csv import BrokerCsvError, load_mapping, parse_broker_csv
 from life_helper.market.funds import fund_connectors, link_fund, refresh_fund_navs, suggest_funds
@@ -637,14 +638,43 @@ def test_manual_nav_links_source_price_unit_and_basis_date_together(client, ctx)
     assert (saved.price.value, saved.price.date, saved.price.source) == (2.5, NAV_DAY.isoformat(), "manual")
 
 
+def test_manual_nav_rejects_an_excessive_value_or_future_basis_date(client, ctx):
+    csrf = sign_in(client, ctx)
+    holding = Holding(account="ideco", kind="fund", name="手入力ファンド", quantity=1_200, cost_total=1_000)
+    with portfolio_store(ctx).transaction() as portfolio:
+        portfolio.holdings = [holding]
+    too_large = client.post(
+        "/api/portfolio/fund-link",
+        json={"id": holding.id, "provider": "manual", "nav": MAX_NAV + 1, "price_date": date.today().isoformat()},
+        headers={"x-csrf-token": csrf},
+    )
+    future = client.post(
+        "/api/portfolio/fund-link",
+        json={
+            "id": holding.id,
+            "provider": "manual",
+            "nav": 2.5,
+            "price_date": (date.today() + timedelta(days=1)).isoformat(),
+        },
+        headers={"x-csrf-token": csrf},
+    )
+    assert too_large.status_code == 422
+    assert future.status_code == 400
+    assert portfolio_store(ctx).load().holdings[0].price is None
+
+
 async def test_link_fund_rejects_incomplete_or_non_manual_nav_input(ctx):
     holding = Holding(account="ideco", kind="fund", name="手入力ファンド", quantity=1_200, cost_total=1_000)
     with portfolio_store(ctx).transaction() as portfolio:
         portfolio.holdings = [holding]
     incomplete = await link_fund(ctx, holding.id, "manual", manual_nav=2.5)
     non_manual = await link_fund(ctx, holding.id, "mufg_api", "0331418A", manual_nav=2.5, price_date=NAV_DAY)
+    too_large = await link_fund(ctx, holding.id, "manual", manual_nav=MAX_NAV + 1, price_date=NAV_DAY)
+    future = await link_fund(ctx, holding.id, "manual", manual_nav=2.5, price_date=date.today() + timedelta(days=1))
     assert "両方指定" in incomplete["error"]
     assert "手入力のときだけ" in non_manual["error"]
+    assert "基準価額" in too_large["error"]
+    assert "未来の日付" in future["error"]
 
 
 async def test_relinking_a_fund_drops_the_price_of_the_previous_one(ctx):

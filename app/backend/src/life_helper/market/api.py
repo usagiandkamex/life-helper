@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from pydantic import BaseModel, Field
 
 from ..auth import CurrentUser, require_user
+from ..connectors.fund_nav import MAX_NAV
 from ..context import AppContext, get_ctx
 from ..tools.portfolio_tools import UpdateHoldingParams, apply_holding_update
 from .broker_csv import BrokerCsvError, list_brokers, load_mapping, parse_broker_csv
@@ -25,7 +26,7 @@ class FundLinkParams(BaseModel):
     price_unit: float = Field(
         default=DEFAULT_PRICE_UNIT, gt=0, le=1_000_000, description="手入力のときの価格単位（通常は 1 万口）"
     )
-    nav: float | None = Field(default=None, gt=0, description="手入力する基準価額")
+    nav: float | None = Field(default=None, gt=0, le=MAX_NAV, description="手入力する基準価額")
     price_date: date | None = Field(default=None, description="手入力する基準価額の基準日")
 
 
