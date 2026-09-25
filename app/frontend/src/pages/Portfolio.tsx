@@ -66,7 +66,8 @@ function PriceCell({ holding }: { holding: Holding }) {
   return (
     <>
       <div>
-        {amount(price.value)} 円{fund && ` / ${amount(holding.price_unit)} 口`}
+        {`${amount(price.value)}\u00a0円`}
+        {fund && ` / ${amount(holding.price_unit)}\u00a0口`}
       </div>
       <small>{date}</small>
       {converted && (

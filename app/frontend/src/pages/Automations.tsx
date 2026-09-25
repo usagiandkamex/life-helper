@@ -47,7 +47,8 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   const [params, setParams] = useSearchParams()
   const [list, setList] = useState<AutomationList | null>(null)
   const [draft, setDraft] = useState<Draft | null>(null)
-  const [models, setModels] = useState<{ id: string; name: string }[]>([])
+  // null は「まだ読めていない」。読めたかどうかで、保存済みモデルが一覧にないときの書き方を変える。
+  const [models, setModels] = useState<{ id: string; name: string }[] | null>(null)
   const [runs, setRuns] = useState<RunRecord[]>([])
   const [run, setRun] = useState<RunRecord | null>(null)
   const [error, setError] = useState('')
@@ -94,7 +95,8 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   const save = async () => {
     if (!draft) return
     setError('')
-    const body = json(draft)
+    // 旧 UI では空のモデルも保存できたので、編集したら既定値に正規化しておく。
+    const body = json({ ...draft, model: draft.model || 'auto' })
     try {
       if (draft.id) await api(`/api/automations/${draft.id}`, { method: 'PUT', body })
       else await api('/api/automations', { method: 'POST', body })
@@ -250,7 +252,7 @@ function Editor({
   draft: Draft
   setDraft: (d: Draft) => void
   list: AutomationList
-  models: { id: string; name: string }[]
+  models: { id: string; name: string }[] | null
   onSave: () => void
   onCancel: () => void
 }) {
@@ -262,12 +264,13 @@ function Editor({
   // The saved model stays selectable even when the list is unavailable or no longer offers it, so opening the
   // editor never switches an automation to another model by itself. An empty model behaves like the default.
   const model = draft.model || 'auto'
+  const available = models ?? []
   const modelOptions = [
     { id: 'auto', name: '自動（おまかせ）' },
-    ...models.filter((m) => m.id !== 'auto'),
+    ...available.filter((m) => m.id !== 'auto'),
     // Only a loaded list can tell that a model is gone; an unreachable /api/models says nothing about it.
-    ...(model !== 'auto' && !models.some((m) => m.id === model)
-      ? [{ id: model, name: models.length ? `${model}（一覧にありません）` : model }]
+    ...(model !== 'auto' && !available.some((m) => m.id === model)
+      ? [{ id: model, name: models ? `${model}（一覧にありません）` : model }]
       : []),
   ]
   return (
