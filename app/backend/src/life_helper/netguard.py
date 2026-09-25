@@ -23,6 +23,8 @@ DNS_CACHE_SECONDS = 60
 _DNS_CACHE_MAX = 1024
 
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
+# IPv6 ranges that carry an IPv4 address in their low 32 bits (IPv4-compatible and the NAT64 well-known prefix).
+_EMBEDDED_IPV4 = (ipaddress.IPv6Network("::/96"), ipaddress.IPv6Network("64:ff9b::/96"))
 _dns_cache: dict[str, tuple[float, list[str], str | None]] = {}
 
 
@@ -32,8 +34,11 @@ def host_matches(host: str, domains: list[str] | tuple[str, ...]) -> bool:
 
 
 def is_internal_ip(ip: IPAddress) -> bool:
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
-        ip = ip.ipv4_mapped
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        elif any(ip in net for net in _EMBEDDED_IPV4) and is_internal_ip(ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)):
+            return True
     return not ip.is_global or ip.is_multicast
 
 

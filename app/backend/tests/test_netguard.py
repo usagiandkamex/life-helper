@@ -39,6 +39,7 @@ def test_literal_ip_ignores_host_names(host):
         "http://example.com/path?q=ふるさと納税",
         "https://www.nta.go.jp/",
         "https://93.184.215.14/",
+        "https://[64:ff9b::5db8:d70e]/",
         "https://EXAMPLE.com./",
     ],
 )
@@ -62,6 +63,8 @@ def test_public_http_and_https_are_allowed(url):
         "http://169.254.169.254/metadata/identity",
         "http://[::1]/",
         "http://[::ffff:127.0.0.1]/",
+        "http://[::7f00:1]/",
+        "http://[64:ff9b::a00:1]/",
         "http://[fd00::1]/",
         "http://[fe80::1]/",
         "http://224.0.0.1/",

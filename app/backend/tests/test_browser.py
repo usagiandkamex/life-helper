@@ -67,7 +67,7 @@ async def start_origin(requests: list[bytes]) -> tuple[asyncio.Server, int]:
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             requests.append(await reader.readuntil(b"\r\n\r\n"))
-            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello")
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: keep-alive\r\n\r\nhello")
             await writer.drain()
         finally:
             writer.close()
@@ -134,6 +134,8 @@ async def test_proxy_forwards_vetted_http_and_tunnels(egress, monkeypatch):
             ).encode(),
         )
         assert answer.startswith(b"HTTP/1.1 200") and answer.endswith(b"hello")
+        # The response must not invite Chromium to reuse this upstream for a request to another host.
+        assert b"keep-alive" not in answer and b"Proxy-Connection: close" in answer
         head = requests[-1].decode()
         assert head.startswith("GET /a?b=1 HTTP/1.1\r\n")
         assert "Host: public.example.com" in head and "Connection: close" in head

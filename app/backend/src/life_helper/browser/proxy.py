@@ -21,6 +21,7 @@ CONNECT_TIMEOUT_SECONDS = 15
 CHUNK = 64 * 1024
 HOP_BY_HOP = {b"connection", b"keep-alive", b"proxy-connection", b"proxy-authorization"}
 BLOCKED_BODY = "life-helper によりブロックされました: {reason}"
+REASON_PHRASES = {400: "Bad Request", 403: "Forbidden", 502: "Bad Gateway"}
 
 
 def _split_authority(authority: str) -> tuple[str, int]:
@@ -28,6 +29,11 @@ def _split_authority(authority: str) -> tuple[str, int]:
     if not parts.hostname or parts.port is None:
         raise ValueError("bad CONNECT target")
     return parts.hostname, parts.port
+
+
+def _without_hop_by_hop(head: bytes) -> list[bytes]:
+    lines = head.split(b"\r\n")
+    return [lines[0]] + [h for h in lines[1:] if h and h.split(b":", 1)[0].strip().lower() not in HOP_BY_HOP]
 
 
 async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -40,6 +46,21 @@ async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> N
     finally:
         with contextlib.suppress(Exception):
             writer.close()
+
+
+async def _relay_response(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    """Marks a plain-HTTP response as closing, so Chromium never reuses this upstream for a request to another host."""
+    try:
+        head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), HEAD_TIMEOUT_SECONDS)
+        lines = _without_hop_by_hop(head)
+        closing = b"Connection: close\r\nProxy-Connection: close\r\n\r\n"
+        writer.write(b"".join(line + b"\r\n" for line in lines) + closing)
+        await writer.drain()
+    except (OSError, TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError):
+        with contextlib.suppress(Exception):
+            writer.close()
+        return
+    await _pipe(reader, writer)
 
 
 class EgressProxy:
@@ -107,17 +128,20 @@ class EgressProxy:
         if tunnel:
             writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             await writer.drain()
-        else:
-            path = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
-            headers = [line for line in lines[1:] if line and line.split(b":", 1)[0].strip().lower() not in HOP_BY_HOP]
-            # One request per upstream connection: the next request may target another host and must be vetted.
-            request = f"{method} {path} {version}\r\n".encode("latin-1") + b"".join(h + b"\r\n" for h in headers)
-            up_writer.write(request + b"Connection: close\r\n\r\n")
-        await asyncio.gather(_pipe(reader, up_writer), _pipe(up_reader, writer))
+            await asyncio.gather(_pipe(reader, up_writer), _pipe(up_reader, writer))
+            return
+        path = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+        headers = _without_hop_by_hop(head)[1:]
+        # One request per upstream connection: the next request may target another host and must be vetted.
+        request = f"{method} {path} {version}\r\n".encode("latin-1") + b"".join(h + b"\r\n" for h in headers)
+        up_writer.write(request + b"Connection: close\r\n\r\n")
+        await asyncio.gather(_pipe(reader, up_writer), _relay_response(up_reader, writer))
 
     @staticmethod
     async def _connect(addresses: list[str], port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter] | None:
-        for address in addresses[:4]:
+        # IPv4 first: containers often have no IPv6 route, and each dead address costs a full connect timeout.
+        ordered = sorted(dict.fromkeys(addresses), key=lambda a: ":" in a)
+        for address in ordered[:4]:
             try:
                 return await asyncio.wait_for(asyncio.open_connection(address, port), CONNECT_TIMEOUT_SECONDS)
             except (OSError, TimeoutError):
@@ -127,7 +151,7 @@ class EgressProxy:
     @staticmethod
     async def _reply(writer: asyncio.StreamWriter, status: int, reason: str) -> None:
         body = BLOCKED_BODY.format(reason=reason).encode()
-        phrase = {400: "Bad Request", 403: "Forbidden", 502: "Bad Gateway"}[status]
+        phrase = REASON_PHRASES.get(status, "Error")
         writer.write(
             f"HTTP/1.1 {status} {phrase}\r\nContent-Type: text/plain; charset=utf-8\r\n"
             f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode()
