@@ -617,12 +617,28 @@ def test_a_value_no_longer_allowed_still_opens_the_screen(client, ctx):
     view = client.get("/api/portfolio")
     assert view.status_code == 200
     assert view.json()["holdings"][0]["value"] == 3 * 10**33
+    # The editor sends the totals it read as the expected ones, so they are only compared, never stored: a value
+    # above the limits has to be accepted there, or the holding could not be changed to one within them.
     repaired = client.post(
         "/api/portfolio/holdings",
-        json={"action": "update", "id": oversized.id, "quantity": 100, "cost_total": 200_000},
+        json={
+            "action": "update",
+            "id": oversized.id,
+            "quantity": 100,
+            "cost_total": 200_000,
+            "expected_quantity": 1e30,
+            "expected_cost_total": 1e30,
+        },
         headers={"x-csrf-token": csrf},
     )
     assert repaired.status_code == 200 and repaired.json()["total_value"] == 300_000
+    # A value no holding can have is still refused there: only the storage limits are lifted.
+    impossible = client.post(
+        "/api/portfolio/holdings",
+        json={"action": "update", "id": oversized.id, "quantity": 1, "expected_quantity": -1},
+        headers={"x-csrf-token": csrf},
+    )
+    assert impossible.status_code == 422
 
 
 def test_official_nav_replaces_a_broker_csv_nav_dated_with_the_import_day():

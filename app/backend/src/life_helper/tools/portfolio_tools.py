@@ -76,17 +76,17 @@ class UpdateHoldingParams(BaseModel):
         allow_inf_nan=False,
         description="取得金額の合計（円）。update で買い増しを反映するときは、購入金額を足した後の合計",
     )
+    # The expected values are only compared with what is stored, never saved, so the storage limits do not apply
+    # to them: a holding saved before those limits existed has to stay editable to a value within them.
     expected_quantity: float | None = Field(
         default=None,
         ge=0,
-        le=MAX_QUANTITY,
         allow_inf_nan=False,
         description="update の前提にした現在の数量（省略可）。ほかの更新で変わっていたら更新しない",
     )
     expected_cost_total: float | None = Field(
         default=None,
         ge=0,
-        le=MAX_YEN,
         allow_inf_nan=False,
         description="update の前提にした現在の取得金額の合計（省略可）。ほかの更新で変わっていたら更新しない",
     )
