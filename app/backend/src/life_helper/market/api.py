@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field
 
@@ -23,6 +25,8 @@ class FundLinkParams(BaseModel):
     price_unit: float = Field(
         default=DEFAULT_PRICE_UNIT, gt=0, le=1_000_000, description="手入力のときの価格単位（通常は 1 万口）"
     )
+    nav: float | None = Field(default=None, gt=0, description="手入力する基準価額")
+    price_date: date | None = Field(default=None, description="手入力する基準価額の基準日")
 
 
 def _view(ctx: AppContext) -> dict:
@@ -91,7 +95,7 @@ async def fund_candidates(
 async def set_fund_link(
     body: FundLinkParams, user: CurrentUser = Depends(require_user), ctx: AppContext = Depends(get_ctx)
 ) -> dict:
-    result = await link_fund(ctx, body.id, body.provider, body.fund_code, body.price_unit)
+    result = await link_fund(ctx, body.id, body.provider, body.fund_code, body.price_unit, body.nav, body.price_date)
     if "error" in result:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, result["error"])
     return _view(ctx) | {"link": result}

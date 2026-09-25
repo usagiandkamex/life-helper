@@ -91,7 +91,13 @@ def keep_fund_links(previous: list[Holding], imported: list[Holding]) -> None:
 
 
 async def link_fund(
-    ctx: AppContext, holding_id: str, provider: str, fund_code: str = "", price_unit: float = DEFAULT_PRICE_UNIT
+    ctx: AppContext,
+    holding_id: str,
+    provider: str,
+    fund_code: str = "",
+    price_unit: float = DEFAULT_PRICE_UNIT,
+    manual_nav: float | None = None,
+    price_date: date | None = None,
 ) -> dict:
     """Ties a holding to an official fund after the user picked it. ``manual`` keeps the hand-entered NAV."""
     holding = _holding(ctx, holding_id)
@@ -101,6 +107,8 @@ async def link_fund(
         return {"error": "基準価額の取得元は投資信託にだけ設定できます"}
     quote = None
     if provider == MANUAL_PROVIDER:
+        if manual_nav is not None and price_date is None:
+            return {"error": "手入力した基準価額の基準日を指定してください"}
         fund = FundRef(provider=MANUAL_PROVIDER, price_unit=price_unit)
     else:
         connector = fund_connectors(ctx).get(provider)
@@ -124,6 +132,8 @@ async def link_fund(
         target = next((h for h in portfolio.holdings if h.id == holding_id), None)
         if target is None or target.kind != "fund":
             return {"error": f"id {holding_id} の投資信託が見つかりません"}
+        if target.name != holding.name or target.fund != holding.fund:
+            return {"error": "保有銘柄が変更されました。内容を確認してもう一度紐付けてください"}
         # A price kept from another fund, or quoted for another number of units, would value this holding wrongly.
         relinked = target.fund is not None and (target.fund.provider, target.fund.fund_code) != (
             fund.provider,
@@ -136,6 +146,9 @@ async def link_fund(
                 target.price, target.valuation_yen = price, None
             else:
                 target.apply_price(price)
+        elif manual_nav is not None:
+            target.price = Price(value=manual_nav, date=price_date.isoformat(), source=MANUAL_PROVIDER)
+            target.valuation_yen = None
         elif unit_changed:
             target.price, target.valuation_yen = None, None
     official = quote["name"] if quote else None

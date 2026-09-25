@@ -168,22 +168,16 @@ export function PortfolioPage() {
   }
 
   // The manual fallback also has to set the NAV: switching the source alone would leave the old price in place.
-  const setManualNav = async (target: Holding, priceUnit: number, nav: number) => {
+  const setManualNav = async (target: Holding, priceUnit: number, nav: number, priceDate: string) => {
     if (!(nav > 0) || !(priceUnit > 0)) {
       setError('基準価額と価格単位には 0 より大きい数値を入力してください')
       return
     }
-    const ok = await run(
-      async () => {
-        await api<PortfolioView>('/api/portfolio/fund-link', {
-          method: 'POST',
-          body: json({ id: target.id, provider: 'manual', fund_code: '', price_unit: priceUnit }),
-        })
-        return api<PortfolioView>('/api/portfolio/holdings', {
-          method: 'POST',
-          body: json({ action: 'update', id: target.id, price: nav, price_source: 'manual' }),
-        })
-      },
+    const ok = await run(() =>
+      api<PortfolioView>('/api/portfolio/fund-link', {
+        method: 'POST',
+        body: json({ id: target.id, provider: 'manual', fund_code: '', price_unit: priceUnit, nav, price_date: priceDate }),
+      }),
       () => `${target.name} の基準価額を手入力しました（${amount(nav)} 円 / ${amount(priceUnit)} 口）`,
     )
     if (ok) {
@@ -407,7 +401,7 @@ export function PortfolioPage() {
       </section>
 
       {fundTarget && (
-        <section className="panel">
+        <section className="panel" key={fundTarget.id}>
           <h2>基準価額の取得元: {fundTarget.name}</h2>
           <p className="hint">
             {candidates?.note ?? '公式ファンドの候補を探しています…'}
@@ -513,7 +507,7 @@ export function PortfolioPage() {
             onSubmit={(e) => {
               e.preventDefault()
               const data = new FormData(e.currentTarget)
-              setManualNav(fundTarget, Number(data.get('price_unit')), Number(data.get('nav')))
+              setManualNav(fundTarget, Number(data.get('price_unit')), Number(data.get('nav')), String(data.get('price_date')))
             }}
           >
             <label>
@@ -523,6 +517,10 @@ export function PortfolioPage() {
             <label>
               価格単位（口）
               <input name="price_unit" type="number" min="1" step="1" defaultValue={fundTarget.price_unit} required />
+            </label>
+            <label>
+              基準日
+              <input name="price_date" type="date" defaultValue={fundTarget.price?.date ?? new Date().toISOString().slice(0, 10)} required />
             </label>
             <button className="button small" disabled={busy}>
               自動取得を使わず手入力にする

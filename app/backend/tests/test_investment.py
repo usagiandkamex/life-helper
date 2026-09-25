@@ -515,6 +515,28 @@ async def test_link_fund_by_code_shows_the_official_name_of_the_csv_manager(ctx)
     assert portfolio_store(ctx).load().holdings[0].fund.fund_code == "3346"
 
 
+async def test_link_fund_rejects_a_response_when_the_holding_changed_while_fetching(ctx, monkeypatch):
+    holding = Holding(account="tokutei", kind="fund", name="全世界株式", quantity=500_000, cost_total=1_000_000)
+    with portfolio_store(ctx).transaction() as portfolio:
+        portfolio.holdings = [holding]
+    _funds_ready(ctx)
+    connector = fund_connectors(ctx)["mufg_api"]
+    original_fund_nav = connector.fund_nav
+
+    async def changed_while_fetching(*args, **kwargs):
+        with portfolio_store(ctx).transaction() as portfolio:
+            portfolio.holdings[0].name = "変更後のファンド"
+        return await original_fund_nav(*args, **kwargs)
+
+    monkeypatch.setattr(connector, "fund_nav", changed_while_fetching)
+    with respx.mock:
+        mock_mufg({"0331418A": (25_341, NAV_DAY.strftime("%Y%m%d"))})
+        result = await link_fund(ctx, holding.id, "mufg_api", "0331418A")
+    assert "変更されました" in result["error"]
+    changed = portfolio_store(ctx).load().holdings[0]
+    assert changed.name == "変更後のファンド" and changed.fund is None and changed.price is None
+
+
 async def test_funds_without_a_source_are_left_to_manual_entry(ctx):
     manual = Holding(account="ideco", kind="fund", name="自動取得未対応ファンド", quantity=1_000, cost_total=10_000)
     manual.apply_price(Price(value=15_000, date="2026-09-01", source="manual"))
@@ -591,6 +613,28 @@ def test_refresh_prices_updates_stocks_and_funds_independently(client, ctx, sett
     # 100 x 3,000 + 500,000 / 10,000 x 25,341 + 300,000 / 10,000 x 30,000
     assert view["total_value"] == 300_000 + 1_267_050 + 900_000
     assert view["missing_prices"] == [] and view["stale_prices"] == []
+
+
+def test_manual_nav_links_source_price_unit_and_basis_date_together(client, ctx):
+    csrf = sign_in(client, ctx)
+    holding = Holding(account="ideco", kind="fund", name="手入力ファンド", quantity=1_200, cost_total=1_000)
+    with portfolio_store(ctx).transaction() as portfolio:
+        portfolio.holdings = [holding]
+    response = client.post(
+        "/api/portfolio/fund-link",
+        json={
+            "id": holding.id,
+            "provider": "manual",
+            "price_unit": 1,
+            "nav": 2.5,
+            "price_date": NAV_DAY.isoformat(),
+        },
+        headers={"x-csrf-token": csrf},
+    )
+    assert response.status_code == 200
+    saved = portfolio_store(ctx).load().holdings[0]
+    assert saved.fund.provider == "manual" and saved.fund.price_unit == 1
+    assert (saved.price.value, saved.price.date, saved.price.source) == (2.5, NAV_DAY.isoformat(), "manual")
 
 
 async def test_relinking_a_fund_drops_the_price_of_the_previous_one(ctx):
