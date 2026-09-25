@@ -53,10 +53,20 @@
 |---|---|
 | 指示 | 12/30〜12/31、大人 2 名で施設番号 ○○ の空室を search_rakuten_vacancy で確認して |
 | 周期 | 毎日 9:00 |
-| コネクタ | 楽天トラベル空室検索 |
+| コネクタ | 楽天ウェブサービス |
 | 通知 | GitHub で通知する / ツールの結果の値で判定 `vacancy_count > 0` / 前回は満たさず今回満たしたときだけ |
 
-空室は確認時点のもので、予約は自分で行います。
+空室は確認時点のもので、予約は自分で行います。施設番号がわからないときは、チャットで「○○ホテルの楽天トラベルの施設番号を調べて」と聞くと
+`search_rakuten_hotels` で調べます。
+
+例: 楽天市場の価格チェック
+
+| 項目 | 設定 |
+|---|---|
+| 指示 | 楽天市場で「○○ 詰め替え 2L」を安い順（sort=price_asc）に search_rakuten_items で検索して |
+| 周期 | 毎日 9:00 |
+| コネクタ | 楽天ウェブサービス |
+| 通知 | GitHub で通知する / ツールの結果の値で判定 `min_price <= 1500` / 前回は満たさず今回満たしたときだけ |
 
 ### チャットでの表示
 
@@ -70,6 +80,28 @@
 - チャットに出るのは、この表示に対応したバージョン以降に記録された実行だけです。それより前の実行はオートメーション画面の実行履歴で確認します。
 - 1 回の実行で記録する途中経過（ツールの呼び出しなど）は最新の 200 件までです。省略した場合はその件数を表示します。
 - ブラウザのスクリーンショットは 3 日で削除されるため、それより古い実行では画像が表示されません。
+
+## 楽天ウェブサービス
+
+コネクタ「楽天ウェブサービス」を選ぶと、次のツールがすべて使えます（キーは 1 組で共通。登録は [setup.md](setup.md#楽天ウェブサービスのアプリを登録する)）。
+結果は 1 回 10 件までで、価格・空き状況は確認時点のものです。購入・予約は楽天の各ページで自分で行います。
+
+| API | ツール | 通知の判定に使える値 |
+|---|---|---|
+| 楽天市場 | `search_rakuten_items`（商品検索） | `item_count`（該当件数）、`min_price`（そのページ内の最安値） |
+| 楽天トラベル | `search_rakuten_vacancy`（施設番号・日程・人数で空室検索）、`search_rakuten_hotels`（キーワードで施設番号を調べる） | `vacancy_count`（空室のあるプラン数） |
+| 楽天ブックス | `search_rakuten_books`（キーワード・ISBN / JAN） | `book_count`、`book_min_price` |
+| 楽天Kobo | `search_rakuten_kobo`（キーワード・タイトル・著者名） | `ebook_count`、`ebook_min_price` |
+| 楽天GORA | `search_rakuten_golf_courses`（ゴルフ場を調べる）、`search_rakuten_golf_plans`（プレー日の空き） | `plan_count`（空き・在庫のあるプラン数） |
+| 楽天レシピ | `get_rakuten_recipe_ranking`（カテゴリ名か ID でランキング） | — |
+
+- 楽天の利用上限（アプリ ID ごとに 1 秒 1 回程度）を守るため、6 つの API の呼び出しは Web アプリとジョブをまたいで 1.5 秒間隔にそろえます
+  （`/data/app/rakuten-throttle.json` と `/data/app/locks/rakuten-throttle.lock`）。
+- 楽天が API のバージョンを上げたときは、`connectors/rakuten.py` の `DEFAULT_ENDPOINTS` を更新する PR を作ります（マージで本番に反映）。
+  手元で新しいバージョンを試すときは、環境変数 `LH_RAKUTEN_ENDPOINTS` で上書きできます。値は `DEFAULT_ENDPOINTS` と同じ名前をキーにした JSON
+  （例: `{"ichiba_item_search": "https://openapi.rakuten.co.jp/ichibams/api/IchibaItem/Search/<版>"}`）で、接続先は `https://openapi.rakuten.co.jp` だけです。
+  名前や接続先が違うとアプリは起動しません。この環境変数は Azure の設定（Bicep）には渡していないため、本番では使いません。
+- 以前のコネクタ名 `rakuten_travel`（楽天トラベル空室検索）を選んでいたオートメーションは、自動で「楽天ウェブサービス」に読み替えます。
 
 ## Web の参照とブラウザ
 

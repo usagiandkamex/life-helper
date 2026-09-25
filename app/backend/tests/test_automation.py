@@ -10,6 +10,7 @@ from unittest.mock import patch
 import httpx
 import pytest
 import respx
+import yaml
 from copilot import ToolInvocation
 from copilot.session_events import AssistantMessageData, AssistantUsageData
 from cryptography.hazmat.primitives import serialization
@@ -327,9 +328,9 @@ async def test_monthly_limit_and_lock_and_missing_connector(auto_env, settings):
     lock.release()
 
     settings.automation_monthly_run_limit = 100
-    b = ctx.automations.upsert(Automation(name="楽天", prompt="y", connectors=["rakuten_travel"]))
+    b = ctx.automations.upsert(Automation(name="楽天", prompt="y", connectors=["rakuten"]))
     record = await runner.run(b.id)
-    assert record["status"] == "error" and "rakuten_travel" in record["summary"]
+    assert record["status"] == "error" and "rakuten" in record["summary"]
 
 
 async def test_run_due_only_runs_due_automations(auto_env):
@@ -388,6 +389,30 @@ def test_automations_saved_with_stooq_keep_the_stock_tools(client, ctx):
     }
     created = client.post("/api/automations", json=body, headers={"x-csrf-token": csrf})
     assert created.status_code == 200 and created.json()["connectors"] == ["yahoo_finance"]
+
+
+def test_automations_saved_with_rakuten_travel_keep_the_rakuten_tools(client, ctx, settings):
+    """The Rakuten Travel connector became the Rakuten Web Service connector; saved automations follow the rename."""
+    saved = Automation.model_validate({"name": "空室", "prompt": "確認", "connectors": ["rakuten_travel", "rakuten"]})
+    assert saved.connectors == ["rakuten"]
+    legacy = Automation(name="空室", prompt="確認").model_dump(mode="json") | {"connectors": ["rakuten_travel"]}
+    ctx.automations.path.parent.mkdir(parents=True, exist_ok=True)
+    ctx.automations.path.write_text(yaml.safe_dump([legacy], allow_unicode=True), encoding="utf-8")
+    assert ctx.automations.get(legacy["id"]).connectors == ["rakuten"]
+    settings.rakuten_application_id = SecretStr("app-id-123456")
+    settings.rakuten_access_key = SecretStr("access-key-123456")
+    ctx.extras.pop("connectors", None)
+    csrf = sign_in(client, ctx)
+    body = {
+        "name": "空室",
+        "prompt": "空室を確認",
+        "schedule": {"kind": "daily", "time": "09:00"},
+        "connectors": ["rakuten_travel"],
+    }
+    created = client.post("/api/automations", json=body, headers={"x-csrf-token": csrf})
+    assert created.status_code == 200 and created.json()["connectors"] == ["rakuten"]
+    options = client.get("/api/automations").json()["connectors"]
+    assert [c["name"] for c in options if c["name"].startswith("rakuten")] == ["rakuten_csv", "rakuten"]
 
 
 # -- regression tests for the second review round -----------------------------------------------------------

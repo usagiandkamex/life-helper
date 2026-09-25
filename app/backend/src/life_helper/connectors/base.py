@@ -110,6 +110,7 @@ class Connector:
             try:
                 async with httpx.AsyncClient(timeout=20, transport=self._transport, follow_redirects=False) as client:
                     request = client.build_request(method, url, params=params, json=body, headers=headers)
+                    await self._before_send()
                     if max_bytes is None:
                         response = await client.send(request)
                     else:
@@ -122,6 +123,9 @@ class Connector:
                 self._last_call = time.monotonic()
         self._record_use()
         return response
+
+    async def _before_send(self) -> None:
+        """Runs right before each request is sent, after the per-instance interval (e.g. a cross-process limit)."""
 
     async def _capped(self, client: httpx.AsyncClient, request: httpx.Request, max_bytes: int) -> httpx.Response:
         """Reads at most ``max_bytes`` of the body, so an oversized (or compressed) answer never fills memory."""
