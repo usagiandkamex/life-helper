@@ -297,6 +297,37 @@ async def test_follow_up_failure_keeps_the_finished_run_successful(auto_env):
     assert record["summary"] == "空室を確認しました"
 
 
+@pytest.mark.parametrize("failure", [TimeoutError(), RuntimeError("follow-up failed")])
+async def test_failed_follow_up_messages_do_not_replace_the_finished_answer(auto_env, monkeypatch, failure):
+    ctx, runner, manager = auto_env
+    manager.report_on_call = 2
+    manager.fail, manager.fail_on_call = failure, 2
+    send_and_wait = FakeAutoSession.send_and_wait
+
+    async def send_with_follow_up_message(session, prompt, timeout=60):
+        if manager.prompts:
+            for handler in list(session.handlers):
+                handler(SimpleNamespace(data=AssistantUsageData(model="gpt-5-mini")))
+                handler(SimpleNamespace(data=AssistantMessageData(content="報告を試みます", message_id="follow-up")))
+        return await send_and_wait(session, prompt, timeout)
+
+    async def abort_with_message(session):
+        for handler in list(session.handlers):
+            handler(SimpleNamespace(data=AssistantMessageData(content="中断しました", message_id="abort")))
+
+    monkeypatch.setattr(FakeAutoSession, "send_and_wait", send_with_follow_up_message)
+    monkeypatch.setattr(FakeAutoSession, "abort", abort_with_message)
+    a = ctx.automations.upsert(Automation(name="x", prompt="y"))
+    record = await runner.run(a.id)
+
+    assert record["status"] == "success" and record["error"] is None and record["report"] is None
+    assert record["summary"] == record["final_message"] == "空室を確認しました"
+    assert [event["type"] for event in record["events"]] == ["message", "follow_up"]
+    assert record["events"][0]["content"] == "空室を確認しました"
+    assert record["requests"] == 2 and record["attempts"] == 1
+    assert len(manager.prompts) == 2
+
+
 @respx.mock
 async def test_failure_retries_once_and_notifies_when_enabled(auto_env, monkeypatch):
     ctx, runner, manager = auto_env

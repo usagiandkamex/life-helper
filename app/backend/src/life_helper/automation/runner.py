@@ -327,11 +327,13 @@ class AutomationRunner:
                 # so ask once more within the same session. The work itself is already done, so this extra
                 # request is best effort: failing it must not turn a finished run into a failed one.
                 run_ctx.events.append({"type": "follow_up"})
+                follow_up_start = len(run_ctx.events)
                 try:
                     await asyncio.wait_for(active.session.send_and_wait(REPORT_FOLLOW_UP, timeout=remaining), remaining)
                 except Exception:  # noqa: BLE001
                     logger.warning("automation %s did not report after the follow-up request", automation.id)
                     await self._abort(active.session)
+                    del run_ctx.events[follow_up_start:]
         except TimeoutError:
             await self._abort(active.session)
             raise
