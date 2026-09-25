@@ -274,6 +274,8 @@ def summarize(portfolio: Portfolio, *, today: date | None = None) -> dict:
                 "name": h.name,
                 "quantity": h.quantity,
                 "cost_total": cost,
+                # Unrounded, so that an edit based on it keeps the fraction of yen a CSV import may have left.
+                "cost_total_exact": h.cost_total,
                 "value": value,
                 "gain": (value - cost) if value is not None else None,
                 "price": h.price.model_dump() if h.price else None,

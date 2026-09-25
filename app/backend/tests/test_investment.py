@@ -1215,3 +1215,155 @@ def test_changing_the_kind_of_a_holding_keeps_a_price_given_in_the_same_update(c
     apply_holding_update(ctx, retyped)
     stored = portfolio_store(ctx).load().holdings[0]
     assert (stored.fund, stored.price.value, stored.market_value()) == (None, 3_000, Decimal("300000"))
+
+
+def _csv_stock() -> Holding:
+    # Broker CSVs quote US stocks in USD but value them in yen, and both end up on the holding as they are.
+    return Holding(
+        account="tokutei",
+        kind="stock",
+        code="MSFT",
+        name="Microsoft",
+        quantity=10,
+        cost_total=500_000.25,
+        price=Price(value=400, date="2026-09-24", source="broker_csv"),
+        valuation_yen=600_000,
+    )
+
+
+def _store(ctx, *holdings: Holding) -> None:
+    with portfolio_store(ctx).transaction() as portfolio:
+        portfolio.holdings = list(holdings)
+
+
+def test_buying_more_of_a_csv_holding_scales_its_csv_valuation(ctx):
+    holding = _csv_stock()
+    _store(ctx, holding)
+    bought = UpdateHoldingParams(action="update", id=holding.id, quantity=15, cost_total=800_000.25)
+    assert apply_holding_update(ctx, bought) == {"ok": True, "id": holding.id}
+    stored = portfolio_store(ctx).load().holdings[0]
+    # 15 × 400 would value the USD price as yen; the CSV's own yen valuation per share is kept instead.
+    assert (stored.quantity, stored.cost_total, stored.valuation_yen) == (15, 800_000.25, 900_000)
+    assert stored.price.value == 400 and stored.market_value() == Decimal("900000")
+    view = summarize(portfolio_store(ctx).load())["holdings"][0]
+    assert (view["value"], view["cost_total"], view["cost_total_exact"], view["gain"]) == (
+        900_000,
+        800_000,
+        800_000.25,
+        100_000,
+    )
+
+
+def test_changing_only_the_cost_keeps_the_valuation(ctx):
+    holding = _csv_stock()
+    _store(ctx, holding)
+    apply_holding_update(ctx, UpdateHoldingParams(action="update", id=holding.id, cost_total=700_000))
+    stored = portfolio_store(ctx).load().holdings[0]
+    assert (stored.quantity, stored.valuation_yen, stored.price.value) == (10, 600_000, 400)
+    assert summarize(portfolio_store(ctx).load())["holdings"][0]["gain"] == -100_000
+
+
+def test_a_holding_priced_by_the_app_is_revalued_from_its_price(ctx):
+    holding = _fund(500_000, price=Price(value=20_000, date="2026-09-24", source="toushin_lib"))
+    _store(ctx, holding)
+    apply_holding_update(ctx, UpdateHoldingParams(action="update", id=holding.id, quantity=600_000))
+    assert portfolio_store(ctx).load().holdings[0].market_value() == Decimal("1200000")
+
+
+def test_buying_again_after_reaching_zero_does_not_value_the_csv_price_as_yen(ctx):
+    holding = _csv_stock()
+    _store(ctx, holding)
+    apply_holding_update(ctx, UpdateHoldingParams(action="update", id=holding.id, quantity=0))
+    assert portfolio_store(ctx).load().holdings[0].market_value() == Decimal("0")
+    # Nothing is left to scale, and the CSV price may be in USD, so the value stays unknown until a price is fetched.
+    apply_holding_update(ctx, UpdateHoldingParams(action="update", id=holding.id, quantity=5))
+    stored = portfolio_store(ctx).load().holdings[0]
+    assert (stored.quantity, stored.price, stored.valuation_yen, stored.market_value()) == (5, None, None, None)
+    assert summarize(portfolio_store(ctx).load())["missing_prices"] == ["Microsoft"]
+
+
+def test_an_update_based_on_totals_that_changed_meanwhile_is_rejected(ctx):
+    holding = _csv_stock()
+    _store(ctx, holding)
+    bought = UpdateHoldingParams(
+        action="update",
+        id=holding.id,
+        quantity=15,
+        cost_total=800_000.25,
+        expected_quantity=10,
+        expected_cost_total=500_000.25,
+    )
+    assert apply_holding_update(ctx, bought) == {"ok": True, "id": holding.id}
+    # Sending the same update again (a double click or a retry) neither fails nor adds the purchase twice.
+    assert apply_holding_update(ctx, bought) == {"ok": True, "id": holding.id}
+    stored = portfolio_store(ctx).load().holdings[0]
+    assert (stored.quantity, stored.cost_total, stored.valuation_yen) == (15, 800_000.25, 900_000)
+    # Another purchase computed from the totals before the first one would silently undo it.
+    stale = bought.model_copy(update={"quantity": 12, "cost_total": 620_000.25})
+    updated_at = portfolio_store(ctx).load().updated_at
+    assert apply_holding_update(ctx, stale)["conflict"] is True
+    # A refused update is not saved at all.
+    stored = portfolio_store(ctx).load()
+    assert (stored.holdings[0].quantity, stored.updated_at) == (15, updated_at)
+
+
+def test_an_update_that_would_overflow_the_valuation_is_rejected(ctx):
+    holding = _csv_stock()
+    holding.quantity, holding.valuation_yen = 1, 1_000_000_000_000
+    _store(ctx, holding)
+    huge = UpdateHoldingParams(action="update", id=holding.id, quantity=1_000_000_000_000)
+    updated_at = portfolio_store(ctx).load().updated_at
+    assert "error" in apply_holding_update(ctx, huge)
+    stored = portfolio_store(ctx).load()
+    assert (stored.holdings[0].quantity, stored.holdings[0].valuation_yen, stored.updated_at) == (
+        1,
+        1_000_000_000_000,
+        updated_at,
+    )
+    # The valuation of another instrument is dropped, not scaled, so it cannot overflow.
+    renamed = huge.model_copy(update={"name": "Apple", "code": "AAPL"})
+    assert apply_holding_update(ctx, renamed) == {"ok": True, "id": holding.id}
+    stored = portfolio_store(ctx).load().holdings[0]
+    assert (stored.quantity, stored.price, stored.valuation_yen) == (1_000_000_000_000, None, None)
+    for bad in ({"quantity": float("inf")}, {"quantity": 10**13}, {"cost_total": 10**16}, {"price": float("nan")}):
+        with pytest.raises(ValueError):
+            UpdateHoldingParams(action="update", id=holding.id, **bad)
+
+
+def test_portfolio_api_updates_quantity_and_cost_of_an_imported_holding(client, ctx):
+    headers = {"x-csrf-token": sign_in(client, ctx)}
+    client.post(
+        "/api/portfolio/import",
+        data={"broker": "rakuten"},
+        files={"file": ("a.csv", RAKUTEN_CSV.encode("utf-8-sig"))},
+        headers=headers,
+    )
+    fund = next(h for h in client.get("/api/portfolio").json()["holdings"] if h["kind"] == "fund")
+    assert (fund["quantity"], fund["cost_total_exact"], fund["value"]) == (100_000, 150_000, 180_000)
+    bought = {
+        "action": "update",
+        "id": fund["id"],
+        "quantity": fund["quantity"] + 20_000,
+        "cost_total": fund["cost_total_exact"] + 30_000,
+        "expected_quantity": fund["quantity"],
+        "expected_cost_total": fund["cost_total_exact"],
+    }
+    view = client.post("/api/portfolio/holdings", json=bought, headers=headers)
+    assert view.status_code == 200
+    updated = next(h for h in view.json()["holdings"] if h["id"] == fund["id"])
+    assert (updated["quantity"], updated["cost_total"], updated["value"], updated["gain"]) == (
+        120_000,
+        180_000,
+        216_000,
+        36_000,
+    )
+    stale = bought | {"quantity": 110_000, "cost_total": 165_000}
+    conflict = client.post("/api/portfolio/holdings", json=stale, headers=headers)
+    assert conflict.status_code == 409 and "最新の値" in conflict.json()["detail"]
+    too_many = client.post(
+        "/api/portfolio/holdings", json={"action": "update", "id": fund["id"], "quantity": 10**13}, headers=headers
+    )
+    assert too_many.status_code == 422
+    assert (
+        next(h for h in client.get("/api/portfolio").json()["holdings"] if h["id"] == fund["id"])["quantity"] == 120_000
+    )

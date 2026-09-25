@@ -50,7 +50,8 @@ def change_holding(
 ) -> dict:
     result = apply_holding_update(ctx, body)
     if "error" in result:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, result["error"])
+        code = status.HTTP_409_CONFLICT if result.get("conflict") else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(code, result["error"])
     return _view(ctx)
 
 

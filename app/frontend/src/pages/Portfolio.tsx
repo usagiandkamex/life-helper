@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { api, formatDate, json, yen } from '../api'
 import { LazyChart } from '../components/LazyChart'
 import { Disclaimer } from '../components/Markdown'
+import { afterPurchase, averageCost, parseNumber, totalsProblem, type Totals } from '../holdings'
 import type { ChartData, FundAutoLink, FundCandidates, Holding, PortfolioView } from '../types'
 
 const ACCOUNTS = [
@@ -165,6 +166,137 @@ function AutoLinkReport({
   )
 }
 
+function averageText(holding: Holding, totals: Totals) {
+  const average = averageCost(totals.cost, totals.quantity, holding.price_unit)
+  if (average === null) return '—'
+  return holding.kind === 'fund' ? `${amount(average)} 円 / ${amount(holding.price_unit)} 口` : `${amount(average)} 円`
+}
+
+function HoldingEditor({
+  holding,
+  busy,
+  error,
+  onSave,
+  onClose,
+}: {
+  holding: Holding
+  busy: boolean
+  error: string
+  onSave: (totals: Totals) => void
+  onClose: () => void
+}) {
+  // The exact cost, not the rounded yen in the table, so an edit never drops the fraction a CSV import left.
+  const current = { quantity: holding.quantity, cost: holding.cost_total_exact }
+  const [mode, setMode] = useState<'buy' | 'total'>('buy')
+  const [buyQuantity, setBuyQuantity] = useState('')
+  const [buyCost, setBuyCost] = useState('')
+  const [totalQuantity, setTotalQuantity] = useState(String(holding.quantity))
+  const [totalCost, setTotalCost] = useState(String(holding.cost_total))
+  const [costEdited, setCostEdited] = useState(false)
+
+  let result: Totals | string | null
+  if (mode === 'buy') {
+    result = buyQuantity === '' || buyCost === '' ? null : afterPurchase(current, parseNumber(buyQuantity), parseNumber(buyCost))
+  } else {
+    // The field shows the cost rounded to yen; until it is edited, the exact cost is kept.
+    const cost = costEdited ? parseNumber(totalCost) : current.cost
+    const next = { quantity: parseNumber(totalQuantity), cost }
+    result = totalsProblem(next) ?? next
+  }
+  const next = typeof result === 'object' ? result : null
+  const changed = next !== null && (next.quantity !== current.quantity || next.cost !== current.cost)
+  const modeButton = (value: typeof mode, text: string) => (
+    <button
+      type="button"
+      className={`button small${mode === value ? ' primary' : ''}`}
+      aria-pressed={mode === value}
+      onClick={() => setMode(value)}
+    >
+      {text}
+    </button>
+  )
+
+  return (
+    <section className="panel" id="holding-editor">
+      <h2>数量・取得額の編集: {holding.name}</h2>
+      <p className="hint">
+        {holding.account_label}・現在の数量 {amount(current.quantity)}・取得額 {yen(current.cost)}・平均取得単価{' '}
+        {averageText(holding, current)}
+      </p>
+      <div className="row wrap">
+        {modeButton('buy', '買い増し分を加算')}
+        {modeButton('total', '合計値を直接編集')}
+      </div>
+      <form
+        className="grid-form"
+        onSubmit={(e) => {
+          e.preventDefault()
+          if (next && changed) onSave(next)
+        }}
+      >
+        {mode === 'buy' ? (
+          <>
+            <label>
+              購入数量（株・口）
+              <input type="number" step="any" min="0" value={buyQuantity} onChange={(e) => setBuyQuantity(e.target.value)} required />
+            </label>
+            <label>
+              購入金額（円）
+              <input type="number" step="any" min="0" value={buyCost} onChange={(e) => setBuyCost(e.target.value)} required />
+            </label>
+          </>
+        ) : (
+          <>
+            <label>
+              数量の合計（株・口）
+              <input type="number" step="any" min="0" value={totalQuantity} onChange={(e) => setTotalQuantity(e.target.value)} required />
+            </label>
+            <label>
+              取得額の合計（円）
+              <input
+                type="number"
+                step="any"
+                min="0"
+                value={totalCost}
+                onChange={(e) => {
+                  setTotalCost(e.target.value)
+                  setCostEdited(true)
+                }}
+                required
+              />
+            </label>
+          </>
+        )}
+        <button className="button primary" disabled={busy || !changed}>
+          保存
+        </button>
+        <button type="button" className="button" onClick={onClose}>
+          閉じる
+        </button>
+      </form>
+      {typeof result === 'string' && <p className="error-text">{result}</p>}
+      {next && changed && (
+        <p>
+          保存後: 数量 {amount(current.quantity)} → {amount(next.quantity)}・取得額 {yen(current.cost)} → {yen(next.cost)}・平均取得単価{' '}
+          {averageText(holding, next)}
+        </p>
+      )}
+      {error && <p className="error-text">{error}</p>}
+      <p className="hint">
+        {mode === 'buy'
+          ? '今回約定した数量と購入金額（手数料を含む受渡金額）を入力すると、今の合計に足して保存します。積立は約定ごとでも、月ごとにまとめてでも入力できます。'
+          : '証券会社の画面に表示されている保有数量と取得金額（簿価）の合計を入力します。'}
+        保存後の合計が証券会社の画面と合っているか確認してください。証券会社 CSV を取り込むと保有銘柄は CSV の内容に置き換わり、ここで編集した値も CSV の値になります。
+      </p>
+      {holding.price?.source === 'broker_csv' && (
+        <p className="hint">
+          CSV から取り込んだ評価額は、株価・基準価額を更新するまで、CSV の評価額を数量に合わせて按分した目安になります。「評価額を計算」で最新の価格に更新してください。
+        </p>
+      )}
+    </section>
+  )
+}
+
 export function PortfolioPage() {
   const [view, setView] = useState<PortfolioView | null>(null)
   const [message, setMessage] = useState('')
@@ -175,6 +307,8 @@ export function PortfolioPage() {
   const [fundTarget, setFundTarget] = useState<Holding | null>(null)
   const [candidates, setCandidates] = useState<FundCandidates | null>(null)
   const [searching, setSearching] = useState(false)
+  // Only the id is kept: the editor reads the holding from the latest view, and closes once a CSV import replaces it.
+  const [editId, setEditId] = useState<string | null>(null)
   const [chart, setChart] = useState<ChartData | null>(null)
   const [simResult, setSimResult] = useState<{ principal: number; expected_value: number; percentiles: Record<string, number>; after_tax: Record<string, number> } | null>(null)
 
@@ -186,6 +320,9 @@ export function PortfolioPage() {
   useEffect(() => {
     if (fundTarget) document.getElementById('fund-picker')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }, [fundTarget])
+  useEffect(() => {
+    if (editId) document.getElementById('holding-editor')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [editId])
 
   const run = async (fn: () => Promise<PortfolioView | void>, done?: (v: PortfolioView) => string) => {
     setBusy(true)
@@ -241,8 +378,39 @@ export function PortfolioPage() {
   }
 
   const openFundPicker = (h: Holding) => {
+    setEditId(null)
     setFundTarget(h)
     searchFunds(h.name)
+  }
+
+  const openEditor = (h: Holding) => {
+    setFundTarget(null)
+    setCandidates(null)
+    setError('')
+    setEditId(h.id)
+  }
+
+  // Totals, not the purchase, are sent, so a double click or a retry cannot add the purchase twice. The totals it
+  // was computed from go along, and the server refuses the update if another one changed them in the meantime.
+  const saveHolding = async (target: Holding, totals: Totals) => {
+    const ok = await run(
+      () =>
+        api<PortfolioView>('/api/portfolio/holdings', {
+          method: 'POST',
+          body: json({
+            action: 'update',
+            id: target.id,
+            quantity: totals.quantity,
+            cost_total: totals.cost,
+            expected_quantity: target.quantity,
+            expected_cost_total: target.cost_total_exact,
+          }),
+        }),
+      () => `${target.name} を数量 ${amount(totals.quantity)}・取得額 ${yen(totals.cost)} に更新しました`,
+    )
+    if (ok) setEditId(null)
+    // After a conflict the editor starts over from the latest totals.
+    else load().catch(() => undefined)
   }
 
   // Linking by hand always needs this click: a similar name alone never decides which fund a holding is.
@@ -332,6 +500,7 @@ export function PortfolioPage() {
   }
 
   if (!view) return <div className="panel">{error || '読み込み中…'}</div>
+  const editing = editId ? view.holdings.find((h) => h.id === editId) : undefined
   return (
     <div className="stack">
       <Disclaimer />
@@ -426,7 +595,8 @@ export function PortfolioPage() {
           </label>
         </div>
         <p className="hint">
-          CSV の取り込みは保有銘柄を置き換えます。CSV の評価額が最も正確です（取り込み時点）。株価・基準価額の更新は「評価額を計算」から行います。
+          CSV の取り込みは保有銘柄を置き換えます（手で編集した数量・取得額も CSV の値になります）。CSV の評価額が最も正確です（取り込み時点）。株価・基準価額の更新は「評価額を計算」から行います。
+          積立・買い増しの後は、CSV を取り込み直すか、保有銘柄の「数量・取得額を編集」で購入分を加算してください。
         </p>
       </section>
 
@@ -481,6 +651,11 @@ export function PortfolioPage() {
                     )}
                   </td>
                   <td>
+                    <div>
+                      <button className="link small" onClick={() => openEditor(h)} disabled={busy}>
+                        数量・取得額を編集
+                      </button>
+                    </div>
                     <button className="link danger" onClick={() => removeHolding(h.id)} disabled={busy}>
                       削除
                     </button>
@@ -509,6 +684,17 @@ export function PortfolioPage() {
           </button>
         </form>
       </section>
+
+      {editing && (
+        <HoldingEditor
+          key={`${editing.id}:${editing.quantity}:${editing.cost_total_exact}`}
+          holding={editing}
+          busy={busy}
+          error={error}
+          onSave={(totals) => saveHolding(editing, totals)}
+          onClose={() => setEditId(null)}
+        />
+      )}
 
       {fundTarget && (
         <section className="panel" id="fund-picker" key={fundTarget.id}>
