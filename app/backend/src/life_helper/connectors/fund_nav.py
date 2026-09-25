@@ -401,7 +401,7 @@ class ToushinLibConnector(FundCsvConnector):
             "name": name,
             "nav": nav_amount(nav),
             "price_unit": self.price_unit,
-            "date": nav_date(day.isoformat(), latest=today or date.today()),
+            "date": nav_date(day.isoformat(), latest=today or market_today()),
             "source": self.provider,
             "source_url": self.page_url(isin),
             # The fund page names the manager only in free text, so it is left to the search result.

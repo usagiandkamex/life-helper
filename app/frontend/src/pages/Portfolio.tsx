@@ -94,9 +94,17 @@ function PriceCell({ holding }: { holding: Holding }) {
   )
 }
 
-function AutoLinkReport({ report }: { report: FundAutoLink }) {
+function AutoLinkReport({ report, onPick }: { report: FundAutoLink; onPick: (id: string) => void }) {
   const pending = [...report.ambiguous, ...report.unmatched]
   if (report.linked.length === 0 && pending.length === 0 && report.errors.length === 0) return null
+  const pick = (id: string) => (
+    <>
+      {' '}
+      <button className="link small" onClick={() => onPick(id)}>
+        候補を見る
+      </button>
+    </>
+  )
   return (
     <>
       {report.linked.length > 0 && (
@@ -113,15 +121,19 @@ function AutoLinkReport({ report }: { report: FundAutoLink }) {
       )}
       {pending.length > 0 && (
         <div className="banner warn">
-          自動では紐付けられなかった投資信託（「取得元を設定」から候補を選んでください）:
+          自動では紐付けられなかった投資信託（候補から選ぶか、手入力してください）:
           <ul>
             {report.ambiguous.map((a) => (
               <li key={a.id}>
                 {a.name}: {a.reason}
+                {pick(a.id)}
               </li>
             ))}
             {report.unmatched.map((u) => (
-              <li key={u.id}>{u.name}: 同じ名前の公式ファンドが見つかりませんでした</li>
+              <li key={u.id}>
+                {u.name}: 同じ名前の公式ファンドが見つかりませんでした
+                {pick(u.id)}
+              </li>
             ))}
           </ul>
         </div>
@@ -158,6 +170,10 @@ export function PortfolioPage() {
   useEffect(() => {
     load().catch((e) => setError(e.message))
   }, [load])
+  // The picker opens below the holdings table, often out of sight of the button that opened it.
+  useEffect(() => {
+    if (fundTarget) document.getElementById('fund-picker')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [fundTarget])
 
   const run = async (fn: () => Promise<PortfolioView | void>, done?: (v: PortfolioView) => string) => {
     setBusy(true)
@@ -358,7 +374,15 @@ export function PortfolioPage() {
           </ul>
         </div>
       )}
-      {view.refresh_funds?.auto_link && <AutoLinkReport report={view.refresh_funds.auto_link} />}
+      {view.refresh_funds?.auto_link && (
+        <AutoLinkReport
+          report={view.refresh_funds.auto_link}
+          onPick={(id) => {
+            const target = view.holdings.find((h) => h.id === id)
+            if (target) openFundPicker(target)
+          }}
+        />
+      )}
       {(view.stale_prices.length > 0 || view.manual_funds.length > 0) && (
         <div className="banner warn">
           {view.stale_prices.length > 0 && <div>価格が古いままの銘柄: {view.stale_prices.join('、')}</div>}
@@ -473,7 +497,7 @@ export function PortfolioPage() {
       </section>
 
       {fundTarget && (
-        <section className="panel" key={fundTarget.id}>
+        <section className="panel" id="fund-picker" key={fundTarget.id}>
           <h2>基準価額の取得元: {fundTarget.name}</h2>
           <p className="hint">
             {candidates?.note ?? '公式ファンドの候補を探しています…'}

@@ -492,11 +492,23 @@ def test_links_to_the_retired_mufg_api_move_to_the_fund_library(tmp_path):
     assert store.load().holdings[0].fund.provider == "toushin_lib"
 
 
-def test_saved_automations_keep_the_fund_tools_after_the_mufg_api_is_retired():
+def test_saved_automations_keep_the_fund_tools_after_the_mufg_api_is_retired(client, ctx):
     from life_helper.automation.models import Automation
+    from life_helper.tools.registry import build_tools
 
     saved = Automation(name="x", prompt="y", connectors=["mufg_api", "rakuten_csv", "daiwa_csv", "toushin_lib"])
     assert saved.connectors == ["toushin_lib", "rakuten_csv", "daiwa_csv"]
+    assert "refresh_fund_navs" in {s.tool.name for s in build_tools(ctx, connectors=saved.connectors)}
+    # An automation opened on the screen before the switch is sent back with the old name.
+    csrf = sign_in(client, ctx)
+    body = {
+        "name": "基準価額",
+        "prompt": "基準価額を更新",
+        "schedule": {"kind": "daily", "time": "09:00"},
+        "connectors": ["mufg_api", "rakuten_csv", "daiwa_csv"],
+    }
+    created = client.post("/api/automations", json=body, headers={"x-csrf-token": csrf})
+    assert created.status_code == 200 and created.json()["connectors"] == ["toushin_lib", "rakuten_csv", "daiwa_csv"]
 
 
 def test_summary_flags_old_navs_and_funds_without_a_source():
