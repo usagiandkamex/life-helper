@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import time
 import uuid
@@ -41,6 +42,7 @@ VIEWPORT = {"width": 1280, "height": 800}
 MAX_SCREENSHOT_HEIGHT = 4000
 SCREENSHOT_RETENTION_SECONDS = 3 * 24 * 60 * 60
 MAX_SCREENSHOTS = 200
+MAX_RESULT_BYTES = 64 * 1024
 LIMITS = {
     "maxText": 15_000,
     "maxLinks": 60,
@@ -49,6 +51,27 @@ LIMITS = {
     "maxCols": 12,
     "maxCell": 200,
     "maxInputs": 30,
+    "maxUrl": 2048,
+    "maxTitle": 500,
+    "maxSelector": 1024,
+}
+# String lengths and collection sizes are checked again outside the untrusted page, before JSON serialization.
+RESULT_SCHEMA = {
+    "url": LIMITS["maxUrl"],
+    "title": LIMITS["maxTitle"],
+    "status": int,
+    "text": LIMITS["maxText"],
+    "text_truncated": bool,
+    "result_truncated": bool,
+    "links": (LIMITS["maxLinks"], {"text": 120, "url": LIMITS["maxUrl"]}),
+    "tables": (
+        LIMITS["maxTables"],
+        {"caption": 200, "rows": (LIMITS["maxRows"], (LIMITS["maxCols"], LIMITS["maxCell"]))},
+    ),
+    "inputs": (LIMITS["maxInputs"], {"selector": LIMITS["maxSelector"], "tag": 20, "type": 32, "label": 80}),
+    "summary": 1000,
+    "error": 1000,
+    "screenshot": {"id": 32},
 }
 
 LAUNCH_ARGS = [
@@ -74,11 +97,14 @@ SNAPSHOT_JS = """
   if (!root) return null;
   const clean = (s) => (s || '').replace(/\\s+/g, ' ').trim();
   const full = (root.innerText || '').replace(/[ \\t]+\\n/g, '\\n').replace(/\\n{3,}/g, '\\n\\n').trim();
+  const title = document.title || '';
+  let truncated = title.length > args.maxTitle;
   const links = [];
   const seen = new Set();
   for (const a of root.querySelectorAll('a[href]')) {
     if (links.length >= args.maxLinks) break;
     const url = a.href;
+    if (url.length > args.maxUrl) { truncated = true; continue; }
     const text = clean(a.innerText || a.getAttribute('aria-label') || a.title).slice(0, 120);
     if (!/^https?:/i.test(url) || !text || seen.has(url)) continue;
     seen.add(url);
@@ -103,14 +129,18 @@ SNAPSHOT_JS = """
     const box = el.getBoundingClientRect();
     if (box.width === 0 && box.height === 0) continue;
     let selector = null;
+    if (el.id.length > args.maxSelector || el.name.length > args.maxSelector) { truncated = true; continue; }
     if (el.id) selector = '#' + CSS.escape(el.id);
     else if (el.name) selector = el.tagName.toLowerCase() + '[name="' + el.name.replace(/["\\\\]/g, '\\\\$&') + '"]';
     if (!selector) continue;
+    if (selector.length > args.maxSelector) { truncated = true; continue; }
     const label = (el.labels && el.labels[0] ? el.labels[0].innerText : '')
       || el.getAttribute('aria-label') || el.placeholder;
-    inputs.push({selector, tag: el.tagName.toLowerCase(), type, label: clean(label).slice(0, 80)});
+    inputs.push({selector, tag: el.tagName.toLowerCase().slice(0, 20), type: type.slice(0, 32),
+      label: clean(label).slice(0, 80)});
   }
-  return {text: full.slice(0, args.maxText), text_truncated: full.length > args.maxText, links, tables, inputs};
+  return {title: title.slice(0, args.maxTitle), text: full.slice(0, args.maxText),
+    text_truncated: full.length > args.maxText, result_truncated: truncated, links, tables, inputs};
 }
 """
 
@@ -132,6 +162,58 @@ MAX_CHECKED_ELEMENTS = 50
 
 class BrowserError(RuntimeError):
     """A browser failure with a message that is safe to show to the model and the user."""
+
+
+def limit_result(result: dict) -> dict:
+    """Bound known fields first, then trim the serialized result, including JSON escaping and truncation flags."""
+    truncated = False
+
+    def bound(value: Any, schema: Any) -> Any:
+        nonlocal truncated
+        if isinstance(schema, dict):
+            if not isinstance(value, dict):
+                truncated = True
+                return {}
+            output = {key: bound(value[key], child) for key, child in schema.items() if key in value}
+            truncated |= len(output) != len(value)
+            return output
+        if isinstance(schema, tuple):
+            if not isinstance(value, list):
+                truncated = True
+                return []
+            count, child = schema
+            truncated |= len(value) > count
+            return [bound(item, child) for item in value[:count]]
+        if isinstance(schema, int):
+            if not isinstance(value, str):
+                truncated = True
+                return ""
+            truncated |= len(value) > schema
+            return value[:schema]
+        if type(value) is schema:
+            return value
+        truncated = True
+        return None
+
+    output = bound(result, RESULT_SCHEMA)
+    if "text" in output and output["text"] != result["text"]:
+        output["text_truncated"] = True
+    if truncated:
+        output["result_truncated"] = True
+
+    # ASCII-escaped JSON is also an upper bound for UTF-8 JSON (including emoji, controls and lone surrogates).
+    def size() -> int:
+        return len(json.dumps(output).encode("utf-8"))
+
+    if size() > MAX_RESULT_BYTES:
+        output["result_truncated"] = True
+        for key in ("tables", "links", "inputs", "text"):
+            while output.get(key) and size() > MAX_RESULT_BYTES:
+                output[key] = output[key][: len(output[key]) // 2]
+                if key == "text":
+                    output["text_truncated"] = True
+        # The bounded metadata alone fits comfortably, even with every character JSON-escaped.
+    return output
 
 
 def screenshot_dir(settings: Settings) -> Path:
@@ -286,13 +368,14 @@ class BrowserSession:
     async def run(self, action: Callable[[], Awaitable[dict]]) -> dict:
         try:
             async with self._lock:
-                return await asyncio.wait_for(action(), TOOL_TIMEOUT_SECONDS)
+                result = await asyncio.wait_for(action(), TOOL_TIMEOUT_SECONDS)
         except BrowserError as exc:
-            return {"error": str(exc)}
+            result = {"error": str(exc)}
         except TimeoutError:
-            return {"error": "ブラウザの操作が時間内に終わりませんでした"}
+            result = {"error": "ブラウザの操作が時間内に終わりませんでした"}
         except PlaywrightError as exc:
-            return {"error": _describe(exc)}
+            result = {"error": _describe(exc)}
+        return limit_result(result)
 
     # -- page lifecycle ----------------------------------------------------------------------------------
 
@@ -433,7 +516,7 @@ class BrowserSession:
             raise BrowserError(f"要素が見つかりませんでした: {selector}")
         # The page may have navigated while it was read: nothing from a rejected destination may be returned.
         await self._guard_url(page)
-        result: dict[str, Any] = {"url": page.url, "title": await page.title()}
+        result: dict[str, Any] = {"url": page.url}
         if status is not None:
             result["status"] = status
         return result | data
@@ -519,6 +602,6 @@ class BrowserSession:
         return {
             "summary": "スクリーンショットを利用者の画面に表示しました（画像はあなたには渡りません）",
             "url": page.url,
-            "title": await page.title(),
+            "title": await page.evaluate("(limit) => (document.title || '').slice(0, limit)", LIMITS["maxTitle"]),
             "screenshot": {"id": shot_id},
         }

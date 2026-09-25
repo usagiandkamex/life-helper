@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
 import os
 import sys
 from pathlib import Path
@@ -13,9 +14,13 @@ from life_helper.browser import proxy as proxy_module
 from life_helper.browser.guard import fill_rejection
 from life_helper.browser.proxy import EgressProxy
 from life_helper.browser.service import (
+    LIMITS,
+    MAX_RESULT_BYTES,
+    SNAPSHOT_JS,
     BrowserError,
     BrowserService,
     BrowserSession,
+    limit_result,
     prune_screenshots,
     save_screenshot,
     screenshot_dir,
@@ -340,6 +345,71 @@ async def test_active_session_release_runs_every_releaser():
     assert calls == ["broken", "ok"]
 
 
+@pytest.mark.parametrize("character", ["x", "漢", "😀", '\x00"\\', "\ud800"])
+async def test_browser_results_have_a_serialized_byte_limit(tmp_path, character):
+    value = character * 20_000
+    raw = {
+        "url": "https://example.com/" + value,
+        "title": value,
+        "status": 200,
+        "text": value,
+        "text_truncated": False,
+        "links": [{"text": value, "url": value}] * 100,
+        "tables": [{"caption": value, "rows": [[value] * 20] * 50}] * 10,
+        "inputs": [{"selector": value, "tag": value, "type": value, "label": value}] * 50,
+        "unexpected": value,
+    }
+
+    async def action():
+        return raw
+
+    result = await BrowserSession(NoBrowser(), MASKER, tmp_path).run(action)
+    assert len(json.dumps(result).encode()) <= MAX_RESULT_BYTES
+    if character != "\ud800":
+        assert len(json.dumps(result, ensure_ascii=False).encode()) <= MAX_RESULT_BYTES
+    assert result["result_truncated"] is True
+    assert result["text_truncated"] is True
+    assert result["status"] == 200 and "unexpected" not in result
+    assert len(result["url"]) <= LIMITS["maxUrl"] and len(result["title"]) <= LIMITS["maxTitle"]
+    assert len(result["text"]) <= LIMITS["maxText"]
+    assert len(result["links"]) <= LIMITS["maxLinks"]
+    assert all(len(link["url"]) <= LIMITS["maxUrl"] and len(link["text"]) <= 120 for link in result["links"])
+    assert len(result["inputs"]) <= LIMITS["maxInputs"]
+    assert all(len(item["selector"]) <= LIMITS["maxSelector"] for item in result["inputs"])
+
+
+def test_result_limits_preserve_small_results_and_reject_unexpected_shapes():
+    result = {
+        "url": "https://example.com/",
+        "title": "調べ物",
+        "text": "少しの内容",
+        "text_truncated": False,
+        "links": [{"text": "次へ", "url": "https://example.com/next"}],
+        "tables": [{"caption": "表", "rows": [["a", "b"]]}],
+        "inputs": [{"selector": "#q", "tag": "input", "type": "search", "label": "検索"}],
+    }
+    assert limit_result(result) == result
+    result = limit_result({"title": ["x"] * 1000, "links": {"x": "y"}, "text_truncated": "x" * 1000})
+    assert result == {"title": "", "links": [], "text_truncated": None, "result_truncated": True}
+
+
+async def test_screenshot_metadata_and_errors_are_also_bounded(tmp_path):
+    session = BrowserSession(NoBrowser(), MASKER, tmp_path)
+
+    async def screenshot():
+        return {"url": "x" * 100_000, "title": "y" * 100_000, "screenshot": {"id": SHOT_ID}, "summary": "撮影しました"}
+
+    shot = await session.run(screenshot)
+    assert len(json.dumps(shot).encode()) <= MAX_RESULT_BYTES
+    assert shot["screenshot"]["id"] == SHOT_ID and shot["result_truncated"]
+
+    async def fail():
+        raise BrowserError("x" * 100_000)
+
+    failure = await session.run(fail)
+    assert len(failure["error"]) == 1000 and failure["result_truncated"]
+
+
 def test_screenshots_are_pruned(tmp_path):
     old = tmp_path / f"{'a' * 32}.png"
     old.parent.mkdir(parents=True, exist_ok=True)
@@ -484,6 +554,35 @@ PAGE = """<!doctype html><html><head><title>テストのページ</title></head>
 <form><input name="user"><input name="pw" type="password"></form>
 <div id="more"></div><button onclick="document.getElementById('more').textContent='続きの内容'">もっと見る</button>
 </body></html>"""
+
+
+@pytest.mark.skipif(not _chromium_installed(), reason="Chromium for Playwright is not installed")
+async def test_large_page_attributes_are_bounded_before_leaving_chromium(tmp_path, monkeypatch):
+    async def site(route):
+        await route.fulfill(
+            content_type="text/html",
+            body="""<html><body><a id="big">large</a><a href="/next">next</a>
+            <input id="field"><input id="q"><script>
+              document.title = 'x'.repeat(100000);
+              document.querySelector('#big').href = 'https://site.test/' + 'a'.repeat(100000);
+              document.querySelector('#field').id = 'b'.repeat(100000);
+            </script></body></html>""",
+        )
+
+    monkeypatch.setattr(BrowserSession, "_route", staticmethod(site))
+    session = BrowserSession(BrowserService(), MASKER, tmp_path)
+    try:
+        result = await session.run(lambda: session.open("https://site.test/"))
+        assert "error" not in result, result
+        # These bounds apply in the renderer too, not only after Playwright has transferred the data.
+        data = await session._current().evaluate(SNAPSHOT_JS, LIMITS)
+        assert len(data["title"]) == LIMITS["maxTitle"]
+        assert data["links"] == [{"text": "next", "url": "https://site.test/next"}]
+        assert [item["selector"] for item in data["inputs"]] == ["#q"]
+        assert data["result_truncated"] and result["result_truncated"]
+        assert len(json.dumps(result).encode()) <= MAX_RESULT_BYTES
+    finally:
+        await session.close()
 
 
 @pytest.mark.skipif(not _chromium_installed(), reason="Chromium for Playwright is not installed")
