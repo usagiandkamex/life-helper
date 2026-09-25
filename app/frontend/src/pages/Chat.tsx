@@ -3,12 +3,21 @@ import { useNavigate } from 'react-router-dom'
 import { api, ApiError, json } from '../api'
 import { LazyChart } from '../components/LazyChart'
 import { Disclaimer, Markdown } from '../components/Markdown'
-import type { ChartData, Conversation, HistoryMessage, TurnEvent } from '../types'
+import type { ChartData, Conversation, HistoryMessage, Screenshot, TurnEvent } from '../types'
 
 type Item =
   | { kind: 'user'; text: string }
   | { kind: 'assistant'; text: string; streaming?: boolean }
-  | { kind: 'tool'; id?: string; name: string; args: string; success?: boolean; error?: string; chart?: ChartData }
+  | {
+      kind: 'tool'
+      id?: string
+      name: string
+      args: string
+      success?: boolean
+      error?: string
+      chart?: ChartData
+      screenshot?: Screenshot
+    }
   | { kind: 'file_write'; path: string; diff: string }
   | { kind: 'error'; message: string }
 
@@ -33,7 +42,14 @@ function applyEvent(items: Item[], ev: TurnEvent): Item[] {
       return next
     case 'tool_end': {
       const idx = next.findIndex((i) => i.kind === 'tool' && i.id === ev.id)
-      if (idx >= 0) next[idx] = { ...(next[idx] as Extract<Item, { kind: 'tool' }>), success: ev.success, error: ev.error, chart: ev.chart }
+      if (idx >= 0)
+        next[idx] = {
+          ...(next[idx] as Extract<Item, { kind: 'tool' }>),
+          success: ev.success,
+          error: ev.error,
+          chart: ev.chart,
+          screenshot: ev.screenshot,
+        }
       return next
     }
     case 'file_write':
@@ -67,6 +83,12 @@ const TOOL_LABELS: Record<string, string> = {
   edit: 'ファイルを編集',
   web_fetch: 'Web ページを参照',
   skill: 'スキルを使用',
+  browser_open: 'ブラウザで開く',
+  browser_read: 'ページを読む',
+  browser_click: 'ページをクリック',
+  browser_fill: 'フォームに入力',
+  browser_scroll: 'ページをスクロール',
+  browser_screenshot: 'スクリーンショット',
 }
 
 export function ChatPage() {
@@ -363,6 +385,13 @@ function MessageItem({ item, onSchedule }: { item: Item; onSchedule: (text: stri
             {item.error && <p className="error-text">{item.error}</p>}
           </details>
           {item.chart && <LazyChart chart={item.chart} />}
+          {item.screenshot && (
+            <figure className="screenshot">
+              <a href={item.screenshot.url} target="_blank" rel="noreferrer">
+                <img src={item.screenshot.url} alt="ブラウザのスクリーンショット" loading="lazy" />
+              </a>
+            </figure>
+          )}
         </div>
       )
     case 'file_write':
