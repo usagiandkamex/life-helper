@@ -60,7 +60,7 @@ cd life-helper
 
 | サービス | 用途 | 取得 |
 |---|---|---|
-| 楽天ウェブサービス | 楽天トラベルの空室検索 | アプリ登録で `applicationId` と `accessKey` を取得 |
+| 楽天ウェブサービス | 楽天市場・楽天トラベル・楽天ブックス・楽天Kobo・楽天GORA・楽天レシピの検索（コネクタ「楽天ウェブサービス」） | アプリを 1 つ登録し、`applicationId` と `accessKey` を取得。登録にアプリの URL が必要なので、[2-3](#楽天ウェブサービスのアプリを登録する) で行う |
 
 株価（日本株・米国株・ETF・REIT の前日終値）と USD/JPY は、Yahoo Finance のチャート API から取得します。API キーも設定も不要です。
 公式に公開された API ではない（yfinance などが使っているものと同じ）ため、個人利用の範囲で使い、仕様変更や利用制限で取得できないときは証券会社の保有証券 CSV の取り込みで補ってください。
@@ -141,11 +141,40 @@ Client secret はリポジトリのファイルに保存しないでください
 
 使うものだけ登録します。あとから追加する場合も同じコマンドです（[設定値を変更するとき](#設定値を変更するとき)）。
 
+#### 楽天ウェブサービスのアプリを登録する
+
+楽天の検索（無料）を使う場合だけ必要です。アプリを 1 つ登録し、市場・トラベル・ブックス・Kobo・GORA・レシピの 6 つの API をすべて許可します。
+キーは 6 つの API で共通で、アプリではコネクタ「楽天ウェブサービス」として扱います。
+
+1. <https://webservice.rakuten.co.jp/> に楽天会員でログインし、新しいアプリの登録画面を開く。
+2. 次のとおり入力する（項目名は画面の表記に合わせて読み替えてください）。
+
+   | 項目 | 値 |
+   |---|---|
+   | Application Name | `Life Helper` |
+   | Application URL | `$baseUrl`（2-1 の `SERVICE_APP_ENDPOINT_URL`） |
+   | Application Type | Web アプリケーション |
+   | Allowed websites（許可された Web サイト） | `$baseUrl`。ドメインだけを入れる欄なら `https://` を除いたホスト名 |
+   | Purpose of data usage（データの利用目的） | 個人用の生活支援アプリで、商品・宿・本・電子書籍・ゴルフ場・レシピを検索するため |
+   | Expected QPS（想定 QPS） | `1` |
+   | API Access Scopes | **6 つすべて**にチェック: Rakuten Ichiba API / Rakuten Travel API / Rakuten Books API / Rakuten Kobo API / Rakuten GORA API / Rakuten Recipe API |
+
+3. CAPTCHA を入力して登録し、表示された **アプリ ID**（`applicationId`）と **アクセスキー**（`accessKey`、`pk_` で始まる）を控え、下の `azd env set` で登録する。
+
+- アプリは楽天の API を呼ぶとき、`Referer` と `Origin` にアプリの URL（`LH_BASE_URL`）を付けます。
+  「許可された Web サイト」とアプリの URL が一致しないと、楽天のツールが 403 エラー（アプリ ID・アクセスキーと許可された Web サイトの確認を促すメッセージ）を返します。
+- 楽天の利用上限はアプリ ID ごとに 1 秒 1 回程度です。アプリは 6 つの API すべてを、Web アプリとオートメーションのジョブをまたいで 1.5 秒間隔に揃えます。
+- アクセスキーは Client secret と同じ秘密情報です。リポジトリのファイルやチャットに書かないでください。
+
 ```powershell
-# 外部サービス（ステップ 1-3）
+# 外部サービス（ステップ 1-3・楽天ウェブサービスのアプリ）
 azd env set LH_RAKUTEN_APPLICATION_ID <applicationId>
 azd env set LH_RAKUTEN_ACCESS_KEY <accessKey>
+```
 
+#### そのほかのオプション
+
+```powershell
 # GitHub 通知（任意、ステップ 1-2で作成したGitHub Appの値）
 azd env set LH_GITHUB_APP_ID <App ID>
 $privateKey = (Get-Content -LiteralPath 'C:\秘密鍵を保存した場所\app-name.private-key.pem') -join '\n'
@@ -243,7 +272,7 @@ gh variable get DEPLOY_ENABLED --repo usagiandkamex/life-helper
 | `LH_TOKEN_ENCRYPTION_KEY` | ○ | シークレット | 保存する GitHub トークンの暗号化 | 2-1 |
 | `LH_GITHUB_OAUTH_CLIENT_ID` | ○ | 変数 | GitHub ログイン | 2-2 |
 | `LH_GITHUB_OAUTH_CLIENT_SECRET` | ○ | シークレット | GitHub ログイン | 2-2 |
-| `LH_RAKUTEN_APPLICATION_ID` / `LH_RAKUTEN_ACCESS_KEY` | | シークレット | 楽天トラベル空室検索 | 2-3 |
+| `LH_RAKUTEN_APPLICATION_ID` / `LH_RAKUTEN_ACCESS_KEY` | | シークレット | 楽天ウェブサービス（市場・トラベル・ブックス・Kobo・GORA・レシピの検索） | 2-3 |
 | `LH_GITHUB_APP_ID` / `LH_GITHUB_APP_INSTALLATION_ID` | | 変数 | GitHub 通知 | 2-3 |
 | `LH_GITHUB_APP_PRIVATE_KEY` | | シークレット | GitHub 通知 | 2-3 |
 | `LH_NOTIFY_REPO` | | 変数 | 通知を作るリポジトリ | 2-3 |
@@ -282,6 +311,8 @@ gh workflow run Deploy                           # 3. デプロイして Azure �
 | 株価の更新で「Yahoo Finance の利用制限」「想定外の応答」と出る | 非公式 API のため、時間をおいて再実行する。続く場合は仕様変更の可能性があるので、その間は証券会社の保有証券 CSV を取り込んで評価額を更新する |
 | 投資信託が「自動では紐付けられなかった」と出る | 理由（同じ名前のファンドが複数・見つからない・基準価額が大きく違う）を確認し、「候補を見る」から公式ファンドを選ぶ。候補にない場合は ISIN を指定するか、手入力にする |
 | 投資信託の基準価額の取得で、投資信託協会のエラーが出る | 公開サイトのため、時間をおいて「評価額を計算」をやり直す。続く場合は仕様変更の可能性があるので、楽天・大和の公式 CSV に紐付け直すか、公式サイトの基準価額を手入力する |
+| 楽天のツールが 403（`Invalid Access Key` など）を返す | `LH_RAKUTEN_APPLICATION_ID` / `LH_RAKUTEN_ACCESS_KEY` が正しいか。楽天のアプリの「許可された Web サイト」がアプリの URL（`SERVICE_APP_ENDPOINT_URL`）と一致しているか。使う API の API Access Scopes が許可されているか |
+| 楽天のツールが「利用回数の上限」「混み合っています」と返す | 楽天の利用上限（アプリ ID ごとに 1 秒 1 回程度）に達している。時間をおいてやり直す。オートメーションの周期を短くしすぎていないか |
 | Deploy ワークフローが実行されない | リポジトリ変数 `DEPLOY_ENABLED` が `true` か。`main` の CI が合格しているか |
 | Deploy がサインインで失敗する | ステップ 3 を実行したか。リポジトリ名を変えた場合はフェデレーション資格情報のサブジェクトも変わるため、スクリプトを再実行する |
 | オートメーションが動かない | 画面の実行履歴、Azure Portal のジョブ `caj-lifehelper-…` の実行履歴とログ |

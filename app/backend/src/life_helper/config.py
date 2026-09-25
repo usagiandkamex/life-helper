@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -43,10 +44,14 @@ class Settings(BaseSettings):
     browser_enabled: bool = True
 
     # External API connectors (values come from ACA secrets; never stored in files).
+    # One Rakuten Web Service app (Ichiba, Travel, Books, Kobo, GORA and Recipe scopes) serves every Rakuten tool.
     rakuten_application_id: SecretStr = SecretStr("")
     rakuten_access_key: SecretStr = SecretStr("")
-    # Rakuten changes endpoint versions from time to time; override without a code change if needed.
-    rakuten_vacant_endpoint: str = "https://openapi.rakuten.co.jp/engine/api/Travel/VacantHotelSearch/20170426"
+    # Rakuten changes endpoint versions from time to time. Production follows DEFAULT_ENDPOINTS in
+    # connectors/rakuten.py (not wired into Bicep); for local trials this JSON object overrides them by name, e.g.
+    # {"ichiba_item_search": "https://openapi.rakuten.co.jp/…"}. Kept as text so an empty value means "no overrides";
+    # it is checked at startup (rakuten_endpoint_overrides).
+    rakuten_endpoints: str = ""
 
     # GitHub App used to create notification issues.
     github_app_id: str = ""
@@ -81,6 +86,26 @@ class Settings(BaseSettings):
             if self.dev_github_token.get_secret_value():
                 raise ValueError("LH_DEV_GITHUB_TOKEN must not be set in production")
         return self
+
+    @model_validator(mode="after")
+    def _check_rakuten_endpoints(self) -> Settings:
+        from .connectors.rakuten import check_endpoints
+
+        check_endpoints(self.rakuten_endpoint_overrides)
+        return self
+
+    @property
+    def rakuten_endpoint_overrides(self) -> dict[str, str]:
+        text = self.rakuten_endpoints.strip()
+        if not text:
+            return {}
+        try:
+            value = json.loads(text)
+        except ValueError:
+            raise ValueError("LH_RAKUTEN_ENDPOINTS must be a JSON object") from None
+        if not isinstance(value, dict):
+            raise ValueError("LH_RAKUTEN_ENDPOINTS must be a JSON object")
+        return value
 
     @property
     def oauth_configured(self) -> bool:
