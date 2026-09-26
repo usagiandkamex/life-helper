@@ -32,15 +32,26 @@ logger = logging.getLogger(__name__)
 KEPT_EVENT_TYPES = ("message", "tool_start", "tool_end", "file_write", "error")
 MAX_EVENTS = 200
 TRANSCRIPT_VERSION = 1
-REPORT_REMINDER = "\n\n（最後に必ず report_result ツールを呼び、要約と、利用者に通知すべきかを報告してください。）"
+REPORT_REMINDER = (
+    "\n\n（最後に必ず report_result ツールを呼び、結果の本文（summary）と、利用者に通知すべきかを報告してください。"
+    "summary はアプリの「実行履歴」に Markdown で表示されます。上の指示で形式（表など）が指定されていればそのとおりに、"
+    "指定がなければ表や箇条書きで、あとから読んでも分かるようにまとめてください。）"
+)
 REPORT_FOLLOW_UP = (
-    "report_result ツールを呼んで、今回の結果の要約と、利用者に通知すべきか（notify）を報告してください。"
+    "report_result ツールを呼んで、今回の結果の本文（summary。指示どおりの形式の Markdown）と、"
+    "利用者に通知すべきか（notify）を報告してください。"
 )
 REAUTH_MESSAGE = "GitHub への再ログインが必要です。アプリを開いてログインし直してください。"
 
 
 class ReportParams(BaseModel):
-    summary: str = Field(max_length=4000, description="結果の要約（利用者が読む文章）")
+    summary: str = Field(
+        max_length=4000,
+        description=(
+            "利用者が「実行履歴」で読む結果の本文（Markdown、4000 文字以内）。"
+            "指示で表などの形式が指定されていればその形式で、完成した結果を書く。"
+        ),
+    )
     notify: bool = Field(description="利用者に知らせるべき結果か（例: 条件を満たした、要確認の事項がある）")
 
 
@@ -273,7 +284,7 @@ class AutomationRunner:
     ) -> None:
         @define_tool(
             name="report_result",
-            description="オートメーションの最後に必ず呼び、要約と通知すべきかを報告する。",
+            description="オートメーションの最後に必ず呼び、利用者が読む結果の本文（Markdown）と通知すべきかを報告する。",
             skip_permission=True,
             is_terminal=True,
         )
@@ -310,17 +321,21 @@ class AutomationRunner:
             if remaining <= 0:
                 raise TimeoutError
             await asyncio.wait_for(active.session.send_and_wait(prompt, timeout=remaining), remaining)
-            needs_report = automation.notify.github and automation.notify.condition == "report"
             remaining = deadline - loop.time()
-            if run_ctx.report is None and needs_report and remaining > 30:
-                # The notify decision depends on the report, so ask once more within the same session.
+            if run_ctx.report is None and remaining > 0:
+                # The report carries the result the user reads in the run history (and the notify decision),
+                # so ask once more within the same session. The work itself is already done, so this extra
+                # request is best effort: failing it must not turn a finished run into a failed one.
                 run_ctx.events.append({"type": "follow_up"})
-                await asyncio.wait_for(active.session.send_and_wait(REPORT_FOLLOW_UP, timeout=remaining), remaining)
+                follow_up_start = len(run_ctx.events)
+                try:
+                    await asyncio.wait_for(active.session.send_and_wait(REPORT_FOLLOW_UP, timeout=remaining), remaining)
+                except Exception:  # noqa: BLE001
+                    logger.warning("automation %s did not report after the follow-up request", automation.id)
+                    await self._abort(active.session)
+                    del run_ctx.events[follow_up_start:]
         except TimeoutError:
-            try:
-                await active.session.abort()
-            except Exception:  # noqa: BLE001
-                logger.debug("abort failed")
+            await self._abort(active.session)
             raise
         finally:
             unsubscribe()
@@ -334,6 +349,13 @@ class AutomationRunner:
                     await self.manager.delete_session(session_id)
                 except Exception:  # noqa: BLE001
                     logger.warning("could not delete automation session state")
+
+    @staticmethod
+    async def _abort(session: Any) -> None:
+        try:
+            await session.abort()
+        except Exception:  # noqa: BLE001
+            logger.debug("abort failed")
 
     @staticmethod
     def _condition_met(automation: Automation, run_ctx: RunContext) -> bool | None:

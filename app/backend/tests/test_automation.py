@@ -125,7 +125,7 @@ class FakeAutoSession:
     async def send_and_wait(self, prompt: str, timeout: float = 60):
         m = self.manager
         m.prompts.append(prompt)
-        if m.fail:
+        if m.fail and m.fail_on_call in (None, len(m.prompts)):
             raise m.fail
         if m.signal is not None:
             m.active.policy.on_tool_result(
@@ -150,6 +150,7 @@ class FakeAutoManager:
         self.closed: list = []
         self.deleted: list = []
         self.fail: Exception | None = None
+        self.fail_on_call: int | None = None  # None fails every call
         self.signal: dict | None = None
         self.report_notify = False
         self.report_on_call = 1
@@ -262,7 +263,7 @@ async def test_report_condition_and_include_summary(auto_env):
 
 
 @respx.mock
-async def test_missing_report_triggers_one_follow_up_when_notify_depends_on_it(auto_env):
+async def test_missing_report_triggers_one_follow_up(auto_env):
     ctx, runner, manager = auto_env
     _mock_github()
     manager.report_on_call = 2
@@ -273,11 +274,59 @@ async def test_missing_report_triggers_one_follow_up_when_notify_depends_on_it(a
     assert "report_result" in manager.prompts[0]  # the reminder is appended to the unattended prompt
     assert record["report"]["notify"] is True and record["notified"] is True
 
-    # Without GitHub notify there is no need to spend an extra request on a follow-up.
+    # The report is also the result shown in the app, so it is asked for again without GitHub notify too (issue #41).
     manager.prompts.clear()
     b = ctx.automations.upsert(Automation(name="z", prompt="y"))
+    record = await runner.run(b.id)
+    assert len(manager.prompts) == 2 and record["report"]["summary"] == "要約"
+
+    # A run that reported on the first call does not spend an extra request.
+    manager.prompts.clear()
+    manager.report_on_call = 1
     await runner.run(b.id)
     assert len(manager.prompts) == 1
+
+
+async def test_follow_up_failure_keeps_the_finished_run_successful(auto_env):
+    ctx, runner, manager = auto_env
+    manager.report_on_call = 2  # the model does not report on the first call
+    manager.fail, manager.fail_on_call = TimeoutError(), 2  # and the extra request runs out of time
+    a = ctx.automations.upsert(Automation(name="x", prompt="y"))
+    record = await runner.run(a.id)
+    # The work was already done when the report was asked for again, so the answer is kept instead of failing the run.
+    assert len(manager.prompts) == 2 and record["status"] == "success" and record["report"] is None
+    assert record["summary"] == "空室を確認しました"
+
+
+@pytest.mark.parametrize("failure", [TimeoutError(), RuntimeError("follow-up failed")])
+async def test_failed_follow_up_messages_do_not_replace_the_finished_answer(auto_env, monkeypatch, failure):
+    ctx, runner, manager = auto_env
+    manager.report_on_call = 2
+    manager.fail, manager.fail_on_call = failure, 2
+    send_and_wait = FakeAutoSession.send_and_wait
+
+    async def send_with_follow_up_message(session, prompt, timeout=60):
+        if manager.prompts:
+            for handler in list(session.handlers):
+                handler(SimpleNamespace(data=AssistantUsageData(model="gpt-5-mini")))
+                handler(SimpleNamespace(data=AssistantMessageData(content="報告を試みます", message_id="follow-up")))
+        return await send_and_wait(session, prompt, timeout)
+
+    async def abort_with_message(session):
+        for handler in list(session.handlers):
+            handler(SimpleNamespace(data=AssistantMessageData(content="中断しました", message_id="abort")))
+
+    monkeypatch.setattr(FakeAutoSession, "send_and_wait", send_with_follow_up_message)
+    monkeypatch.setattr(FakeAutoSession, "abort", abort_with_message)
+    a = ctx.automations.upsert(Automation(name="x", prompt="y"))
+    record = await runner.run(a.id)
+
+    assert record["status"] == "success" and record["error"] is None and record["report"] is None
+    assert record["summary"] == record["final_message"] == "空室を確認しました"
+    assert [event["type"] for event in record["events"]] == ["message", "follow_up"]
+    assert record["events"][0]["content"] == "空室を確認しました"
+    assert record["requests"] == 2 and record["attempts"] == 1
+    assert len(manager.prompts) == 2
 
 
 @respx.mock
@@ -552,7 +601,8 @@ async def test_run_record_carries_a_transcript(auto_env):
     record = await runner.run(a.id, now=datetime(2026, 9, 25, 0, 0, tzinfo=UTC))
     assert record["transcript_version"] == 1 and record["conversation_mode"] == "continue"
     assert record["prompt"] == "2026-09-25 の予定"  # expanded, without the report reminder sent to Copilot
-    assert "report_result" in manager.prompts[0]
+    # The reminder says where the result is shown, so it is written for the run history (issue #41).
+    assert "report_result" in manager.prompts[0] and "実行履歴" in manager.prompts[0]
     assert record["attempts"] == 1 and record["events_omitted"] == 0
     assert [e["type"] for e in record["events"]] == ["message"]
 

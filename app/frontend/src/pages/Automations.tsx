@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api, ApiError, formatDate, json } from '../api'
-import { STATUS_LABELS } from '../automationRuns'
+import { runAnswer, STATUS_LABELS } from '../automationRuns'
 import { Markdown } from '../components/Markdown'
 import type { Automation, AutomationList, NotifySettings, RunRecord, Schedule } from '../types'
 
@@ -232,7 +232,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
                 </p>
               )}
               {run.error && <div className="banner error">{run.error}</div>}
-              <Markdown text={run.final_message || run.summary || ''} />
+              <Markdown text={runAnswer(run)} />
               {run.signals && Object.keys(run.signals).length > 0 && <p className="hint">ツールの結果: {JSON.stringify(run.signals)}</p>}
               {run.issue_url && (
                 <p className="hint">
