@@ -117,14 +117,16 @@ class TurnManager:
         if loop is not None:
             loop.call_later(TURN_RETENTION_SECONDS, self._turns.pop, turn.id, None)
 
-    async def start(self, conversation_id: str, prompt: str, model: str) -> Turn:
+    async def start(
+        self, conversation_id: str, prompt: str, model: str, *, attachments: list[dict] | None = None
+    ) -> Turn:
         if self.busy(conversation_id):
             raise TurnBusyError("this conversation is already answering")
         self._loop = asyncio.get_running_loop()
         turn = Turn(id=uuid.uuid4().hex, conversation_id=conversation_id)
         self._turns[turn.id] = turn
         self._busy[conversation_id] = turn.id
-        turn.task = asyncio.create_task(self._run(turn, prompt, model))
+        turn.task = asyncio.create_task(self._run(turn, prompt, model, attachments or []))
         return turn
 
     def _emit(self, turn: Turn, event: dict) -> None:
@@ -148,7 +150,7 @@ class TurnManager:
         else:
             loop.call_soon_threadsafe(self._emit, turn, event)
 
-    async def _run(self, turn: Turn, prompt: str, model: str) -> None:
+    async def _run(self, turn: Turn, prompt: str, model: str, attachments: list[dict]) -> None:
         conversation = self.conversations.get(turn.conversation_id)
         scope = WriteScope(
             approver=lambda path, diff: self._approve(turn, path, diff),
@@ -166,7 +168,9 @@ class TurnManager:
             self.conversations.update(turn.conversation_id, started=True, model=model)
             unsubscribe = turn.active.session.on(lambda ev: self._on_event(turn, ev))
             try:
-                await turn.active.session.send_and_wait(prompt, timeout=self.timeout_seconds)
+                # Images go as blob attachments; other attached files are already text in the prompt.
+                extra = {"attachments": attachments} if attachments else {}
+                await turn.active.session.send_and_wait(prompt, timeout=self.timeout_seconds, **extra)
             finally:
                 unsubscribe()
             self._emit(turn, {"type": "done"})

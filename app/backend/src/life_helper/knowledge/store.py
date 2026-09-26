@@ -9,6 +9,7 @@ import shutil
 import unicodedata
 import uuid
 import zipfile
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -179,13 +180,14 @@ def convert_upload(filename: str, data: bytes) -> str:
 
 
 def _pdf_to_markdown(data: bytes) -> str:
+    return "\n".join(pdf_pages(data))
+
+
+def pdf_pages(data: bytes) -> Iterator[str]:
+    """Yields each page of a PDF as a Markdown section; pages are read one at a time, so a caller may stop early."""
     from pypdf import PdfReader
 
     reader = PdfReader(io.BytesIO(data))
-    parts: list[str] = []
     for i, page in enumerate(reader.pages, start=1):
         text = (page.extract_text() or "").strip()
-        parts.append(
-            f"## ページ {i}\n\n{text or '（テキストを抽出できませんでした。スキャン画像の PDF は非対応です）'}\n"
-        )
-    return "\n".join(parts)
+        yield f"## ページ {i}\n\n{text or '（テキストを抽出できませんでした。スキャン画像の PDF は非対応です）'}\n"

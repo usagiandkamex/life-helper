@@ -10,6 +10,7 @@ from copilot.session_events import (
     AssistantMessageData,
     AssistantMessageDeltaData,
     AssistantUsageData,
+    AttachmentBlob,
     SessionErrorData,
     ToolExecutionCompleteData,
     ToolExecutionStartData,
@@ -17,6 +18,7 @@ from copilot.session_events import (
 )
 
 from ..security import SecretMasker
+from .attachments import split_attached_files
 
 ARG_PREVIEW_LIMIT = 600
 RESULT_PREVIEW_LIMIT = 1200
@@ -109,7 +111,16 @@ def history_from_events(events: list[Any], masker: SecretMasker) -> list[dict]:
         data = getattr(event, "data", None)
         match data:
             case UserMessageData():
-                messages.append({"role": "user", "content": masker.mask_text(data.content or "")})
+                content, files = split_attached_files(data.content or "")
+                message = {"role": "user", "content": masker.mask_text(content)}
+                images = [
+                    {"name": masker.mask_text(a.display_name or "画像"), "kind": "image"}
+                    for a in data.attachments or []
+                    if isinstance(a, AttachmentBlob) and a.mime_type.startswith("image/")
+                ]
+                if images or files:
+                    message["attachments"] = images + [f | {"name": masker.mask_text(f["name"])} for f in files]
+                messages.append(message)
             case AssistantMessageData() if not data.parent_tool_call_id and data.content:
                 messages.append({"role": "assistant", "content": masker.mask_text(data.content)})
             case ToolExecutionStartData():
