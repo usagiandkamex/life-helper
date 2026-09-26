@@ -372,7 +372,14 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
 
   return (
     <div className="chat">
-      <aside className={`conversations ${drawer ? 'open' : ''}`}>
+      <aside id="conversation-list" className={`conversations ${drawer ? 'open' : ''}`}>
+        {/* スマホでは一覧が「会話一覧」ボタンに重なるので、一覧の中から閉じられるようにする */}
+        <div className="row list-head drawer-head">
+          <h2 className="grow">会話一覧</h2>
+          <button className="button small" onClick={() => setDrawer(false)}>
+            閉じる
+          </button>
+        </div>
         <button className="button primary block" onClick={newConversation}>
           ＋ 新しい会話
         </button>
@@ -424,10 +431,15 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
       </aside>
       <section className="thread">
         <div className="thread-toolbar">
-          <button className="button small mobile-only" onClick={() => setDrawer(!drawer)}>
+          <button
+            className="button small mobile-only"
+            onClick={() => setDrawer(!drawer)}
+            aria-expanded={drawer}
+            aria-controls="conversation-list"
+          >
             会話一覧
           </button>
-          <Disclaimer />
+          <Disclaimer short />
         </div>
         <div className="messages" ref={messagesRef}>
           {threadId ? (

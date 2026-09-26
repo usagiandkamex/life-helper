@@ -27,10 +27,13 @@ export function Markdown({ text }: { text: string }) {
   )
 }
 
-export function Disclaimer() {
+// short はチャットの上の欄用（常に画面に出るので、スマホでも 1〜2 行に収まる長さにする）。
+export function Disclaimer({ short = false }: { short?: boolean }) {
   return (
     <p className="disclaimer">
-      お金に関する結果は目安です。専門家（税理士・FP）の助言や投資助言ではありません。最終的な判断は公式の情報や専門家に確認してください。
+      {short
+        ? 'お金に関する結果は目安で、専門家の助言や投資助言ではありません'
+        : 'お金に関する結果は目安です。専門家（税理士・FP）の助言や投資助言ではありません。最終的な判断は公式の情報や専門家に確認してください。'}
     </p>
   )
 }
