@@ -322,7 +322,7 @@ class AutomationRunner:
                 raise TimeoutError
             await asyncio.wait_for(active.session.send_and_wait(prompt, timeout=remaining), remaining)
             remaining = deadline - loop.time()
-            if run_ctx.report is None and remaining > 30:
+            if run_ctx.report is None and remaining > 0:
                 # The report carries the result the user reads in the run history (and the notify decision),
                 # so ask once more within the same session. The work itself is already done, so this extra
                 # request is best effort: failing it must not turn a finished run into a failed one.
