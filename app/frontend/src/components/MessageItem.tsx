@@ -1,5 +1,6 @@
 import { TOOL_LABELS, type Item } from '../chatItems'
 import { ApprovalCard } from './ApprovalCard'
+import { AttachmentList } from './AttachmentList'
 import { LazyChart } from './LazyChart'
 import { Markdown } from './Markdown'
 
@@ -8,8 +9,10 @@ export function MessageItem({ item, onSchedule }: { item: Item; onSchedule?: (te
     case 'user':
       return (
         <div className="msg user">
+          {item.attachments && item.attachments.length > 0 && <AttachmentList items={item.attachments} />}
           <div className="bubble">{item.text}</div>
-          {onSchedule && (
+          {/* A schedule keeps only the text, so a question about attached files is not offered. */}
+          {onSchedule && !item.attachments?.length && (
             <button className="link small" onClick={() => onSchedule(item.text)}>
               この質問を定期実行
             </button>
