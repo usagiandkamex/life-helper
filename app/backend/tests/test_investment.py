@@ -1191,7 +1191,7 @@ def test_refresh_prices_updates_stocks_and_funds_independently(client, ctx, sett
     _yahoo_ready(ctx)
     _funds_ready(ctx)
     with respx.mock:
-        mock_yahoo({"7203.T": 3_000})
+        mock_yahoo({"7203.T": 3_000}, day=NAV_DAY.isoformat())
         mock_toushin({ALL_COUNTRY_ISIN: (25_341, _jp(NAV_DAY)), SP500_ISIN: (30_000, _jp(NAV_DAY))})
         view = client.post("/api/portfolio/refresh-prices", headers={"x-csrf-token": csrf}).json()
     assert [u["code"] for u in view["refresh"]["updated"]] == ["7203"]
