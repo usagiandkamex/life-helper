@@ -46,10 +46,11 @@ const amount = (value: number) => value.toLocaleString('ja-JP', { maximumFractio
 const exact = (value: number) => value.toLocaleString('ja-JP', { maximumSignificantDigits: 17 })
 const exactYen = (value: number) => `${exact(value)} 円`
 const label = (labels: Record<string, string>, key: string | null | undefined) => (key ? labels[key] ?? key : '')
-// 入力欄の値は 3 桁区切りつきの文字列なので、区切りを外して数値にする（空欄や数字でないときは fallback）。
+// 入力欄の値は 3 桁区切りつきの文字列なので、区切りを外して数値にする。fallback は空欄のときだけ使い、
+// "." のような数字でない値は NaN のまま返して、呼び出し側の検証で止める（0 などに読み替えない）。
 const numberField = (data: FormData, name: string, fallback = Number.NaN) => {
-  const value = parseNumber(String(data.get(name) ?? ''))
-  return Number.isFinite(value) ? value : fallback
+  const text = String(data.get(name) ?? '')
+  return text.replace(/,/g, '').trim() === '' ? fallback : parseNumber(text)
 }
 const marketToday = () => {
   const parts = new Intl.DateTimeFormat('en-US', {
@@ -552,13 +553,18 @@ export function PortfolioPage() {
 
   const simulate = async (form: HTMLFormElement) => {
     const data = new FormData(form)
+    const initial = numberField(data, 'initial', 0)
+    const monthly = numberField(data, 'monthly', 0)
+    if (![initial, monthly].every((value) => Number.isFinite(value) && value >= 0)) {
+      throw new Error('元本と毎月の積立には 0 以上の数値を入力してください')
+    }
     const res = await api<{ principal: number; expected_value: number; percentiles: Record<string, number>; after_tax: Record<string, number>; yearly: Record<string, number>[] }>(
       '/api/portfolio/simulate',
       {
         method: 'POST',
         body: json({
-          initial: numberField(data, 'initial', 0),
-          monthly_contribution: numberField(data, 'monthly', 0),
+          initial,
+          monthly_contribution: monthly,
           years: Number(data.get('years')),
           expected_return: Number(data.get('rate')) / 100,
           volatility: Number(data.get('vol')) / 100,

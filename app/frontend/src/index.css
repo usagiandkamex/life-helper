@@ -106,6 +106,8 @@ td.neg { color: var(--danger); }
 /* 操作の列はセルのまま横に並べる（display: flex にするとセルが行から外れて表が崩れる） */
 td.actions { white-space: nowrap; }
 td.actions > * + * { margin-left: 0.75rem; }
+/* 押しやすさのための上下の余白はそのままに、文字の高さを他の列にそろえる（余白の分だけ下にずれて見えていた） */
+td.actions > .link { margin-block: -0.375rem; }
 
 /* buttons: filled / outlined / text（状態レイヤー付き） */
 .button {
