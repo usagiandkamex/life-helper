@@ -11,9 +11,9 @@ import { SettingsPage } from './pages/Settings'
 
 const NAV_ITEMS = [
   ['/chat', 'チャット'],
-  ['/knowledge', '知識・メモリ'],
   ['/portfolio', '資産'],
   ['/automations', 'オートメーション'],
+  ['/knowledge', '知識・メモリ'],
   ['/settings', '設定'],
 ] as const
 // The drawer replaces the tabs at the same width the stylesheet switches to the mobile layout.

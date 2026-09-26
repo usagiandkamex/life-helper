@@ -22,7 +22,7 @@ from life_helper.connectors.fund_nav import (
     match_score,
     same_fund_name,
 )
-from life_helper.connectors.rakuten_travel import RakutenTravelConnector, parse_vacancies
+from life_helper.connectors.rakuten import RakutenConnector, parse_vacancies
 from life_helper.connectors.registry import get_connectors
 from life_helper.connectors.yahoo_finance import (
     CHART_URL,
@@ -94,7 +94,7 @@ def rakuten_fund(tmp_path, masker):
 
 @pytest.fixture
 def rakuten(tmp_path, masker):
-    return RakutenTravelConnector(
+    return RakutenConnector(
         {"rakuten_application_id": APP_ID, "rakuten_access_key": ACCESS_KEY},
         masker,
         tmp_path / "state.json",
@@ -431,7 +431,9 @@ async def test_rakuten_error_and_validation(rakuten):
 
 def test_rakuten_rejects_foreign_endpoint(tmp_path, masker):
     with pytest.raises(ValueError):
-        RakutenTravelConnector({}, masker, tmp_path / "s.json", endpoint="https://evil.example/api")
+        RakutenConnector(
+            {}, masker, tmp_path / "s.json", endpoints={"travel_vacant_hotel_search": "https://evil.example/api"}
+        )
 
 
 def test_fund_name_matching_only_scores_candidates():
@@ -865,7 +867,17 @@ def test_tool_registered_only_when_configured(ctx, settings):
     settings.rakuten_application_id = SecretStr(APP_ID)
     settings.rakuten_access_key = SecretStr(ACCESS_KEY)
     ctx.extras.pop("connectors", None)
-    assert [s.tool.name for s in build_tools(ctx)] == ["search_rakuten_vacancy"]
+    assert [s.tool.name for s in build_tools(ctx)] == [
+        "search_rakuten_items",
+        "search_rakuten_vacancy",
+        "search_rakuten_hotels",
+        "search_rakuten_books",
+        "search_rakuten_kobo",
+        "search_rakuten_golf_courses",
+        "search_rakuten_golf_plans",
+        "get_rakuten_recipe_ranking",
+    ]
+    assert all(s.connector == "rakuten" for s in build_tools(ctx))
 
 
 def test_connectors_api_never_returns_secret_values(client, ctx, settings):
@@ -876,8 +888,9 @@ def test_connectors_api_never_returns_secret_values(client, ctx, settings):
     ctx.extras.pop("connectors", None)
     sign_in(client, ctx)
     body = client.get("/api/connectors").json()
-    rakuten = next(c for c in body if c["name"] == "rakuten_travel")
-    assert rakuten["configured"] is True
+    rakuten = next(c for c in body if c["name"] == "rakuten")
+    assert rakuten["configured"] is True and rakuten["label"] == "楽天ウェブサービス"
+    assert all(c["name"] != "rakuten_travel" for c in body)
     assert APP_ID not in str(body) and ACCESS_KEY not in str(body)
     # Stock prices need no key, so the connector is always ready.
     yahoo = next(c for c in body if c["name"] == "yahoo_finance")

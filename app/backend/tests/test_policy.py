@@ -303,5 +303,6 @@ def test_connector_filter(ctx, settings):
     names_none = {s.tool.name for s in build_tools(ctx, connectors=[])}
     assert "search_rakuten_vacancy" not in names_none and "get_stock_price" not in names_none
     assert "calculate" in names_none
-    names_rakuten = {s.tool.name for s in build_tools(ctx, connectors=["rakuten_travel"])}
-    assert "search_rakuten_vacancy" in names_rakuten and "get_stock_price" not in names_rakuten
+    names_rakuten = {s.tool.name for s in build_tools(ctx, connectors=["rakuten"])}
+    assert {"search_rakuten_vacancy", "search_rakuten_items", "get_rakuten_recipe_ranking"} <= names_rakuten
+    assert "get_stock_price" not in names_rakuten

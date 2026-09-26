@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api, ApiError, formatDate, json } from '../api'
 import { runAnswer, STATUS_LABELS } from '../automationRuns'
@@ -47,6 +47,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   const [run, setRun] = useState<RunRecord | null>(null)
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
+  const detailRef = useRef<HTMLDivElement>(null)
 
   const load = useCallback(async () => {
     const data = await api<AutomationList>('/api/automations')
@@ -74,6 +75,11 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
       .then((d) => setModels(d.models))
       .catch(() => undefined)
   }, [load])
+
+  useEffect(() => {
+    // スマホでは結果が一覧の下に出るので、選んだら結果まで送る（横に並ぶ画面幅では動かさない）。
+    if (run && window.matchMedia('(max-width: 760px)').matches) detailRef.current?.scrollIntoView({ block: 'start' })
+  }, [run])
 
   useEffect(() => {
     // Deep links: "この質問を定期実行" (?new=1&prompt=) and GitHub notifications (?automation=&run=).
@@ -196,47 +202,54 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
 
       <section className="panel">
         <h2>実行履歴</h2>
-        <ul className="runs">
-          {runs.map((r) => (
-            <li key={r.id} className={r.read ? '' : 'unread'}>
-              <button className="link" onClick={() => openRun(r.automation_id, r.id)}>
-                {formatDate(r.started_at)} {r.name} — {STATUS_LABELS[r.status] ?? r.status}
-                {r.notified && ' 📣'}
-              </button>
-            </li>
-          ))}
-          {runs.length === 0 && <li className="hint">まだ実行されていません。</li>}
-        </ul>
-        {run && (
-          <div className="run-detail">
-            <h3>
-              {run.name}（{formatDate(run.started_at)}・{STATUS_LABELS[run.status] ?? run.status}）
-            </h3>
-            {run.chat_thread_id && (
-              <p>
-                <Link to={`/chat?thread=${encodeURIComponent(run.chat_thread_id)}&run=${encodeURIComponent(run.id)}`}>
-                  チャットで見る
-                </Link>
-              </p>
-            )}
-            {run.error && <div className="banner error">{run.error}</div>}
-            <Markdown text={runAnswer(run)} />
-            {run.signals && Object.keys(run.signals).length > 0 && <p className="hint">ツールの結果: {JSON.stringify(run.signals)}</p>}
-            {run.issue_url && (
-              <p className="hint">
-                GitHub 通知:{' '}
-                <a href={run.issue_url} target="_blank" rel="noopener noreferrer">
-                  Issue
-                </a>
-              </p>
-            )}
-            {run.notify_error && <p className="error-text">通知エラー: {run.notify_error}</p>}
-            <details>
-              <summary>実行の詳細（ツール・書き込み）</summary>
-              <pre>{(run.events ?? []).map((e) => JSON.stringify(e)).join('\n')}</pre>
-            </details>
-          </div>
-        )}
+        {/* 履歴が増えても結果が押し下げられないように、一覧は高さを決めてスクロールさせ、結果はその横（スマホでは下）に出す */}
+        <div className="runs-layout">
+          <ul className="runs" aria-label="実行履歴の一覧">
+            {runs.map((r) => (
+              <li key={r.id} className={[r.read ? '' : 'unread', run?.id === r.id ? 'selected' : ''].filter(Boolean).join(' ')}>
+                <button className="link" aria-current={run?.id === r.id ? 'true' : undefined} onClick={() => openRun(r.automation_id, r.id)}>
+                  <span className="run-name">{r.name}</span>
+                  <small>
+                    {formatDate(r.started_at)}・{STATUS_LABELS[r.status] ?? r.status}
+                    {r.notified && ' 📣'}
+                  </small>
+                </button>
+              </li>
+            ))}
+            {runs.length === 0 && <li className="hint">まだ実行されていません。</li>}
+          </ul>
+          {!run && runs.length > 0 && <p className="hint run-detail">一覧から実行を選ぶと、結果をここに表示します。</p>}
+          {run && (
+            <div className="run-detail" ref={detailRef}>
+              <h3>
+                {run.name}（{formatDate(run.started_at)}・{STATUS_LABELS[run.status] ?? run.status}）
+              </h3>
+              {run.chat_thread_id && (
+                <p>
+                  <Link to={`/chat?thread=${encodeURIComponent(run.chat_thread_id)}&run=${encodeURIComponent(run.id)}`}>
+                    チャットで見る
+                  </Link>
+                </p>
+              )}
+              {run.error && <div className="banner error">{run.error}</div>}
+              <Markdown text={runAnswer(run)} />
+              {run.signals && Object.keys(run.signals).length > 0 && <p className="hint">ツールの結果: {JSON.stringify(run.signals)}</p>}
+              {run.issue_url && (
+                <p className="hint">
+                  GitHub 通知:{' '}
+                  <a href={run.issue_url} target="_blank" rel="noopener noreferrer">
+                    Issue
+                  </a>
+                </p>
+              )}
+              {run.notify_error && <p className="error-text">通知エラー: {run.notify_error}</p>}
+              <details>
+                <summary>実行の詳細（ツール・書き込み）</summary>
+                <pre>{(run.events ?? []).map((e) => JSON.stringify(e)).join('\n')}</pre>
+              </details>
+            </div>
+          )}
+        </div>
       </section>
     </div>
   )
