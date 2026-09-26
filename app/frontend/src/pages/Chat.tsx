@@ -36,6 +36,9 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   const bottomRef = useRef<HTMLDivElement | null>(null)
   const messagesRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLTextAreaElement | null>(null)
+  const drawerToggleRef = useRef<HTMLButtonElement | null>(null)
+  const drawerCloseRef = useRef<HTMLButtonElement | null>(null)
+  const drawerRef = useRef<HTMLElement | null>(null)
   // Async handlers must see the conversation that is active now, not the one captured when they started.
   const currentIdRef = useRef<string | null>(null)
   const threadIdRef = useRef<string | null>(null)
@@ -282,6 +285,12 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
 
   useLayoutEffect(resizeInput, [input, resizeInput])
 
+  // Every way the drawer closes (close button, picking an entry, a new conversation) hides the focused control,
+  // so focus goes back to the toggle. Closing while focus is elsewhere (e.g. a deep link) leaves it where it is.
+  useLayoutEffect(() => {
+    if (!drawer && drawerRef.current?.contains(document.activeElement)) drawerToggleRef.current?.focus()
+  }, [drawer])
+
   useEffect(() => {
     // Re-wrapping on a width change also changes the number of lines.
     window.addEventListener('resize', resizeInput)
@@ -372,7 +381,14 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
 
   return (
     <div className="chat">
-      <aside className={`conversations ${drawer ? 'open' : ''}`}>
+      <aside id="conversation-list" ref={drawerRef} className={`conversations ${drawer ? 'open' : ''}`}>
+        {/* On a phone the list covers its toggle button, so it can be closed from inside; focus goes back to the toggle. */}
+        <div className="row list-head drawer-head">
+          <h2 className="grow">会話一覧</h2>
+          <button ref={drawerCloseRef} className="button small" onClick={() => setDrawer(false)}>
+            閉じる
+          </button>
+        </div>
         <button className="button primary block" onClick={newConversation}>
           ＋ 新しい会話
         </button>
@@ -424,10 +440,20 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
       </aside>
       <section className="thread">
         <div className="thread-toolbar">
-          <button className="button small mobile-only" onClick={() => setDrawer(!drawer)}>
+          <button
+            ref={drawerToggleRef}
+            className="button small mobile-only"
+            onClick={() => {
+              setDrawer(!drawer)
+              // The opened list covers this button; move focus into it once it is shown.
+              if (!drawer) window.requestAnimationFrame(() => drawerCloseRef.current?.focus())
+            }}
+            aria-expanded={drawer}
+            aria-controls="conversation-list"
+          >
             会話一覧
           </button>
-          <Disclaimer />
+          <Disclaimer short />
         </div>
         <div className="messages" ref={messagesRef}>
           {threadId ? (

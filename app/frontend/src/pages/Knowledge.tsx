@@ -28,6 +28,7 @@ export function KnowledgePage() {
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
   const [uploading, setUploading] = useState<{ current: number; total: number } | null>(null)
+  const [listOpen, setListOpen] = useState(true)
 
   const load = useCallback(async () => setFiles(await api<FileEntry[]>('/api/files')), [])
   useEffect(() => {
@@ -148,57 +149,74 @@ export function KnowledgePage() {
   }
 
   return (
-    <div className="split">
+    <div className={`split${listOpen ? '' : ' list-closed'}`}>
       <aside className="panel">
-        <div className="row wrap">
-          <button className="button small" onClick={newNote}>
-            ＋ ノート
+        <div className="row list-head">
+          <h2 className="grow">ファイル一覧</h2>
+          <button className="button small" aria-expanded={listOpen} aria-controls="file-list" onClick={() => setListOpen(!listOpen)}>
+            {listOpen ? '閉じる' : '開く'}
           </button>
-          <label className="button small">
-            {uploading ? `取り込み中…（${uploading.current}/${uploading.total}）` : '資料を取り込む'}
-            <input
-              type="file"
-              accept=".md,.txt,.pdf"
-              multiple
-              hidden
-              disabled={!!uploading}
-              onChange={(e) => {
-                const files = Array.from(e.currentTarget.files ?? [])
-                // 同じファイルを選び直しても再度取り込めるように、送信前に選択を空にする。
-                e.currentTarget.value = ''
-                upload(files)
-              }}
-            />
-          </label>
-          <a className="button small" href="/api/export.zip">
-            ZIP で書き出し
-          </a>
         </div>
-        {Object.entries(GROUP_LABELS)
-          .filter(([key]) => groups[key]?.length)
-          .map(([key, label]) => (
-            <div key={key} className="file-group">
-              <h3>{label}</h3>
-              <ul>
-                {groups[key].map((f) => (
-                  <li key={f.path} className={f.path === selected ? 'active' : ''}>
-                    <button className="link" onClick={() => open(f.path)}>
-                      {f.path.split('/').slice(1).join('/') || f.path}
-                    </button>
-                    <small>{formatDate(f.modified)}</small>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ))}
-        <p className="hint">
-          資料は複数まとめて選べます。PDF はテキストを抽出して保存します（スキャン画像の PDF は非対応）。原本は保存しません。
-        </p>
+        {/* 取り込みは一覧を閉じても続くので、進み具合は見出しの下に出す */}
+        {!listOpen && uploading && (
+          <p className="hint" role="status">
+            取り込み中…（{uploading.current}/{uploading.total}）
+          </p>
+        )}
+        {/* 閉じても消さずに隠す: 開閉ボタンの aria-controls が指す先を残す */}
+        <div id="file-list" hidden={!listOpen}>
+          <div className="row wrap">
+            <button className="button small" onClick={newNote}>
+              ＋ ノート
+            </button>
+            <label className="button small">
+              {uploading ? `取り込み中…（${uploading.current}/${uploading.total}）` : '資料を取り込む'}
+              <input
+                type="file"
+                accept=".md,.txt,.pdf"
+                multiple
+                hidden
+                disabled={!!uploading}
+                onChange={(e) => {
+                  const files = Array.from(e.currentTarget.files ?? [])
+                  // 同じファイルを選び直しても再度取り込めるように、送信前に選択を空にする。
+                  e.currentTarget.value = ''
+                  upload(files)
+                }}
+              />
+            </label>
+            <a className="button small" href="/api/export.zip">
+              ZIP で書き出し
+            </a>
+          </div>
+          {Object.entries(GROUP_LABELS)
+            .filter(([key]) => groups[key]?.length)
+            .map(([key, label]) => (
+              <div key={key} className="file-group">
+                <h3>{label}</h3>
+                <ul>
+                  {groups[key].map((f) => (
+                    <li key={f.path} className={f.path === selected ? 'active' : ''}>
+                      <button className="link" onClick={() => open(f.path)}>
+                        {f.path.split('/').slice(1).join('/') || f.path}
+                      </button>
+                      <small>{formatDate(f.modified)}</small>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          <p className="hint">
+            資料は複数まとめて選べます。PDF はテキストを抽出して保存します（スキャン画像の PDF は非対応）。原本は保存しません。
+          </p>
+        </div>
       </aside>
       <section className="panel grow">
         {message && <div className="banner ok">{message}</div>}
         {error && <div className="banner error">{error}</div>}
-        {!selected && <p className="hint">左の一覧からファイルを選んでください。</p>}
+        {!selected && (
+          <p className="hint">{listOpen ? '左の一覧からファイルを選んでください。' : 'ファイル一覧を開いて、ファイルを選んでください。'}</p>
+        )}
         {selected && (
           <>
             <div className="row">

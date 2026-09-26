@@ -45,6 +45,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   const [models, setModels] = useState<{ id: string; name: string }[] | null>(null)
   const [runs, setRuns] = useState<RunRecord[]>([])
   const [run, setRun] = useState<RunRecord | null>(null)
+  const [runsOpen, setRunsOpen] = useState(true)
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
   const detailRef = useRef<HTMLDivElement>(null)
@@ -201,10 +202,16 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
       )}
 
       <section className="panel">
-        <h2>実行履歴</h2>
-        {/* 履歴が増えても結果が押し下げられないように、一覧は高さを決めてスクロールさせ、結果はその横（スマホでは下）に出す */}
-        <div className="runs-layout">
-          <ul className="runs" aria-label="実行履歴の一覧">
+        <div className="row list-head">
+          <h2 className="grow">実行履歴</h2>
+          <button className="button small" aria-expanded={runsOpen} aria-controls="run-list" onClick={() => setRunsOpen(!runsOpen)}>
+            {runsOpen ? '一覧を閉じる' : '一覧を開く'}
+          </button>
+        </div>
+        {/* 履歴が増えても結果が押し下げられないように、一覧は高さを決めてスクロールさせ、結果はその横（スマホでは下）に出す。
+            一覧を閉じると結果が幅いっぱいに広がる */}
+        <div className={`runs-layout${runsOpen ? '' : ' list-closed'}`}>
+          <ul id="run-list" className="runs" aria-label="実行履歴の一覧" hidden={!runsOpen}>
             {runs.map((r) => (
               <li key={r.id} className={[r.read ? '' : 'unread', run?.id === r.id ? 'selected' : ''].filter(Boolean).join(' ')}>
                 <button className="link" aria-current={run?.id === r.id ? 'true' : undefined} onClick={() => openRun(r.automation_id, r.id)}>
@@ -218,7 +225,11 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
             ))}
             {runs.length === 0 && <li className="hint">まだ実行されていません。</li>}
           </ul>
-          {!run && runs.length > 0 && <p className="hint run-detail">一覧から実行を選ぶと、結果をここに表示します。</p>}
+          {!run && runs.length > 0 && (
+            <p className="hint run-detail">
+              {runsOpen ? '一覧から実行を選ぶと、結果をここに表示します。' : '一覧を開いて実行を選ぶと、結果をここに表示します。'}
+            </p>
+          )}
           {run && (
             <div className="run-detail" ref={detailRef}>
               <h3>
