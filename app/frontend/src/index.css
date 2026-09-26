@@ -230,10 +230,20 @@ details.collapse > summary:focus-visible { outline: 2px solid var(--md-primary);
 }
 .grid-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0.75rem; margin-top: 0.75rem; align-items: end; }
 .editor-panel { display: flex; flex-direction: column; gap: 0.75rem; }
-.runs { list-style: none; padding: 0; margin: 0; }
-.runs li { padding: 0.5rem 0; border-bottom: 1px solid var(--md-outline-variant); }
-.runs li.unread { font-weight: 700; }
-.run-detail { margin-top: 1rem; border-top: 1px solid var(--md-outline-variant); padding-top: 0.5rem; }
+/* 実行履歴: 一覧は高さを決めてスクロールし、選んだ実行の結果は右側に出す */
+.runs-layout { display: grid; grid-template-columns: minmax(220px, 320px) minmax(0, 1fr); gap: 1rem; align-items: start; }
+.runs { list-style: none; padding: 0; margin: 0; max-height: 28rem; overflow-y: auto; border: 1px solid var(--md-outline-variant); border-radius: var(--md-shape-m); }
+.runs li { border-bottom: 1px solid var(--md-outline-variant); }
+.runs li:last-child { border-bottom: none; }
+.runs li.hint { padding: 0.75rem; }
+.runs li .link { display: flex; flex-direction: column; gap: 0.125rem; width: 100%; padding: 0.5rem 0.75rem; border-radius: 0; font-weight: 400; color: var(--text); }
+.runs li .link:hover { text-decoration: none; background: var(--md-surface-container); }
+.runs li .link small { color: var(--muted); }
+.runs li.unread .run-name { font-weight: 700; }
+.runs li.selected .link { background: var(--md-secondary-container); }
+.run-name { overflow-wrap: anywhere; }
+.run-detail { min-width: 0; margin: 0; }
+.run-detail > h3:first-child { margin-top: 0; }
 
 .split { display: flex; gap: 1rem; height: 100%; }
 .split > aside { width: 300px; overflow: auto; }
@@ -312,6 +322,8 @@ details.collapse > summary:focus-visible { outline: 2px solid var(--md-primary);
   .split { flex-direction: column; height: auto; }
   .split > aside { width: 100%; }
   .msg.user { max-width: 95%; }
+  .runs-layout { grid-template-columns: minmax(0, 1fr); }
+  .runs { max-height: 16rem; }
   /* 銘柄名は長いので、スマホでは折り返す（keep-all のままだと 1 行に伸びて列幅が広がる） */
   .table-wrap th.name, .table-wrap td.name { word-break: normal; overflow-wrap: anywhere; min-width: 6rem; }
 }
