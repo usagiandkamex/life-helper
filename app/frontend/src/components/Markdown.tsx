@@ -27,7 +27,7 @@ export function Markdown({ text }: { text: string }) {
   )
 }
 
-// short はチャットの上の欄用（常に画面に出るので、スマホでも 1〜2 行に収まる長さにする）。
+// short is for the chat toolbar: it is always on screen, so it has to fit in one or two lines on a phone.
 export function Disclaimer({ short = false }: { short?: boolean }) {
   return (
     <p className="disclaimer">

@@ -36,6 +36,8 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   const bottomRef = useRef<HTMLDivElement | null>(null)
   const messagesRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLTextAreaElement | null>(null)
+  const drawerToggleRef = useRef<HTMLButtonElement | null>(null)
+  const drawerCloseRef = useRef<HTMLButtonElement | null>(null)
   // Async handlers must see the conversation that is active now, not the one captured when they started.
   const currentIdRef = useRef<string | null>(null)
   const threadIdRef = useRef<string | null>(null)
@@ -373,10 +375,17 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   return (
     <div className="chat">
       <aside id="conversation-list" className={`conversations ${drawer ? 'open' : ''}`}>
-        {/* スマホでは一覧が「会話一覧」ボタンに重なるので、一覧の中から閉じられるようにする */}
+        {/* On a phone the list covers its toggle button, so it can be closed from inside; focus goes back to the toggle. */}
         <div className="row list-head drawer-head">
           <h2 className="grow">会話一覧</h2>
-          <button className="button small" onClick={() => setDrawer(false)}>
+          <button
+            ref={drawerCloseRef}
+            className="button small"
+            onClick={() => {
+              setDrawer(false)
+              drawerToggleRef.current?.focus()
+            }}
+          >
             閉じる
           </button>
         </div>
@@ -432,8 +441,13 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
       <section className="thread">
         <div className="thread-toolbar">
           <button
+            ref={drawerToggleRef}
             className="button small mobile-only"
-            onClick={() => setDrawer(!drawer)}
+            onClick={() => {
+              setDrawer(!drawer)
+              // The opened list covers this button; move focus into it once it is shown.
+              if (!drawer) window.requestAnimationFrame(() => drawerCloseRef.current?.focus())
+            }}
             aria-expanded={drawer}
             aria-controls="conversation-list"
           >
