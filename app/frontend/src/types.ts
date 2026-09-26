@@ -29,6 +29,11 @@ export type TurnEvent =
   | { type: 'error'; message: string; code?: string }
   | { type: 'usage'; model: string }
   | { type: 'follow_up' }
+  // A message sent while the chat answered: 'now' went into the answer in progress, 'later' waited its turn.
+  | { type: 'user'; id: string; text: string; mode: 'now' | 'later' }
+  | { type: 'queued'; id: string; text: string }
+  // 'stopped': the answers ended (中断, timeout, error) before the message was sent.
+  | { type: 'unqueued'; id: string; reason: 'cancelled' | 'stopped' }
   | { type: 'done' }
   | { type: 'end' }
 

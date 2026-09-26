@@ -31,18 +31,20 @@ export type Item =
 // turnId is the chat turn the events belong to; approval cards post their decision to it.
 export function applyEvent(items: Item[], ev: TurnEvent, turnId = ''): Item[] {
   const next = [...items]
-  const last = next[next.length - 1]
+  // Not always the last item: a message sent with 「すぐに送信」 can appear while the answer is still streaming.
+  const streaming = next.findLastIndex((i) => i.kind === 'assistant' && i.streaming)
+  const current = streaming >= 0 ? (next[streaming] as Extract<Item, { kind: 'assistant' }>) : null
   const closeStreaming = () => {
-    if (last?.kind === 'assistant' && last.streaming) next[next.length - 1] = { ...last, streaming: false }
+    if (current) next[streaming] = { ...current, streaming: false }
   }
   const approvalIndex = (id: string) => next.findIndex((i) => i.kind === 'approval' && i.id === id)
   switch (ev.type) {
     case 'delta':
-      if (last?.kind === 'assistant' && last.streaming) next[next.length - 1] = { ...last, text: last.text + ev.text }
+      if (current) next[streaming] = { ...current, text: current.text + ev.text }
       else next.push({ kind: 'assistant', text: ev.text, streaming: true })
       return next
     case 'message':
-      if (last?.kind === 'assistant' && last.streaming) next[next.length - 1] = { kind: 'assistant', text: ev.content }
+      if (current) next[streaming] = { kind: 'assistant', text: ev.content }
       else if (ev.content) next.push({ kind: 'assistant', text: ev.content })
       return next
     case 'tool_start':
@@ -90,6 +92,11 @@ export function applyEvent(items: Item[], ev: TurnEvent, turnId = ''): Item[] {
       // Only in automation runs: the answers below replied to a second request, not to the instruction.
       closeStreaming()
       next.push({ kind: 'note', text: '結果の報告を依頼し直しました' })
+      return next
+    case 'user':
+      // A queued message starts a new answer; one sent with 「すぐに送信」 joins the answer that is still streaming.
+      if (ev.mode !== 'now') closeStreaming()
+      next.push({ kind: 'user', text: ev.text })
       return next
     case 'done':
     case 'end':
