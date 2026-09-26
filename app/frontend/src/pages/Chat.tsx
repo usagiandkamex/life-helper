@@ -61,6 +61,9 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   const [items, setItems] = useState<Item[]>([])
   const [input, setInput] = useState('')
   const [attachments, setAttachments] = useState<PendingAttachment[]>([])
+  // Files still being read: counted against the limits, and sending waits for them.
+  const [reading, setReading] = useState(0)
+  const readingRef = useRef({ count: 0, bytes: 0 })
   const [sending, setSending] = useState(false)
   const [models, setModels] = useState<{ id: string; name: string }[]>([])
   const [model, setModel] = useState('auto')
@@ -340,8 +343,9 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   const addAttachments = async (files: File[]) => {
     const generation = generationRef.current
     const problems: string[] = []
-    let count = attachments.length
-    let bytes = attachments.reduce((sum, a) => sum + a.size, 0)
+    const pending = readingRef.current
+    let count = attachments.length + pending.count
+    let bytes = attachments.reduce((sum, a) => sum + a.size, 0) + pending.bytes
     const accepted = files.filter((f) => {
       const name = f.name || '貼り付けたデータ'
       const allowed = IMAGE_TYPES.includes(f.type) || FILE_SUFFIXES.some((s) => f.name.toLowerCase().endsWith(s))
@@ -357,19 +361,28 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
       return false
     })
     if (problems.length) setError([...new Set(problems)].join(' / '))
+    if (accepted.length === 0) return
+    const reserved = { count: accepted.length, bytes: accepted.reduce((sum, f) => sum + f.size, 0) }
+    pending.count += reserved.count
+    pending.bytes += reserved.bytes
+    setReading((n) => n + 1)
     try {
       const read = await Promise.all(accepted.map(readAttachment))
       // Switched to another conversation while reading: the files belong to the one they were added in.
       if (generationRef.current === generation) setAttachments((cur) => [...cur, ...read].slice(0, MAX_ATTACHMENTS))
     } catch (e) {
       if (generationRef.current === generation) setError((e as Error).message)
+    } finally {
+      pending.count -= reserved.count
+      pending.bytes -= reserved.bytes
+      setReading((n) => n - 1)
     }
   }
 
   const send = async (confirmSensitive = false) => {
     const prompt = input.trim()
     const files = attachments
-    if ((!prompt && files.length === 0) || turnId || sending) return
+    if ((!prompt && files.length === 0) || turnId || sending || reading) return
     setError('')
     setSending(true)
     try {
@@ -387,7 +400,10 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
         generation = generationRef.current
       }
       try {
-        const res = await api<{ turn_id: string; message: { content: string; attachments: AttachmentInfo[] } }>(
+        const res = await api<{
+          turn_id: string
+          message: { content: string; attachments: (AttachmentInfo & { index: number })[] }
+        }>(
           `/api/conversations/${id}/turns`,
           {
             method: 'POST',
@@ -402,9 +418,11 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
         loadConversations()
         // Opened something else meanwhile: the turn keeps running and is followed when its conversation is opened.
         if (generationRef.current !== generation) return
-        // The server lists the images first, in the order they were attached; they keep their thumbnails here.
-        const thumbnails = files.filter((a) => a.image).map((a) => a.url)
-        const shown: ShownAttachment[] = res.message.attachments.map((a) => (a.kind === 'image' ? { ...a, url: thumbnails.shift() } : a))
+        // The server orders them its own way (images first) and gives each one's position in the request.
+        const shown: ShownAttachment[] = res.message.attachments.map(({ index, ...a }) => ({
+          ...a,
+          url: a.kind === 'image' ? files[index]?.url : undefined,
+        }))
         setItems((prev) => [...prev, { kind: 'user', text: res.message.content, attachments: shown }])
         setInput('')
         setAttachments((cur) => cur.filter((a) => !files.includes(a)))
@@ -628,8 +646,8 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
                   中断
                 </button>
               ) : (
-                <button type="submit" className="button primary" disabled={(!input.trim() && attachments.length === 0) || sending}>
-                  {sending ? '送信中…' : '送信'}
+                <button type="submit" className="button primary" disabled={(!input.trim() && attachments.length === 0) || sending || reading > 0}>
+                  {sending ? '送信中…' : reading ? '読み込み中…' : '送信'}
                 </button>
               )}
             </div>

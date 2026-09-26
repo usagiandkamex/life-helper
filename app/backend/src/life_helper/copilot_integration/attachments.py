@@ -44,8 +44,9 @@ class AttachmentError(ValueError):
 class PreparedAttachments:
     blobs: list[dict] = field(default_factory=list)  # SDK blob attachments (images)
     text: str = ""  # <attached_file> blocks appended to the prompt
-    raw_text: str = ""  # the extracted text before escaping, for the sensitive-data check
-    items: list[dict] = field(default_factory=list)  # {name, kind, truncated?} shown in the chat, images first
+    raw_text: str = ""  # the file names and extracted text before escaping, for the sensitive-data check
+    # {name, kind, index, truncated?} shown in the chat, images first; index: the position in the request
+    items: list[dict] = field(default_factory=list)
 
 
 def image_type(data: bytes) -> str | None:
@@ -74,8 +75,10 @@ def prepare_attachments(items: list[tuple[str, str]], *, max_bytes: int) -> Prep
     raw: list[str] = []
     blocks: list[str] = []
     budget, total = MAX_TEXT_CHARS, 0
-    for raw_name, encoded in items:
+    for index, (raw_name, encoded) in enumerate(items):
         name = normalize_filename(raw_name)
+        # The name goes to Copilot too (as the image's name or the block's attribute).
+        raw += [raw_name, name]
         try:
             data = base64.b64decode(encoded, validate=True)
         except (binascii.Error, ValueError) as e:
@@ -89,7 +92,7 @@ def prepare_attachments(items: list[tuple[str, str]], *, max_bytes: int) -> Prep
         suffix = Path(name).suffix
         if mime:
             result.blobs.append({"type": "blob", "data": encoded, "mimeType": mime, "displayName": name})
-            result.items.append({"name": name, "kind": "image"})
+            result.items.append({"name": name, "kind": "image", "index": index})
             continue
         if suffix in IMAGE_SUFFIXES:
             raise AttachmentError(400, f"{name} は画像として読み込めません（PNG・JPEG・GIF・WebP に対応しています）")
@@ -109,9 +112,10 @@ def prepare_attachments(items: list[tuple[str, str]], *, max_bytes: int) -> Prep
         body = "\n".join(part for part in (html.escape(text, quote=False), TRUNCATED_NOTE if cut else "") if part)
         truncated = ' truncated="true"' if cut else ""
         blocks.append(f'\n\n<attached_file name="{html.escape(name)}"{truncated}>\n{body}\n</attached_file>')
-        files.append({"name": name, "kind": "file", **({"truncated": True} if cut else {})})
+        files.append({"name": name, "kind": "file", "index": index, **({"truncated": True} if cut else {})})
     result.text = "".join(blocks)
-    result.raw_text = "\n".join(raw)
+    # Blank lines between the parts: a number split across two of them is not taken as one.
+    result.raw_text = "\n\n".join(raw)
     result.items += files
     return result
 

@@ -212,9 +212,9 @@ async def start_turn(
         )
     except AttachmentError as e:
         raise HTTPException(e.status_code, str(e)) from e
-    kinds = detect_sensitive(f"{body.prompt}\n{prepared.raw_text}")
+    kinds = detect_sensitive(f"{body.prompt}\n\n{prepared.raw_text}")
     if kinds and not body.confirm_sensitive:
-        where = "（添付ファイルを含む）" if prepared.raw_text else ""
+        where = "（添付ファイルを含む）" if detect_sensitive(prepared.raw_text) else ""
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             {
@@ -223,9 +223,11 @@ async def start_turn(
                 "message": f"機微情報の可能性があります{where}: " + "、".join(SENSITIVE_LABELS[k] for k in kinds),
             },
         )
+    # Decided once: the model checked for images is the one the turn uses.
+    model = body.model or conv.model
     if prepared.blobs:
-        await _reject_images_without_vision(ctx, body.model or conv.model)
-    return await _start_turn(ctx, conversation_id, body.prompt, body.model, prepared)
+        await _reject_images_without_vision(ctx, model)
+    return await _start_turn(ctx, conversation_id, body.prompt, model, prepared)
 
 
 @router.get("/turns/{turn_id}/events")

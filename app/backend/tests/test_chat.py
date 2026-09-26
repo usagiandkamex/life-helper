@@ -617,7 +617,10 @@ def test_turn_sends_images_as_blobs_and_files_as_escaped_text(client, ctx):
     body = resp.json()
     assert body["message"] == {
         "content": "これを見て",
-        "attachments": [{"name": "clip", "kind": "image"}, {"name": "明細_9月.csv", "kind": "file"}],
+        "attachments": [
+            {"name": "clip", "kind": "image", "index": 0},
+            {"name": "明細_9月.csv", "kind": "file", "index": 1},
+        ],
     }
     wait_turn_done(ctx, body["turn_id"])
     assert session.attachments == [[{"type": "blob", "data": b64(PNG), "mimeType": "image/png", "displayName": "clip"}]]
@@ -686,6 +689,28 @@ def test_sensitive_data_in_an_attachment_needs_confirmation(client, ctx):
     assert resp.status_code == 422 and detail["code"] == "sensitive_data" and "添付ファイル" in detail["message"]
     _, ok = start_with_attachments(client, h, files, prompt="確認して", confirm_sensitive=True)
     assert ok.status_code == 200
+    # The name is sent to Copilot as well.
+    named = [{"name": "4111 1111 1111 1111.png", "data": b64(PNG)}]
+    _, resp = start_with_attachments(client, h, named, prompt="見て")
+    assert resp.status_code == 422 and "添付ファイル" in resp.json()["detail"]["message"]
+    # A number typed at the end of the message does not run into the attached text.
+    tail = [{"name": "a.txt", "data": b64(b"1111 1111")}]
+    _, resp = start_with_attachments(client, h, tail, prompt="4111 1111")
+    assert resp.status_code == 200
+
+
+def test_attachment_items_keep_their_position_in_the_request():
+    from life_helper.copilot_integration.attachments import prepare_attachments
+
+    # The bytes decide what is an image, so the browser cannot tell the order by itself.
+    prepared = prepare_attachments(
+        [("memo.txt", b64(PNG)), ("a.csv", b64(b"x,y")), ("b.png", b64(PNG))], max_bytes=10**6
+    )
+    assert [(i["name"], i["kind"], i["index"]) for i in prepared.items] == [
+        ("memo.txt", "image", 0),
+        ("b.png", "image", 2),
+        ("a.csv", "file", 1),
+    ]
 
 
 def test_images_are_rejected_for_a_model_without_vision(client, ctx):
@@ -699,6 +724,10 @@ def test_images_are_rejected_for_a_model_without_vision(client, ctx):
     fake.list_models = list_models
     image = [{"name": "clip.png", "data": b64(PNG)}]
     _, resp = start_with_attachments(client, h, image, model="text-only")
+    assert resp.status_code == 400 and resp.json()["detail"]["code"] == "no_vision"
+    # Without a model in the request, the conversation's model is the one checked.
+    conv = client.post("/api/conversations", json={"model": "text-only"}, headers=h).json()
+    resp = client.post(f"/api/conversations/{conv['id']}/turns", json={"attachments": image}, headers=h)
     assert resp.status_code == 400 and resp.json()["detail"]["code"] == "no_vision"
     # Text files work with any model; an unknown model (such as auto) is left to the runtime.
     for model, files in (("text-only", [{"name": "a.txt", "data": b64(b"x")}]), ("seeing", image), ("auto", image)):
@@ -720,12 +749,12 @@ def test_attached_text_is_limited(monkeypatch):
     assert "a" * 20 in prepared.text and "b" * 10 + "\n" + mod.TRUNCATED_NOTE in prepared.text
     assert "b" * 11 not in prepared.text
     _, files = mod.split_attached_files("見て" + prepared.text)
-    assert files == prepared.items
+    assert files == [{k: v for k, v in item.items() if k != "index"} for item in prepared.items]
 
     monkeypatch.setattr(mod, "MAX_TEXT_CHARS", 10_000)
     pdf = mod.prepare_attachments([("d.pdf", b64(pdf_bytes(3)))], max_bytes=10**6)
     # Page by page up to the page limit; a scanned page says it has no text.
-    assert pdf.items == [{"name": "d.pdf", "kind": "file", "truncated": True}]
+    assert pdf.items == [{"name": "d.pdf", "kind": "file", "index": 0, "truncated": True}]
     assert "## ページ 2" in pdf.text and "## ページ 3" not in pdf.text and "テキストを抽出できませんでした" in pdf.text
 
 
@@ -735,7 +764,8 @@ def test_attached_text_encodings():
     for data in ("家計簿".encode(), "家計簿".encode("utf-8-sig"), "家計簿".encode("cp932"), "家計簿".encode("utf-16")):
         prepared = prepare_attachments([("a.tsv", b64(data))], max_bytes=10**6)
         assert (
-            prepared.raw_text == "家計簿" and '<attached_file name="a.tsv">\n家計簿\n</attached_file>' in prepared.text
+            prepared.raw_text.endswith("\n\n家計簿")
+            and '<attached_file name="a.tsv">\n家計簿\n</attached_file>' in prepared.text
         )
 
 
