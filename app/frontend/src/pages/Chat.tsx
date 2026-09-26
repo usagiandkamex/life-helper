@@ -38,6 +38,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   const inputRef = useRef<HTMLTextAreaElement | null>(null)
   const drawerToggleRef = useRef<HTMLButtonElement | null>(null)
   const drawerCloseRef = useRef<HTMLButtonElement | null>(null)
+  const drawerRef = useRef<HTMLElement | null>(null)
   // Async handlers must see the conversation that is active now, not the one captured when they started.
   const currentIdRef = useRef<string | null>(null)
   const threadIdRef = useRef<string | null>(null)
@@ -284,6 +285,12 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
 
   useLayoutEffect(resizeInput, [input, resizeInput])
 
+  // Every way the drawer closes (close button, picking an entry, a new conversation) hides the focused control,
+  // so focus goes back to the toggle. Closing while focus is elsewhere (e.g. a deep link) leaves it where it is.
+  useLayoutEffect(() => {
+    if (!drawer && drawerRef.current?.contains(document.activeElement)) drawerToggleRef.current?.focus()
+  }, [drawer])
+
   useEffect(() => {
     // Re-wrapping on a width change also changes the number of lines.
     window.addEventListener('resize', resizeInput)
@@ -374,18 +381,11 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
 
   return (
     <div className="chat">
-      <aside id="conversation-list" className={`conversations ${drawer ? 'open' : ''}`}>
+      <aside id="conversation-list" ref={drawerRef} className={`conversations ${drawer ? 'open' : ''}`}>
         {/* On a phone the list covers its toggle button, so it can be closed from inside; focus goes back to the toggle. */}
         <div className="row list-head drawer-head">
           <h2 className="grow">会話一覧</h2>
-          <button
-            ref={drawerCloseRef}
-            className="button small"
-            onClick={() => {
-              setDrawer(false)
-              drawerToggleRef.current?.focus()
-            }}
-          >
+          <button ref={drawerCloseRef} className="button small" onClick={() => setDrawer(false)}>
             閉じる
           </button>
         </div>
