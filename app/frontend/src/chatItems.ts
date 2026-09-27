@@ -1,7 +1,21 @@
-import type { ApprovalStatus, AttachmentInfo, ChartData, FollowUpMode, HistoryMessage, Screenshot, TurnEvent } from './types'
+import type {
+  ApprovalStatus,
+  AttachmentInfo,
+  ChartData,
+  FollowUpMode,
+  HistoryMessage,
+  Screenshot,
+  SentAttachment,
+  TurnEvent,
+} from './types'
 
 // url: a thumbnail of an image attached in this browser session (data: URL; CSP allows no blob: images).
 export type ShownAttachment = AttachmentInfo & { url?: string }
+
+// thumbnails: the images' data URLs by their place among the files sent (missing ones are shown by name).
+export function shownAttachments(items: SentAttachment[], thumbnails: (string | undefined)[]): ShownAttachment[] {
+  return items.map(({ index, ...a }) => ({ ...a, url: a.kind === 'image' ? thumbnails[index] : undefined }))
+}
 
 export type ApprovalItem = {
   kind: 'approval'
@@ -32,7 +46,13 @@ export type Item =
   | { kind: 'note'; text: string }
 
 // turnId is the chat turn the events belong to; approval cards post their decision to it.
-export function applyEvent(items: Item[], ev: TurnEvent, turnId = ''): Item[] {
+// thumbnails: those of the files sent with a 'user' event's message, when this browser sent them.
+export function applyEvent(
+  items: Item[],
+  ev: TurnEvent,
+  turnId = '',
+  thumbnails: (string | undefined)[] = [],
+): Item[] {
   const next = [...items]
   // Not always the last item: a message sent with 「すぐに送信」 can appear while the answer is still streaming.
   const streaming = next.findLastIndex((i) => i.kind === 'assistant' && i.streaming)
@@ -99,7 +119,11 @@ export function applyEvent(items: Item[], ev: TurnEvent, turnId = ''): Item[] {
     case 'user':
       // A queued message starts a new answer; one sent with 「すぐに送信」 joins the answer that is still streaming.
       if (ev.mode !== 'now') closeStreaming()
-      next.push({ kind: 'user', text: ev.text })
+      next.push({
+        kind: 'user',
+        text: ev.text,
+        attachments: ev.attachments && shownAttachments(ev.attachments, thumbnails),
+      })
       return next
     case 'done':
     case 'end':
@@ -121,12 +145,14 @@ export function fromHistory(messages: HistoryMessage[]): Item[] {
 }
 
 // A message sent while the chat answers that Copilot has not taken yet; it is shown above the composer.
-export type WaitingMessage = { id: string; text: string; mode: FollowUpMode }
+export type WaitingMessage = { id: string; text: string; mode: FollowUpMode; attachments?: AttachmentInfo[] }
 
 export function applyWaitingEvent(waiting: WaitingMessage[], ev: TurnEvent): WaitingMessage[] {
   switch (ev.type) {
     case 'queued':
-      return waiting.some((m) => m.id === ev.id) ? waiting : [...waiting, { id: ev.id, text: ev.text, mode: ev.mode }]
+      return waiting.some((m) => m.id === ev.id)
+        ? waiting
+        : [...waiting, { id: ev.id, text: ev.text, mode: ev.mode, attachments: ev.attachments }]
     case 'user':
     case 'unqueued':
       return waiting.some((m) => m.id === ev.id) ? waiting.filter((m) => m.id !== ev.id) : waiting

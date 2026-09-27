@@ -2,19 +2,26 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { api, ApiError, formatDate, json } from '../api'
 import { quoteDraft } from '../automationRuns'
-import { applyEvent, applyWaitingEvent, fromHistory, type Item, type ShownAttachment, type WaitingMessage } from '../chatItems'
+import {
+  applyEvent,
+  applyWaitingEvent,
+  fromHistory,
+  shownAttachments,
+  type Item,
+  type WaitingMessage,
+} from '../chatItems'
 import { AttachmentList } from '../components/AttachmentList'
 import { AutomationThreadView } from '../components/AutomationThread'
 import { Disclaimer } from '../components/Markdown'
 import { MessageItem } from '../components/MessageItem'
 import type {
-  AttachmentInfo,
   AutomationThread,
   AutomationThreadDetail,
   Conversation,
   FollowUpMode,
   HistoryMessage,
   RunRecord,
+  SentAttachment,
   TurnEvent,
   UnsentMessage,
 } from '../types'
@@ -30,6 +37,19 @@ const FILE_SUFFIXES = ['.txt', '.md', '.csv', '.tsv', '.json', '.pdf']
 const ATTACH_ACCEPT = [...IMAGE_TYPES, ...FILE_SUFFIXES].join(',')
 
 type PendingAttachment = { name: string; image: boolean; size: number; data: string; url?: string }
+
+// Files sent with a message while the chat answered, kept until its turn ends: they give the message its thumbnails
+// when Copilot takes it, and go back to the composer if Copilot never does.
+type SentFiles = { conversationId: string; turnId: string; files: PendingAttachment[] }
+
+// Files put back into the composer are not checked when they come back, so sending checks the limits once more.
+function attachmentProblem(files: PendingAttachment[]): string {
+  if (files.length > MAX_ATTACHMENTS)
+    return `添付できるのは ${MAX_ATTACHMENTS} 件までです。${files.length - MAX_ATTACHMENTS} 件外してから送信してください`
+  if (files.reduce((sum, a) => sum + a.size, 0) > MAX_ATTACHMENT_BYTES)
+    return '添付ファイルは合計 10 MB までです。いくつか外してから送信してください'
+  return ''
+}
 
 function readAttachment(file: File): Promise<PendingAttachment> {
   const image = IMAGE_TYPES.includes(file.type)
@@ -72,6 +92,8 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   const [turnId, setTurnId] = useState<string | null>(null)
   // Messages sent while the chat answers that Copilot has not taken yet.
   const [waiting, setWaiting] = useState<WaitingMessage[]>([])
+  // The kind of message being sent while the chat answers, until the server has it.
+  const [followUpSending, setFollowUpSending] = useState<FollowUpMode | null>(null)
   // From 中断 until the turn has ended: nothing more can be sent to it.
   const [stopping, setStopping] = useState(false)
   const [drawer, setDrawer] = useState(false)
@@ -95,6 +117,8 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   const scrollTargetRef = useRef<string | null>(null)
   // Unsent messages already put back into the composer: both the turn's end and the conversation report them.
   const restoredRef = useRef(new Set<string>())
+  // By message id. Not across reloads: a message whose files are gone comes back without them.
+  const sentFilesRef = useRef(new Map<string, SentFiles>())
   // A message sent just as the answer ended starts the next turn, which is followed once the current one has ended.
   const nextTurnRef = useRef<(() => void) | null>(null)
 
@@ -122,17 +146,27 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
     if (request === threadsRequestRef.current) setThreads(data)
   }, [])
 
-  // Messages the turn could not send go back to the composer, so they can be edited and sent again.
-  const restoreUnsent = useCallback((unsent: UnsentMessage[] | undefined) => {
+  // Messages the turn could not send go back to the composer, so they can be edited and sent again; their files too,
+  // when this page still has them. finished: the sent files whose turn has ended, which are no longer needed.
+  const restoreUnsent = useCallback((unsent: UnsentMessage[] | undefined, finished: (sent: SentFiles) => boolean) => {
     const texts: string[] = []
+    const files: PendingAttachment[] = []
+    let lost = 0
     for (const m of unsent ?? []) {
       if (restoredRef.current.has(m.id)) continue
       restoredRef.current.add(m.id)
       texts.push(m.text)
+      const sent = sentFilesRef.current.get(m.id)
+      if (sent) files.push(...sent.files)
+      else lost += m.attachments?.length ?? 0
     }
+    for (const [id, sent] of sentFilesRef.current) if (finished(sent)) sentFilesRef.current.delete(id)
     if (texts.length === 0) return
     setInput((cur) => [...texts, cur.trim()].filter(Boolean).join('\n\n'))
-    setItems((prev) => [...prev, { kind: 'note', text: `送信できなかったメッセージ（${texts.length} 件）を入力欄に戻しました。` }])
+    if (files.length) setAttachments((cur) => [...files, ...cur])
+    const note = `送信できなかったメッセージ（${texts.length} 件）を入力欄に戻しました。`
+    const lostNote = lost ? `添付 ${lost} 件は戻せなかったため、もう一度添付してください。` : ''
+    setItems((prev) => [...prev, { kind: 'note', text: note + lostNote }])
   }, [])
 
   const attach = useCallback(
@@ -156,11 +190,13 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
       source.onmessage = (msg) => {
         if (sourceRef.current !== source) return // another conversation was opened meanwhile
         const ev = JSON.parse(msg.data) as TurnEvent
-        setItems((prev) => applyEvent(prev, ev, id))
+        // A message sent with files from here shows their thumbnails (from the history, only their names).
+        const thumbnails = ev.type === 'user' ? sentFilesRef.current.get(ev.id)?.files.map((f) => f.url) : undefined
+        setItems((prev) => applyEvent(prev, ev, id, thumbnails))
         setWaiting((prev) => applyWaitingEvent(prev, ev))
         if (ev.type === 'end') {
           source.close()
-          restoreUnsent(ev.unsent)
+          restoreUnsent(ev.unsent, (sent) => sent.turnId === id)
           ended()
         }
       }
@@ -193,7 +229,8 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
         if (generationRef.current !== generation) return // a slower answer must not replace what was opened since
         setItems(fromHistory(data.messages))
         if (data.busy && data.turn_id) attach(data.turn_id)
-        else restoreUnsent(data.unsent) // the turn ended while this conversation was not followed
+        // The turn ended while this conversation was not followed.
+        else restoreUnsent(data.unsent, (sent) => sent.conversationId === id)
       } catch (e) {
         if (generationRef.current === generation) setError((e as Error).message)
       }
@@ -416,7 +453,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
     try {
       const read = await Promise.all(accepted.map(readAttachment))
       // Switched to another conversation while reading: the files belong to the one they were added in.
-      if (generationRef.current === generation) setAttachments((cur) => [...cur, ...read].slice(0, MAX_ATTACHMENTS))
+      if (generationRef.current === generation) setAttachments((cur) => [...cur, ...read])
     } catch (e) {
       if (generationRef.current === generation) setError((e as Error).message)
     } finally {
@@ -430,7 +467,12 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
     const draft = input
     const prompt = input.trim()
     const files = attachments
-    if ((!prompt && files.length === 0) || turnId || sending || reading) return
+    if ((!prompt && files.length === 0) || turnId || sending || reading || followUpSending) return
+    const problem = attachmentProblem(files)
+    if (problem) {
+      setError(problem)
+      return
+    }
     setError('')
     setSending(true)
     try {
@@ -450,7 +492,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
       try {
         const res = await api<{
           turn_id: string
-          message: { content: string; attachments: (AttachmentInfo & { index: number })[] }
+          message: { content: string; attachments: SentAttachment[] }
         }>(
           `/api/conversations/${id}/turns`,
           {
@@ -466,11 +508,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
         loadConversations()
         // Opened something else meanwhile: the turn keeps running and is followed when its conversation is opened.
         if (generationRef.current !== generation) return
-        // The server orders them its own way (images first) and gives each one's position in the request.
-        const shown: ShownAttachment[] = res.message.attachments.map(({ index, ...a }) => ({
-          ...a,
-          url: a.kind === 'image' ? files[index]?.url : undefined,
-        }))
+        const shown = shownAttachments(res.message.attachments, files.map((a) => a.url))
         setItems((prev) => [...prev, { kind: 'user', text: res.message.content, attachments: shown }])
         setInput((cur) => (cur === draft ? '' : cur))
         setAttachments((cur) => cur.filter((a) => !files.includes(a)))
@@ -489,29 +527,57 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
     }
   }
 
-  // While the chat answers: 'now' joins the answer in progress, 'later' waits until it is finished. Such a message is
-  // text only: attachments stay in the composer until the answer is finished.
-  const followUpBlocked = stopping || attachments.length > 0 || reading > 0
-  const sendFollowUp = async (mode: FollowUpMode, confirmSensitive = false, prompt = input.trim()) => {
+  // While the chat answers: 'now' joins the answer in progress, 'later' waits until it is finished.
+  const followUpBlocked = stopping || reading > 0 || followUpSending !== null
+  const sendFollowUp = async (
+    mode: FollowUpMode,
+    confirmSensitive = false,
+    prompt = input.trim(),
+    files = attachments,
+  ) => {
     const id = currentIdRef.current
-    if (!prompt || !id || !turnId || followUpBlocked) return
+    if ((!prompt && files.length === 0) || !id || !turnId || followUpBlocked) return
+    const problem = attachmentProblem(files)
+    if (problem) {
+      setError(problem)
+      return
+    }
     setError('')
-    // Cleared at once so that the next message can be typed meanwhile; the text comes back if it cannot be sent.
+    // The text is cleared at once so that the next message can be typed meanwhile, and comes back if it cannot be
+    // sent; the files stay in the composer until the server has them.
     setInput((cur) => (cur.trim() === prompt ? '' : cur))
     const restore = () => setInput((cur) => [prompt, cur.trim()].filter(Boolean).join('\n\n'))
     const generation = generationRef.current
+    setFollowUpSending(mode)
     try {
-      const res = await api<{ turn_id: string; message_id?: string }>(`/api/conversations/${id}/turns`, {
+      // message: when the answer ended meanwhile and the message started a new turn, as for send().
+      const res = await api<{
+        turn_id: string
+        message_id?: string
+        message?: { content: string; attachments: SentAttachment[] }
+      }>(`/api/conversations/${id}/turns`, {
         method: 'POST',
-        body: json({ prompt, model, confirm_sensitive: confirmSensitive, mode }),
+        body: json({
+          prompt,
+          model,
+          confirm_sensitive: confirmSensitive,
+          mode,
+          attachments: files.map((a) => ({ name: a.name, data: a.data })),
+        }),
       })
+      // Even if another conversation was opened meanwhile: the files come back with the message if it is not sent.
+      if (res.message_id && files.length)
+        sentFilesRef.current.set(res.message_id, { conversationId: id, turnId: res.turn_id, files })
       if (generationRef.current !== generation) return
+      setAttachments((cur) => cur.filter((a) => !files.includes(a)))
       if (res.message_id) return // listed above the composer until Copilot takes it
       // The answer ended meanwhile, so the message started a new turn; its events follow those of the current one.
       loadConversations()
+      const text = res.message?.content ?? prompt
+      const shown = shownAttachments(res.message?.attachments ?? [], files.map((a) => a.url))
       const start = () => {
         if (generationRef.current !== generation) return
-        setItems((prev) => [...prev, { kind: 'user', text: prompt }])
+        setItems((prev) => [...prev, { kind: 'user', text, attachments: shown }])
         attach(res.turn_id)
       }
       if (sourceRef.current && sourceRef.current.readyState !== EventSource.CLOSED) nextTurnRef.current = start
@@ -520,7 +586,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
       if (generationRef.current !== generation) return
       if (e instanceof ApiError && e.code === 'sensitive_data') {
         const ok = window.confirm(`${e.message}\nこの内容を Copilot に送信しますか？（ファイルには保存されません）`)
-        if (ok) await sendFollowUp(mode, true, prompt)
+        if (ok) await sendFollowUp(mode, true, prompt, files)
         else restore()
         return
       }
@@ -531,6 +597,8 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
         return
       }
       setError((e as Error).message)
+    } finally {
+      setFollowUpSending(null)
     }
   }
 
@@ -721,6 +789,16 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
                     <span className="waiting-text" title={m.text}>
                       {m.text}
                     </span>
+                    {m.attachments && m.attachments.length > 0 && (
+                      <span
+                        className="waiting-files"
+                        role="img"
+                        aria-label={`添付 ${m.attachments.length} 件`}
+                        title={m.attachments.map((a) => a.name).join('\n')}
+                      >
+                        📎 {m.attachments.length}
+                      </span>
+                    )}
                     {/* After 中断 the waiting messages come back to the composer instead. */}
                     {m.mode === 'later' && !stopping && (
                       <button
@@ -744,7 +822,6 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
                 />
                 <p className="hint">
                   添付はこの会話の中だけで使います（知識ベースには保存されません）。画像の中身は機微情報チェックの対象外です。
-                  {turnId && '添付のあるメッセージは、回答が終わってから送信できます。'}
                 </p>
               </div>
             )}
@@ -802,27 +879,31 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
                   <button
                     type="submit"
                     className="button primary"
-                    disabled={!input.trim() || followUpBlocked}
+                    disabled={(!input.trim() && attachments.length === 0) || followUpBlocked}
                     title="回答中の内容に反映します（元の依頼と、追加の内容の両方に対応します）"
                   >
-                    すぐに送信
+                    {followUpSending === 'now' ? '送信中…' : reading ? '読み込み中…' : 'すぐに送信'}
                   </button>
                   <button
                     type="button"
                     className="button"
                     onClick={() => sendFollowUp('later')}
-                    disabled={!input.trim() || followUpBlocked}
+                    disabled={(!input.trim() && attachments.length === 0) || followUpBlocked}
                     title="今の回答が終わってから送信します"
                   >
-                    あとで送信
+                    {followUpSending === 'later' ? '送信中…' : 'あとで送信'}
                   </button>
                   <button type="button" className="button" onClick={abort} disabled={stopping}>
                     {stopping ? '中断中…' : '中断'}
                   </button>
                 </div>
               ) : (
-                <button type="submit" className="button primary" disabled={(!input.trim() && attachments.length === 0) || sending || reading > 0}>
-                  {sending ? '送信中…' : reading ? '読み込み中…' : '送信'}
+                <button
+                  type="submit"
+                  className="button primary"
+                  disabled={(!input.trim() && attachments.length === 0) || sending || reading > 0 || !!followUpSending}
+                >
+                  {sending || followUpSending ? '送信中…' : reading ? '読み込み中…' : '送信'}
                 </button>
               )}
             </div>

@@ -316,6 +316,7 @@ details.collapse > summary:focus-visible { outline: 2px solid var(--md-primary);
 .waiting-messages li { display: flex; align-items: center; gap: 0.5rem; padding: 0.125rem 0.75rem; border-radius: var(--md-shape-full); background: var(--md-surface-container); font-size: 0.8125rem; }
 .waiting-state { flex: none; color: var(--muted); font-size: 0.75rem; }
 .waiting-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.waiting-files { flex: none; color: var(--muted); font-size: 0.75rem; }
 .waiting-messages .link { flex: none; }
 .composer.readonly { background: #f9fafb; border-radius: 0 0 10px 10px; }
 .run-transcript { display: flex; flex-direction: column; gap: 0.75rem; padding-bottom: 0.75rem; border-bottom: 1px dashed var(--border); }

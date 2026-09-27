@@ -4,9 +4,10 @@ ACA's ingress ends any HTTP request after 240 seconds of wall-clock time, so a t
 and the browser follows it over SSE. Every event carries a sequence id, so a dropped connection resumes from
 ``Last-Event-ID`` without losing output.
 
-While a turn answers, the user can send it more messages: 「すぐに送信」 hands the message to Copilot at once and it
-joins the answer in progress; 「あとで送信」 waits in the turn and gets its own answer once the answers before it are
-finished. The messages Copilot has not read when the turn ends (中断, timeout, error) are returned in ``end.unsent``.
+While a turn answers, the user can send it more messages, with attachments like any other message: 「すぐに送信」
+hands the message to Copilot at once and it joins the answer in progress; 「あとで送信」 waits in the turn and gets its
+own answer once the answers before it are finished. The messages Copilot has not read when the turn ends (中断,
+timeout, error) are returned in ``end.unsent``.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from typing import Any
 from copilot.session_events import SessionErrorData, SessionIdleData, SessionMode, UserMessageData
 
 from ..security import SecretMasker
+from .attachments import ATTACHMENT_ONLY_PROMPT, PreparedAttachments
 from .conversations import ConversationStore
 from .events import map_event
 from .manager import ActiveSession, CopilotManager, NoTokenError, SessionStateError
@@ -79,11 +81,26 @@ class FollowUp:
     """A message the user sent while the turn answered."""
 
     id: str
-    text: str
+    text: str  # as typed; empty when the message has only attachments
     mode: str  # "now" (「すぐに送信」) or "later" (「あとで送信」)
+    # The attached files as the chat shows them: {name, kind, index, truncated?}, images first.
+    attachments: list[dict] = field(default_factory=list)
+    # session.send's arguments: the prompt, and the images and the display prompt when there are any. Dropped once
+    # the message is sent, cancelled or returned, so that its images are not kept in memory with the turn.
+    request: dict = field(default_factory=dict)
     state: str = "waiting"  # waiting → sent (handed to Copilot), or cancelled (取り消し)
     message_id: str | None = None  # Copilot's id for it, once Copilot has taken it
     read_at: int | None = None  # for "now": Turn.idles when Copilot read it
+
+    @property
+    def shown(self) -> str:
+        """The text shown in the chat and stored in the session's history, as for the first message of a turn."""
+        return self.text if self.text.strip() else ATTACHMENT_ONLY_PROMPT
+
+    def take_request(self) -> tuple[str, dict]:
+        """The prompt and the other arguments for session.send; the message keeps no copy of them."""
+        request, self.request = self.request, {}
+        return request.pop("prompt", self.shown), request
 
     @property
     def unsent(self) -> bool:
@@ -99,6 +116,7 @@ class FollowUp:
 class Turn:
     id: str
     conversation_id: str
+    model: str = ""  # the model it answers with: the messages sent to it meanwhile are read by the same model
     events: list[dict] = field(default_factory=list)
     done: bool = False
     # Set as soon as the turn is stopping (中断・タイムアウト・終了), before anything is awaited: no write may go on.
@@ -175,7 +193,7 @@ class TurnManager:
         if self.busy(conversation_id):
             raise TurnBusyError("this conversation is already answering")
         self._loop = asyncio.get_running_loop()
-        turn = Turn(id=uuid.uuid4().hex, conversation_id=conversation_id)
+        turn = Turn(id=uuid.uuid4().hex, conversation_id=conversation_id, model=model)
         self._turns[turn.id] = turn
         self._busy[conversation_id] = turn.id
         turn.task = asyncio.create_task(self._run(turn, prompt, model, attachments or [], display_prompt))
@@ -183,19 +201,36 @@ class TurnManager:
 
     # -- messages sent while the turn answers --------------------------------------------------------------
 
-    def add_message(self, conversation_id: str, text: str, mode: str) -> tuple[Turn, FollowUp] | None:
-        """Hands a message to the turn answering in the conversation; None when it is not answering (any more)."""
-        if mode not in FOLLOW_UP_MODES:
-            raise ValueError(f"unknown mode: {mode}")
+    def answering(self, conversation_id: str) -> Turn | None:
+        """The turn answering in the conversation, while it still takes messages."""
         turn = self._turns.get(self._busy.get(conversation_id, ""))
         # A stopping turn takes nothing more: what is waiting in it goes back to the user as unsent.
-        if turn is None or turn.stopping:
+        return turn if turn is not None and not turn.stopping else None
+
+    def add_message(
+        self, conversation_id: str, text: str, mode: str, attachments: PreparedAttachments | None = None
+    ) -> tuple[Turn, FollowUp] | None:
+        """Hands a message to the turn answering in the conversation; None when it is not answering (any more).
+
+        Its attachments go as with the first message of a turn: the images as blobs, the files' text appended to the
+        prompt and the typed text as the display prompt. At most MAX_WAITING_MESSAGES of them wait at once.
+        """
+        if mode not in FOLLOW_UP_MODES:
+            raise ValueError(f"unknown mode: {mode}")
+        turn = self.answering(conversation_id)
+        if turn is None:
             return None
         if sum(m.state == "waiting" for m in turn.follow_ups) >= MAX_WAITING_MESSAGES:
             raise WaitingLimitError(f"送信待ちのメッセージは {MAX_WAITING_MESSAGES} 件までです")
-        message = FollowUp(id=uuid.uuid4().hex, text=text, mode=mode)
+        files = attachments or PreparedAttachments()
+        message = FollowUp(id=uuid.uuid4().hex, text=text, mode=mode, attachments=files.items)
+        message.request = {"prompt": message.shown + files.text}
+        if files.blobs:
+            message.request["attachments"] = files.blobs
+        if files.text:
+            message.request["display_prompt"] = message.shown
         turn.follow_ups.append(message)
-        self._emit(turn, {"type": "queued", "id": message.id, "text": self.masker.mask_text(text), "mode": mode})
+        self._emit(turn, self._message_event("queued", message))
         turn.wake.set()
         return turn, message
 
@@ -208,6 +243,7 @@ class TurnManager:
         if turn.stopping or message is None or message.mode != "later" or message.state != "waiting":
             return False
         message.state = "cancelled"
+        message.request = {}
         self._emit(turn, {"type": "unqueued", "id": message.id})
         return True
 
@@ -277,8 +313,9 @@ class TurnManager:
                 # 「あとで送信」: each message gets its own answer once the answers before it are finished.
                 while (message := self._next_waiting(turn, "later")) is not None:
                     message.state = "sent"
-                    self._emit(turn, self._user_event(message))
-                    await self._answer(turn, message.text, message)
+                    self._emit(turn, self._message_event("user", message))
+                    later_prompt, options = message.take_request()
+                    await self._answer(turn, later_prompt, message, **options)
             finally:
                 unsubscribe()
             self._emit(turn, {"type": "done"})
@@ -305,7 +342,9 @@ class TurnManager:
             # cards before "end" so every card receives its result on the stream. Nothing is sent any more either:
             # what Copilot has not read goes back to the user.
             turn.stopping = True
-            turn.unsent = [{"id": m.id, "text": self.masker.mask_text(m.text)} for m in turn.follow_ups if m.unsent]
+            turn.unsent = [self._unsent(m) for m in turn.follow_ups if m.unsent]
+            for message in turn.follow_ups:
+                message.request = {}  # nothing is sent any more: the finished turn keeps no attached files
             self._cancel_approvals(turn)
             if turn.active is not None:
                 await turn.active.release()
@@ -319,8 +358,20 @@ class TurnManager:
             self._emit(turn, {"type": "end", "unsent": turn.unsent} if turn.unsent else {"type": "end"})
             self._schedule_expiry(turn)
 
-    def _user_event(self, message: FollowUp) -> dict:
-        return {"type": "user", "id": message.id, "text": self.masker.mask_text(message.text), "mode": message.mode}
+    def _message_event(self, kind: str, message: FollowUp) -> dict:
+        """queued / user: the message as the chat shows it."""
+        event = {"type": kind, "id": message.id, "text": self.masker.mask_text(message.shown), "mode": message.mode}
+        return self._with_attachments(event, message)
+
+    def _unsent(self, message: FollowUp) -> dict:
+        # The text goes back to the composer as it was typed: none for a message with only attachments.
+        return self._with_attachments({"id": message.id, "text": self.masker.mask_text(message.text)}, message)
+
+    def _with_attachments(self, entry: dict, message: FollowUp) -> dict:
+        """Adds the message's attached files, their names masked like the text, when it has any."""
+        if message.attachments:
+            entry["attachments"] = [a | {"name": self.masker.mask_text(a["name"])} for a in message.attachments]
+        return entry
 
     async def _answer(self, turn: Turn, prompt: str, message: FollowUp | None = None, **options: Any) -> None:
         """Sends a request (options: its attachments and display prompt) and waits until Copilot has answered it,
@@ -342,7 +393,8 @@ class TurnManager:
             while (extra := self._next_waiting(turn, "now")) is not None:
                 extra.state = "sent"
                 steering.append(extra)
-                extra.message_id = await session.send(extra.text, mode="immediate")
+                extra_prompt, options = extra.take_request()
+                extra.message_id = await session.send(extra_prompt, mode="immediate", **options)
                 # Its user.message may be handled before send returns.
                 if extra.read_at is None and extra.message_id in turn.read:
                     self._mark_read(turn, extra, turn.read[extra.message_id])
@@ -385,15 +437,16 @@ class TurnManager:
             turn.read[data.message_id] = turn.idles
             message = next((m for m in unread if m.message_id == data.message_id), None)
         else:
-            # A runtime that does not report message ids: the text tells which message was read.
-            message = next((m for m in unread if m.text == data.content), None)
+            # A runtime that does not report message ids: the text tells which message was read. The runtime reports
+            # the display prompt, so a message with attached files is recognised by its typed text too.
+            message = next((m for m in unread if m.shown == data.content), None)
         if message is not None:
             self._mark_read(turn, message, turn.idles)
         turn.wake.set()
 
     def _mark_read(self, turn: Turn, message: FollowUp, idles: int) -> None:
         message.read_at = idles
-        self._emit(turn, self._user_event(message))
+        self._emit(turn, self._message_event("user", message))
 
     # -- write approvals ---------------------------------------------------------------------------------
 

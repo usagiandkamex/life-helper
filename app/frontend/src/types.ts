@@ -22,7 +22,7 @@ export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'expired' | '
 // 'later' (あとで送信) waits until the answers before it are finished.
 export type FollowUpMode = 'now' | 'later'
 
-export type UnsentMessage = { id: string; text: string }
+export type UnsentMessage = { id: string; text: string; attachments?: SentAttachment[] }
 
 export type TurnEvent =
   | { type: 'delta'; text: string }
@@ -36,9 +36,9 @@ export type TurnEvent =
   | { type: 'usage'; model: string }
   | { type: 'follow_up' }
   // A message sent while the chat answers, waiting until Copilot takes it ('now') or the answer is finished ('later').
-  | { type: 'queued'; id: string; text: string; mode: FollowUpMode }
+  | { type: 'queued'; id: string; text: string; mode: FollowUpMode; attachments?: SentAttachment[] }
   // Copilot took a waiting message: it is shown in the conversation from here on.
-  | { type: 'user'; id: string; text: string; mode: FollowUpMode }
+  | { type: 'user'; id: string; text: string; mode: FollowUpMode; attachments?: SentAttachment[] }
   // A 'later' message the user cancelled (取り消す).
   | { type: 'unqueued'; id: string }
   | { type: 'done' }
@@ -47,6 +47,9 @@ export type TurnEvent =
 
 // Files and images attached to a chat message (the history API returns only their names, not the contents).
 export type AttachmentInfo = { name: string; kind: 'image' | 'file'; truncated?: boolean }
+
+// An attachment of a message just sent. index: its place among the files sent, which the server lists images first.
+export type SentAttachment = AttachmentInfo & { index: number }
 
 export type HistoryMessage =
   | { role: 'user'; content: string; attachments?: AttachmentInfo[] }

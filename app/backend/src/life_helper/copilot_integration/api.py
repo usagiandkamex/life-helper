@@ -67,9 +67,6 @@ class TurnBody(BaseModel):
     def _not_empty(self) -> TurnBody:
         if not self.prompt.strip() and not self.attachments:
             raise ValueError("a prompt or an attachment is required")
-        # A message sent while the conversation answers is text only: attachments wait until the answer is finished.
-        if self.mode is not None and self.attachments:
-            raise ValueError("attachments cannot be sent while the conversation answers")
         return self
 
 
@@ -201,7 +198,14 @@ async def _start_turn(
     }
 
 
-async def _reject_images_without_vision(ctx: AppContext, model: str) -> None:
+NO_VISION = "選択中のモデルは画像を読み取れません。画像に対応したモデルを選んでください"
+# A message sent while the conversation answers joins that answer, so the answering model reads its images.
+NO_VISION_WHILE_ANSWERING = (
+    "回答中のモデルは画像を読み取れません。回答が終わってから、画像に対応したモデルを選んで送信してください"
+)
+
+
+async def _reject_images_without_vision(ctx: AppContext, model: str, message: str = NO_VISION) -> None:
     # The runtime would drop the image with an English error after the turn started; say so before sending.
     try:
         models = await ctx.copilot.list_models()
@@ -209,13 +213,7 @@ async def _reject_images_without_vision(ctx: AppContext, model: str) -> None:
         return
     info = next((m for m in models if m["id"] == model), None)
     if info is not None and info.get("vision") is False:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            {
-                "code": "no_vision",
-                "message": "選択中のモデルは画像を読み取れません。画像に対応したモデルを選んでください",
-            },
-        )
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, {"code": "no_vision", "message": message})
 
 
 @router.post("/conversations/{conversation_id}/turns")
@@ -243,8 +241,11 @@ async def start_turn(
             },
         )
     if body.mode is not None:
+        answering = ctx.turns.answering(conversation_id)
+        if answering is not None and prepared.blobs:
+            await _reject_images_without_vision(ctx, answering.model, NO_VISION_WHILE_ANSWERING)
         try:
-            added = ctx.turns.add_message(conversation_id, body.prompt, body.mode)
+            added = ctx.turns.add_message(conversation_id, body.prompt, body.mode, prepared)
         except WaitingLimitError as e:
             raise HTTPException(status.HTTP_409_CONFLICT, {"code": "waiting_limit", "message": str(e)}) from e
         if added is not None:
