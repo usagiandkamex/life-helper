@@ -18,6 +18,12 @@ export type Screenshot = { url: string }
 
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'expired' | 'cancelled'
 
+// How a message sent while the chat answers is handled: 'now' (すぐに送信) joins the answer in progress,
+// 'later' (あとで送信) waits until the answers before it are finished.
+export type FollowUpMode = 'now' | 'later'
+
+export type UnsentMessage = { id: string; text: string }
+
 export type TurnEvent =
   | { type: 'delta'; text: string }
   | { type: 'message'; content: string }
@@ -29,13 +35,15 @@ export type TurnEvent =
   | { type: 'error'; message: string; code?: string }
   | { type: 'usage'; model: string }
   | { type: 'follow_up' }
-  // A message sent while the chat answered: 'now' went into the answer in progress, 'later' waited its turn.
-  | { type: 'user'; id: string; text: string; mode: 'now' | 'later' }
-  | { type: 'queued'; id: string; text: string }
-  // 'stopped': the answers ended (中断, timeout, error) before the message was sent.
-  | { type: 'unqueued'; id: string; reason: 'cancelled' | 'stopped' }
+  // A message sent while the chat answers, waiting until Copilot takes it ('now') or the answer is finished ('later').
+  | { type: 'queued'; id: string; text: string; mode: FollowUpMode }
+  // Copilot took a waiting message: it is shown in the conversation from here on.
+  | { type: 'user'; id: string; text: string; mode: FollowUpMode }
+  // A 'later' message the user cancelled (取り消す).
+  | { type: 'unqueued'; id: string }
   | { type: 'done' }
-  | { type: 'end' }
+  // unsent: the waiting messages Copilot never read (中断, timeout, error); they go back to the composer.
+  | { type: 'end'; unsent?: UnsentMessage[] }
 
 export type HistoryMessage =
   | { role: 'user'; content: string }

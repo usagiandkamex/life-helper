@@ -1,4 +1,4 @@
-import type { ApprovalStatus, ChartData, HistoryMessage, Screenshot, TurnEvent } from './types'
+import type { ApprovalStatus, ChartData, FollowUpMode, HistoryMessage, Screenshot, TurnEvent } from './types'
 
 export type ApprovalItem = {
   kind: 'approval'
@@ -111,6 +111,24 @@ export function fromHistory(messages: HistoryMessage[]): Item[] {
   return messages.map((m) =>
     m.role === 'tool' ? { kind: 'tool', name: m.name, args: m.args, success: true } : { kind: m.role, text: m.content },
   )
+}
+
+// A message sent while the chat answers that Copilot has not taken yet; it is shown above the composer.
+export type WaitingMessage = { id: string; text: string; mode: FollowUpMode }
+
+export function applyWaitingEvent(waiting: WaitingMessage[], ev: TurnEvent): WaitingMessage[] {
+  switch (ev.type) {
+    case 'queued':
+      return waiting.some((m) => m.id === ev.id) ? waiting : [...waiting, { id: ev.id, text: ev.text, mode: ev.mode }]
+    case 'user':
+    case 'unqueued':
+      return waiting.some((m) => m.id === ev.id) ? waiting.filter((m) => m.id !== ev.id) : waiting
+    case 'end':
+      // What was still waiting comes back in end.unsent.
+      return waiting.length ? [] : waiting
+    default:
+      return waiting
+  }
 }
 
 export const TOOL_LABELS: Record<string, string> = {

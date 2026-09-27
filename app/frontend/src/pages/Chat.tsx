@@ -2,11 +2,20 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { api, ApiError, formatDate, json } from '../api'
 import { quoteDraft } from '../automationRuns'
-import { applyEvent, fromHistory, type Item } from '../chatItems'
+import { applyEvent, applyWaitingEvent, fromHistory, type Item, type WaitingMessage } from '../chatItems'
 import { AutomationThreadView } from '../components/AutomationThread'
 import { Disclaimer } from '../components/Markdown'
 import { MessageItem } from '../components/MessageItem'
-import type { AutomationThread, AutomationThreadDetail, Conversation, HistoryMessage, RunRecord, TurnEvent } from '../types'
+import type {
+  AutomationThread,
+  AutomationThreadDetail,
+  Conversation,
+  FollowUpMode,
+  HistoryMessage,
+  RunRecord,
+  TurnEvent,
+  UnsentMessage,
+} from '../types'
 
 // New automation runs are saved by a separate job, so the list is polled while the chat is on screen.
 const THREAD_REFRESH_MS = 60_000
@@ -30,6 +39,10 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   const [models, setModels] = useState<{ id: string; name: string }[]>([])
   const [model, setModel] = useState('auto')
   const [turnId, setTurnId] = useState<string | null>(null)
+  // Messages sent while the chat answers that Copilot has not taken yet.
+  const [waiting, setWaiting] = useState<WaitingMessage[]>([])
+  // From 中断 until the turn has ended: nothing more can be sent to it.
+  const [stopping, setStopping] = useState(false)
   const [drawer, setDrawer] = useState(false)
   const [error, setError] = useState('')
   const sourceRef = useRef<EventSource | null>(null)
@@ -49,6 +62,10 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   const handledLinkRef = useRef<string | null>(null)
   // Where to scroll once a loaded automation conversation is rendered ('bottom' or an element id).
   const scrollTargetRef = useRef<string | null>(null)
+  // Unsent messages already put back into the composer: both the turn's end and the conversation report them.
+  const restoredRef = useRef(new Set<string>())
+  // A message sent just as the answer ended starts the next turn, which is followed once the current one has ended.
+  const nextTurnRef = useRef<(() => void) | null>(null)
 
   const selectConversation = useCallback((id: string | null) => {
     generationRef.current += 1
@@ -58,6 +75,9 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
     setThreadId(null)
     setThread(null)
     setThreadBusy(false)
+    setWaiting([])
+    setStopping(false)
+    nextTurnRef.current = null
   }, [])
 
   const loadConversations = useCallback(async () => {
@@ -71,31 +91,53 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
     if (request === threadsRequestRef.current) setThreads(data)
   }, [])
 
+  // Messages the turn could not send go back to the composer, so they can be edited and sent again.
+  const restoreUnsent = useCallback((unsent: UnsentMessage[] | undefined) => {
+    const texts: string[] = []
+    for (const m of unsent ?? []) {
+      if (restoredRef.current.has(m.id)) continue
+      restoredRef.current.add(m.id)
+      texts.push(m.text)
+    }
+    if (texts.length === 0) return
+    setInput((cur) => [...texts, cur.trim()].filter(Boolean).join('\n\n'))
+    setItems((prev) => [...prev, { kind: 'note', text: `送信できなかったメッセージ（${texts.length} 件）を入力欄に戻しました。` }])
+  }, [])
+
   const attach = useCallback(
     (id: string) => {
       sourceRef.current?.close()
       setTurnId(id)
+      setWaiting([]) // the replay below lists them again
+      setStopping(false)
       // EventSource reconnects automatically and sends Last-Event-ID, so dropped connections resume.
       const source = new EventSource(`/api/turns/${id}/events`)
       sourceRef.current = source
+      const ended = () => {
+        setTurnId(null)
+        setWaiting([])
+        setStopping(false)
+        loadConversations()
+        const next = nextTurnRef.current
+        nextTurnRef.current = null
+        next?.()
+      }
       source.onmessage = (msg) => {
         if (sourceRef.current !== source) return // another conversation was opened meanwhile
         const ev = JSON.parse(msg.data) as TurnEvent
         setItems((prev) => applyEvent(prev, ev, id))
+        setWaiting((prev) => applyWaitingEvent(prev, ev))
         if (ev.type === 'end') {
           source.close()
-          setTurnId(null)
-          loadConversations()
+          restoreUnsent(ev.unsent)
+          ended()
         }
       }
       source.onerror = () => {
-        if (sourceRef.current === source && source.readyState === EventSource.CLOSED) {
-          setTurnId(null)
-          loadConversations()
-        }
+        if (sourceRef.current === source && source.readyState === EventSource.CLOSED) ended()
       }
     },
-    [loadConversations],
+    [loadConversations, restoreUnsent],
   )
 
   const openConversation = useCallback(
@@ -111,15 +153,18 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
       setItems([])
       setError('')
       try {
-        const data = await api<{ messages: HistoryMessage[]; busy: boolean; turn_id?: string }>(`/api/conversations/${id}/messages`)
+        const data = await api<{ messages: HistoryMessage[]; busy: boolean; turn_id?: string; unsent?: UnsentMessage[] }>(
+          `/api/conversations/${id}/messages`,
+        )
         if (generationRef.current !== generation) return // a slower answer must not replace what was opened since
         setItems(fromHistory(data.messages))
         if (data.busy && data.turn_id) attach(data.turn_id)
+        else restoreUnsent(data.unsent) // the turn ended while this conversation was not followed
       } catch (e) {
         if (generationRef.current === generation) setError((e as Error).message)
       }
     },
-    [attach, selectConversation],
+    [attach, restoreUnsent, selectConversation],
   )
 
   const markRead = useCallback(
@@ -344,6 +389,60 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
     }
   }
 
+  // While the chat answers: 'now' joins the answer in progress, 'later' waits until it is finished.
+  const sendFollowUp = async (mode: FollowUpMode, confirmSensitive = false, prompt = input.trim()) => {
+    const id = currentIdRef.current
+    if (!prompt || !id || !turnId || stopping) return
+    setError('')
+    // Cleared at once so that the next message can be typed meanwhile; the text comes back if it cannot be sent.
+    setInput((cur) => (cur.trim() === prompt ? '' : cur))
+    const restore = () => setInput((cur) => [prompt, cur.trim()].filter(Boolean).join('\n\n'))
+    const generation = generationRef.current
+    try {
+      const res = await api<{ turn_id: string; message_id?: string }>(`/api/conversations/${id}/turns`, {
+        method: 'POST',
+        body: json({ prompt, model, confirm_sensitive: confirmSensitive, mode }),
+      })
+      if (generationRef.current !== generation) return
+      if (res.message_id) return // listed above the composer until Copilot takes it
+      // The answer ended meanwhile, so the message started a new turn; its events follow those of the current one.
+      loadConversations()
+      const start = () => {
+        if (generationRef.current !== generation) return
+        setItems((prev) => [...prev, { kind: 'user', text: prompt }])
+        attach(res.turn_id)
+      }
+      if (sourceRef.current && sourceRef.current.readyState !== EventSource.CLOSED) nextTurnRef.current = start
+      else start()
+    } catch (e) {
+      if (generationRef.current !== generation) return
+      if (e instanceof ApiError && e.code === 'sensitive_data') {
+        const ok = window.confirm(`${e.message}\nこの内容を Copilot に送信しますか？（ファイルには保存されません）`)
+        if (ok) await sendFollowUp(mode, true, prompt)
+        else restore()
+        return
+      }
+      restore()
+      if (e instanceof ApiError && e.status === 409 && !e.code) {
+        // The turn is ending (中断 or the last answer): it takes no more messages, and the next turn has not started.
+        setError('回答を終えるところのため送信できませんでした。回答が終わってから、もう一度送信してください。')
+        return
+      }
+      setError((e as Error).message)
+    }
+  }
+
+  const cancelWaiting = async (messageId: string) => {
+    if (!turnId) return
+    setError('')
+    try {
+      const res = await api<{ removed: boolean }>(`/api/turns/${turnId}/queue/${messageId}`, { method: 'DELETE' })
+      if (!res.removed) setError('すでに送信したため、取り消せませんでした。')
+    } catch (e) {
+      setError((e as Error).message)
+    }
+  }
+
   const remove = async (id: string) => {
     if (!window.confirm('この会話を削除しますか？（Copilot 側の履歴も削除されます）')) return
     try {
@@ -371,7 +470,14 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   }
 
   const abort = async () => {
-    if (turnId) await api(`/api/turns/${turnId}/abort`, { method: 'POST' })
+    if (!turnId) return
+    setStopping(true)
+    try {
+      await api(`/api/turns/${turnId}/abort`, { method: 'POST' })
+    } catch (e) {
+      setStopping(false)
+      setError((e as Error).message)
+    }
   }
 
   const entries: Entry[] = [
@@ -499,19 +605,44 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
             className="composer"
             onSubmit={(e) => {
               e.preventDefault()
-              send()
+              if (turnId) sendFollowUp('now')
+              else send()
             }}
           >
+            {waiting.length > 0 && (
+              <ul className="waiting-messages" aria-label="送信待ちのメッセージ">
+                {waiting.map((m) => (
+                  <li key={m.id}>
+                    <span className="waiting-state">{m.mode === 'now' ? '回答に反映待ち' : '回答後に送信'}</span>
+                    <span className="waiting-text" title={m.text}>
+                      {m.text}
+                    </span>
+                    {/* After 中断 the waiting messages come back to the composer instead. */}
+                    {m.mode === 'later' && !stopping && (
+                      <button
+                        type="button"
+                        className="link small"
+                        onClick={() => cancelWaiting(m.id)}
+                        aria-label={`「${m.text.slice(0, 40)}」の送信を取り消す`}
+                      >
+                        取り消す
+                      </button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
             <textarea
               ref={inputRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="メッセージを入力（Ctrl+Enter で送信）"
+              placeholder={turnId ? '回答中も追加で送信できます（Ctrl+Enter ですぐに送信）' : 'メッセージを入力（Ctrl+Enter で送信）'}
               rows={3}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
                   e.preventDefault()
-                  send()
+                  if (turnId) sendFollowUp('now')
+                  else send()
                 }
               }}
             />
@@ -524,9 +655,28 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
                 ))}
               </select>
               {turnId ? (
-                <button type="button" className="button" onClick={abort}>
-                  中断
-                </button>
+                <div className="composer-buttons">
+                  <button
+                    type="submit"
+                    className="button primary"
+                    disabled={!input.trim() || stopping}
+                    title="回答中の内容に反映します（元の依頼と、追加の内容の両方に対応します）"
+                  >
+                    すぐに送信
+                  </button>
+                  <button
+                    type="button"
+                    className="button"
+                    onClick={() => sendFollowUp('later')}
+                    disabled={!input.trim() || stopping}
+                    title="今の回答が終わってから送信します"
+                  >
+                    あとで送信
+                  </button>
+                  <button type="button" className="button" onClick={abort} disabled={stopping}>
+                    {stopping ? '中断中…' : '中断'}
+                  </button>
+                </div>
               ) : (
                 <button type="submit" className="button primary" disabled={!input.trim()}>
                   送信
