@@ -2,14 +2,47 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { api, ApiError, formatDate, json } from '../api'
 import { quoteDraft } from '../automationRuns'
-import { applyEvent, fromHistory, type Item } from '../chatItems'
+import { applyEvent, fromHistory, type Item, type ShownAttachment } from '../chatItems'
+import { AttachmentList } from '../components/AttachmentList'
 import { AutomationThreadView } from '../components/AutomationThread'
 import { Disclaimer } from '../components/Markdown'
 import { MessageItem } from '../components/MessageItem'
-import type { AutomationThread, AutomationThreadDetail, Conversation, HistoryMessage, RunRecord, TurnEvent } from '../types'
+import type {
+  AttachmentInfo,
+  AutomationThread,
+  AutomationThreadDetail,
+  Conversation,
+  HistoryMessage,
+  RunRecord,
+  TurnEvent,
+} from '../types'
 
 // New automation runs are saved by a separate job, so the list is polled while the chat is on screen.
 const THREAD_REFRESH_MS = 60_000
+
+// The server checks the same limits and the file contents; these only give an early message.
+const MAX_ATTACHMENTS = 5
+const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp']
+const FILE_SUFFIXES = ['.txt', '.md', '.csv', '.tsv', '.json', '.pdf']
+const ATTACH_ACCEPT = [...IMAGE_TYPES, ...FILE_SUFFIXES].join(',')
+
+type PendingAttachment = { name: string; image: boolean; size: number; data: string; url?: string }
+
+function readAttachment(file: File): Promise<PendingAttachment> {
+  const image = IMAGE_TYPES.includes(file.type)
+  // A pasted screenshot may come without a name (anything else without one is refused before this).
+  const name = file.name || `image.${file.type.slice('image/'.length)}`
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const url = String(reader.result)
+      resolve({ name, image, size: file.size, data: url.slice(url.indexOf(',') + 1), url: image ? url : undefined })
+    }
+    reader.onerror = () => reject(new Error(`${name} を読み込めませんでした`))
+    reader.readAsDataURL(file)
+  })
+}
 
 type Entry =
   | { kind: 'chat'; at: number; conversation: Conversation }
@@ -27,6 +60,11 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   const [threadBusy, setThreadBusy] = useState(false)
   const [items, setItems] = useState<Item[]>([])
   const [input, setInput] = useState('')
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([])
+  // Files still being read: counted against the limits, and sending waits for them.
+  const [reading, setReading] = useState(0)
+  const readingRef = useRef({ count: 0, bytes: 0 })
+  const [sending, setSending] = useState(false)
   const [models, setModels] = useState<{ id: string; name: string }[]>([])
   const [model, setModel] = useState('auto')
   const [turnId, setTurnId] = useState<string | null>(null)
@@ -104,7 +142,10 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
       sourceRef.current = null
       setTurnId(null)
       // The composer belongs to the conversation it was typed in, so it must not follow us to another one.
-      if (id !== currentIdRef.current) setInput('')
+      if (id !== currentIdRef.current) {
+        setInput('')
+        setAttachments([])
+      }
       selectConversation(id)
       const generation = generationRef.current
       setDrawer(false)
@@ -152,6 +193,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
       threadIdRef.current = id
       setThreadId(id)
       setInput('')
+      setAttachments([])
       setDrawer(false)
       setItems([])
       setError('')
@@ -208,6 +250,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
     setItems([{ kind: 'note', text: `「${run.name}」の結果を入力欄に引用しました。質問を書き足して送信すると、新しい会話が始まります。` }])
     setError('')
     setInput(quoteDraft(run))
+    setAttachments([])
     window.requestAnimationFrame(() => {
       const el = inputRef.current
       if (!el) return
@@ -305,42 +348,106 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
     await openConversation(conv.id)
   }
 
-  const send = async (confirmSensitive = false) => {
-    const prompt = input.trim()
-    if (!prompt || turnId) return
-    setError('')
-    let generation = generationRef.current
-    // The ref, not the render's value: a retry after the sensitive-data prompt must reuse the conversation just made.
-    let id = currentIdRef.current
-    if (!id) {
-      const conv = await api<Conversation>('/api/conversations', { method: 'POST', body: json({ model }) })
-      if (generationRef.current !== generation) {
-        loadConversations()
-        return
+  // Checks what can be checked here (type, size, count) before reading the files for sending.
+  const addAttachments = async (files: File[]) => {
+    const generation = generationRef.current
+    const problems: string[] = []
+    const pending = readingRef.current
+    let count = attachments.length + pending.count
+    let bytes = attachments.reduce((sum, a) => sum + a.size, 0) + pending.bytes
+    const accepted = files.filter((f) => {
+      const name = f.name || '貼り付けたデータ'
+      const allowed = IMAGE_TYPES.includes(f.type) || FILE_SUFFIXES.some((s) => f.name.toLowerCase().endsWith(s))
+      if (!allowed) problems.push(`${name} は添付できない形式です（画像・テキスト・CSV・JSON・PDF に対応）`)
+      else if (f.size === 0) problems.push(`${name} は空のファイルです`)
+      else if (count >= MAX_ATTACHMENTS) problems.push(`添付できるのは ${MAX_ATTACHMENTS} 件までです`)
+      else if (bytes + f.size > MAX_ATTACHMENT_BYTES) problems.push(`${name} は添付できません（合計 10 MB まで）`)
+      else {
+        count += 1
+        bytes += f.size
+        return true
       }
-      id = conv.id
-      selectConversation(id)
-      generation = generationRef.current
-    }
+      return false
+    })
+    if (problems.length) setError([...new Set(problems)].join(' / '))
+    if (accepted.length === 0) return
+    const reserved = { count: accepted.length, bytes: accepted.reduce((sum, f) => sum + f.size, 0) }
+    pending.count += reserved.count
+    pending.bytes += reserved.bytes
+    setReading((n) => n + 1)
     try {
-      const res = await api<{ turn_id: string }>(`/api/conversations/${id}/turns`, {
-        method: 'POST',
-        body: json({ prompt, model, confirm_sensitive: confirmSensitive }),
-      })
-      loadConversations()
-      // Opened something else meanwhile: the turn keeps running and is followed when its conversation is opened.
-      if (generationRef.current !== generation) return
-      setItems((prev) => [...prev, { kind: 'user', text: prompt }])
-      setInput('')
-      attach(res.turn_id)
+      const read = await Promise.all(accepted.map(readAttachment))
+      // Switched to another conversation while reading: the files belong to the one they were added in.
+      if (generationRef.current === generation) setAttachments((cur) => [...cur, ...read].slice(0, MAX_ATTACHMENTS))
     } catch (e) {
-      if (generationRef.current !== generation) return
-      if (e instanceof ApiError && e.code === 'sensitive_data') {
-        const ok = window.confirm(`${e.message}\nこの内容を Copilot に送信しますか？（ファイルには保存されません）`)
-        if (ok) await send(true)
-        return
+      if (generationRef.current === generation) setError((e as Error).message)
+    } finally {
+      pending.count -= reserved.count
+      pending.bytes -= reserved.bytes
+      setReading((n) => n - 1)
+    }
+  }
+
+  const send = async (confirmSensitive = false) => {
+    const draft = input
+    const prompt = input.trim()
+    const files = attachments
+    if ((!prompt && files.length === 0) || turnId || sending || reading) return
+    setError('')
+    setSending(true)
+    try {
+      let generation = generationRef.current
+      // The ref, not the render's value: a retry after the sensitive-data prompt must reuse the conversation just made.
+      let id = currentIdRef.current
+      if (!id) {
+        const conv = await api<Conversation>('/api/conversations', { method: 'POST', body: json({ model }) })
+        if (generationRef.current !== generation) {
+          loadConversations()
+          return
+        }
+        id = conv.id
+        selectConversation(id)
+        generation = generationRef.current
       }
-      setError((e as Error).message)
+      try {
+        const res = await api<{
+          turn_id: string
+          message: { content: string; attachments: (AttachmentInfo & { index: number })[] }
+        }>(
+          `/api/conversations/${id}/turns`,
+          {
+            method: 'POST',
+            body: json({
+              prompt,
+              model,
+              confirm_sensitive: confirmSensitive,
+              attachments: files.map((a) => ({ name: a.name, data: a.data })),
+            }),
+          },
+        )
+        loadConversations()
+        // Opened something else meanwhile: the turn keeps running and is followed when its conversation is opened.
+        if (generationRef.current !== generation) return
+        // The server orders them its own way (images first) and gives each one's position in the request.
+        const shown: ShownAttachment[] = res.message.attachments.map(({ index, ...a }) => ({
+          ...a,
+          url: a.kind === 'image' ? files[index]?.url : undefined,
+        }))
+        setItems((prev) => [...prev, { kind: 'user', text: res.message.content, attachments: shown }])
+        setInput((cur) => (cur === draft ? '' : cur))
+        setAttachments((cur) => cur.filter((a) => !files.includes(a)))
+        attach(res.turn_id)
+      } catch (e) {
+        if (generationRef.current !== generation) return
+        if (e instanceof ApiError && e.code === 'sensitive_data') {
+          const ok = window.confirm(`${e.message}\nこの内容を Copilot に送信しますか？（ファイルには保存されません）`)
+          if (ok) await send(true)
+          return
+        }
+        setError((e as Error).message)
+      }
+    } finally {
+      setSending(false)
     }
   }
 
@@ -352,6 +459,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
         selectConversation(null)
         setItems([])
         setInput('')
+        setAttachments([])
       }
       await loadConversations()
     } catch (e) {
@@ -366,6 +474,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
     if (generationRef.current !== generation) return // it keeps running; its conversation shows it when opened
     selectConversation(res.conversation_id)
     setInput('')
+    setAttachments([])
     setItems([{ kind: 'user', text: 'メモリの整理を依頼しました。' }])
     attach(res.turn_id)
   }
@@ -502,11 +611,22 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
               send()
             }}
           >
+            {attachments.length > 0 && (
+              <div>
+                <AttachmentList
+                  items={attachments.map((a) => ({ name: a.name, kind: a.image ? 'image' : 'file', url: a.url }))}
+                  onRemove={(index) => setAttachments((cur) => cur.filter((_, i) => i !== index))}
+                />
+                <p className="hint">
+                  添付はこの会話の中だけで使います（知識ベースには保存されません）。画像の中身は機微情報チェックの対象外です。
+                </p>
+              </div>
+            )}
             <textarea
               ref={inputRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="メッセージを入力（Ctrl+Enter で送信）"
+              placeholder="メッセージを入力（Ctrl+Enter で送信。画像は貼り付けでも添付できます）"
               rows={3}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
@@ -514,22 +634,47 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
                   send()
                 }
               }}
+              onPaste={(e) => {
+                const files = Array.from(e.clipboardData.files)
+                // A copy from Excel or Word also carries a picture of it: the text wins, so a table pastes as text.
+                if (files.length === 0 || e.clipboardData.getData('text/plain').trim()) return
+                e.preventDefault()
+                addAttachments(files)
+              }}
             />
             <div className="composer-actions">
-              <select value={model} onChange={(e) => setModel(e.target.value)} aria-label="モデル">
-                {(models.length ? models : [{ id: 'auto', name: 'auto' }]).map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.name}
-                  </option>
-                ))}
-              </select>
+              <div className="composer-tools">
+                <label className="button small" title="画像・テキスト・CSV・JSON・PDF を添付（5 件・合計 10 MB まで）">
+                  📎 添付
+                  <input
+                    type="file"
+                    accept={ATTACH_ACCEPT}
+                    multiple
+                    hidden
+                    disabled={sending}
+                    onChange={(e) => {
+                      const files = Array.from(e.currentTarget.files ?? [])
+                      // Cleared so that choosing the same file again adds it again.
+                      e.currentTarget.value = ''
+                      addAttachments(files)
+                    }}
+                  />
+                </label>
+                <select value={model} onChange={(e) => setModel(e.target.value)} aria-label="モデル">
+                  {(models.length ? models : [{ id: 'auto', name: 'auto' }]).map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
               {turnId ? (
                 <button type="button" className="button" onClick={abort}>
                   中断
                 </button>
               ) : (
-                <button type="submit" className="button primary" disabled={!input.trim()}>
-                  送信
+                <button type="submit" className="button primary" disabled={(!input.trim() && attachments.length === 0) || sending || reading > 0}>
+                  {sending ? '送信中…' : reading ? '読み込み中…' : '送信'}
                 </button>
               )}
             </div>
