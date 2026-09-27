@@ -22,7 +22,13 @@ from .attachments import (
 )
 from .events import history_from_events
 from .manager import NoTokenError, SessionStateError
-from .turns import ApprovalNotFoundError, ApprovalResolvedError, TurnBusyError
+from .turns import (
+    ApprovalNotFoundError,
+    ApprovalResolvedError,
+    TurnBusyError,
+    TurnNotFoundError,
+    WaitingLimitError,
+)
 
 router = APIRouter(prefix="/api")
 
@@ -53,6 +59,9 @@ class TurnBody(BaseModel):
     model: str | None = None
     confirm_sensitive: bool = False
     attachments: list[AttachmentBody] = Field(default_factory=list, max_length=MAX_ATTACHMENTS)
+    # Sent while the conversation answers: "now" joins the answer in progress, "later" waits until it is finished.
+    # A conversation that is not answering (any more) starts a turn with it as usual.
+    mode: Literal["now", "later"] | None = None
 
     @model_validator(mode="after")
     def _not_empty(self) -> TurnBody:
@@ -135,8 +144,10 @@ async def conversation_messages(
     if ctx.turns.busy(conversation_id):
         # Do not touch the live session while it answers; the client re-attaches to the running turn instead.
         return {"messages": [], "busy": True, "turn_id": ctx.turns.active_turn_id(conversation_id)}
+    # Messages the last turn could not send, for a client that was not following it when it ended.
+    unsent = ctx.turns.unsent(conversation_id)
     if not conv.started:
-        return {"messages": [], "busy": False}
+        return {"messages": [], "busy": False, "unsent": unsent}
     try:
         # Reserve so a turn cannot start while the history is being read from the session.
         async with ctx.turns.reserve(conversation_id):
@@ -148,7 +159,7 @@ async def conversation_messages(
         raise _reauth() from e
     except SessionStateError as e:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(e)) from e
-    return {"messages": history_from_events(events, ctx.masker), "busy": False}
+    return {"messages": history_from_events(events, ctx.masker), "busy": False, "unsent": unsent}
 
 
 async def _start_turn(
@@ -187,21 +198,26 @@ async def _start_turn(
     }
 
 
-async def _reject_images_without_vision(ctx: AppContext, model: str) -> None:
-    # The runtime would drop the image with an English error after the turn started; say so before sending.
+NO_VISION = "選択中のモデルは画像を読み取れません。画像に対応したモデルを選んでください"
+# A message sent while the conversation answers joins that answer, so the answering model reads its images.
+NO_VISION_WHILE_ANSWERING = (
+    "回答中のモデルは画像を読み取れません。回答が終わってから、画像に対応したモデルを選んで送信してください"
+)
+
+
+async def _model_lacks_vision(ctx: AppContext, model: str) -> bool:
+    # The runtime would drop the image with an English error after the turn started; check before sending.
     try:
         models = await ctx.copilot.list_models()
     except Exception:  # noqa: BLE001 - the turn itself reports connection and sign-in problems
-        return
+        return False
     info = next((m for m in models if m["id"] == model), None)
-    if info is not None and info.get("vision") is False:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            {
-                "code": "no_vision",
-                "message": "選択中のモデルは画像を読み取れません。画像に対応したモデルを選んでください",
-            },
-        )
+    return info is not None and info.get("vision") is False
+
+
+async def _reject_images_without_vision(ctx: AppContext, model: str, message: str = NO_VISION) -> None:
+    if await _model_lacks_vision(ctx, model):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, {"code": "no_vision", "message": message})
 
 
 @router.post("/conversations/{conversation_id}/turns")
@@ -228,11 +244,42 @@ async def start_turn(
                 "message": f"機微情報の可能性があります{where}: " + "、".join(SENSITIVE_LABELS[k] for k in kinds),
             },
         )
-    # Decided once: the model checked for images is the one the turn uses.
+    if body.mode is not None:
+        answering = ctx.turns.answering(conversation_id)
+        if answering is not None:
+            # The message joins this turn's answer, so the answering model reads its images. Look up that model's
+            # vision support, then act only while it is still the answering turn: if it ended while we awaited, fall
+            # through to start a new turn (which checks the chosen model itself) rather than queueing or rejecting.
+            blind = bool(prepared.blobs) and await _model_lacks_vision(ctx, answering.model)
+            if ctx.turns.answering(conversation_id) is answering:
+                if blind:
+                    raise HTTPException(
+                        status.HTTP_400_BAD_REQUEST,
+                        {"code": "no_vision", "message": NO_VISION_WHILE_ANSWERING},
+                    )
+                try:
+                    added = ctx.turns.add_message(conversation_id, body.prompt, body.mode, prepared, expected=answering)
+                except WaitingLimitError as e:
+                    raise HTTPException(status.HTTP_409_CONFLICT, {"code": "waiting_limit", "message": str(e)}) from e
+                if added is not None:
+                    turn, message = added
+                    return {"turn_id": turn.id, "conversation_id": conversation_id, "message_id": message.id}
+    # Not answering (any more): start a new turn, which checks the chosen model's vision itself.
     model = body.model or conv.model
     if prepared.blobs:
         await _reject_images_without_vision(ctx, model)
     return await _start_turn(ctx, conversation_id, body.prompt, model, prepared)
+
+
+@router.get("/turns/{turn_id}")
+async def turn_status(
+    turn_id: str, user: CurrentUser = Depends(require_user), ctx: AppContext = Depends(get_ctx)
+) -> dict:
+    """Checks retained attachments without opening a session or reading its history."""
+    turn = ctx.turns.get(turn_id)
+    if turn is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "turn not found (it may have expired)")
+    return {"done": turn.done, "unread_ids": [m.id for m in turn.follow_ups if m.unsent]}
 
 
 @router.get("/turns/{turn_id}/events")
@@ -261,6 +308,17 @@ async def abort_turn(
     turn_id: str, user: CurrentUser = Depends(require_user), ctx: AppContext = Depends(get_ctx)
 ) -> dict:
     return {"aborted": await ctx.turns.abort(turn_id)}
+
+
+@router.delete("/turns/{turn_id}/queue/{message_id}")
+async def cancel_queued_message(
+    turn_id: str, message_id: str, user: CurrentUser = Depends(require_user), ctx: AppContext = Depends(get_ctx)
+) -> dict:
+    """Cancels a 「あとで送信」 message; removed is false once it has been sent or the turn is ending."""
+    try:
+        return {"removed": ctx.turns.unqueue(turn_id, message_id)}
+    except TurnNotFoundError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "turn not found (it may have expired)") from e
 
 
 @router.post("/turns/{turn_id}/approvals/{approval_id}")

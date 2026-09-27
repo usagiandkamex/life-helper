@@ -59,6 +59,11 @@ APPROVAL_RULES = """\
 - 却下された・時間切れになったと結果が返ってきたら、同じ書き込みを繰り返さないでください。保存しなかったことを伝え、必要なら利用者に確認してください。
 - 結果が `saved: true` のときだけ「保存しました」と伝えてください。"""
 
+FOLLOW_UP_RULES = """\
+# 回答の途中に届いたメッセージ
+- 回答の途中で、利用者から追加のメッセージが届くことがあります。そのときは元の依頼への対応を途中でやめず、追加の内容とあわせて両方に対応してください。
+- 追加のメッセージが元の依頼の取り消しや変更なら、それに従ってください。"""
+
 BROWSER_RULES = """\
 # ブラウザ（browser_* ツール）
 - `web_fetch` で本文が取れないページ（JavaScript で表示するページ、検索結果、「もっと見る」で続きを出すページなど）は、`browser_open` で開いて `browser_read`・`browser_click`・`browser_scroll`・`browser_fill` で調べてください。
@@ -110,6 +115,9 @@ def build_system_message(
             else "- このオートメーションは読み取り専用です。ファイルや保有銘柄を変更しないでください。\n"
         )
         parts.append(AUTOMATION_RULES.format(readonly=readonly))
-    elif approval:
-        parts.append(APPROVAL_RULES)
+    else:
+        if approval:
+            parts.append(APPROVAL_RULES)
+        # Only the chat takes messages while it answers (「すぐに送信」).
+        parts.append(FOLLOW_UP_RULES)
     return "\n\n".join(parts)
