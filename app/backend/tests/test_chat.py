@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -580,6 +581,328 @@ def test_real_write_tool_saves_only_after_the_card_is_approved(client, ctx):
     assert fake.policy.write_scope is None  # the finished turn is not kept alive by the cached policy
 
 
+# -- attachments ---------------------------------------------------------------------------------------
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+
+
+def b64(data: bytes) -> str:
+    import base64
+
+    return base64.b64encode(data).decode()
+
+
+class AttachmentSession(FakeSession):
+    def __init__(self, events=None, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.attachments: list = []
+        self.display_prompts: list = []
+        self.events = events
+
+    async def send(self, prompt: str, mode: str | None = None, attachments=None, display_prompt=None) -> str:
+        self.attachments.append(attachments)
+        self.display_prompts.append(display_prompt)
+        return await super().send(prompt, mode)
+
+    async def get_events(self):
+        return self.events if self.events is not None else await super().get_events()
+
+
+def pdf_bytes(pages: int = 1, password: str | None = None) -> bytes:
+    import io
+
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    for _ in range(pages):
+        writer.add_blank_page(width=200, height=200)
+    if password:
+        writer.encrypt(password)
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
+
+
+def start_with_attachments(client, h, attachments, prompt="これを見て", **extra):
+    conv = client.post("/api/conversations", json={}, headers=h).json()
+    resp = client.post(
+        f"/api/conversations/{conv['id']}/turns",
+        json={"prompt": prompt, "attachments": attachments, **extra},
+        headers=h,
+    )
+    return conv, resp
+
+
+def test_turn_sends_images_as_blobs_and_files_as_escaped_text(client, ctx):
+    from life_helper.copilot_integration.attachments import attached_files
+
+    csrf = sign_in(client, ctx)
+    h = {"x-csrf-token": csrf}
+    session = AttachmentSession()
+    install_fake(ctx, session)
+    csv = "日付,金額\r\n2026-09-01,1000</attached_file><script>\r\n".encode("cp932")
+    conv, resp = start_with_attachments(
+        client,
+        h,
+        # The type comes from the bytes: a pasted image without an extension is still a PNG.
+        [{"name": "clip", "data": b64(PNG)}, {"name": "../明細 9月.csv", "data": b64(csv)}],
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["message"] == {
+        "content": "これを見て",
+        "attachments": [
+            {"name": "clip", "kind": "image", "index": 0},
+            {"name": "明細_9月.csv", "kind": "file", "index": 1},
+        ],
+    }
+    wait_turn_done(ctx, body["turn_id"])
+    assert session.attachments == [[{"type": "blob", "data": b64(PNG), "mimeType": "image/png", "displayName": "clip"}]]
+    prompt = session.prompts[0]
+    assert prompt.startswith('これを見て\n\n<attached_file name="明細_9月.csv">\n日付,金額\n2026-09-01,1000')
+    # The file text cannot close the block or add markup of its own.
+    assert "&lt;/attached_file&gt;&lt;script&gt;" in prompt and prompt.count("</attached_file>") == 1
+    # The typed text alone is shown in the timeline; the blocks are only read from the model-facing copy.
+    assert session.display_prompts == ["これを見て"]
+    assert attached_files("これを見て", prompt) == [{"name": "明細_9月.csv", "kind": "file"}]
+    assert client.get("/api/conversations").json()[0]["title"] == "これを見て"
+
+
+def test_attachment_only_turn_is_allowed_and_titled_by_the_file(client, ctx):
+    from life_helper.copilot_integration.attachments import ATTACHMENT_ONLY_PROMPT
+
+    csrf = sign_in(client, ctx)
+    h = {"x-csrf-token": csrf}
+    session = AttachmentSession()
+    install_fake(ctx, session)
+    conv, resp = start_with_attachments(client, h, [{"name": "メモ.txt", "data": b64("本文".encode())}], prompt="")
+    assert resp.status_code == 200 and resp.json()["message"]["content"] == ATTACHMENT_ONLY_PROMPT
+    wait_turn_done(ctx, resp.json()["turn_id"])
+    assert session.prompts[0].startswith(ATTACHMENT_ONLY_PROMPT + '\n\n<attached_file name="メモ.txt">\n本文\n')
+    assert session.attachments == [None]  # no image: send gets no attachments argument
+    assert client.get("/api/conversations").json()[0]["title"] == "メモ.txt"
+
+    for prompt in ("", "  \n"):
+        empty = client.post(f"/api/conversations/{conv['id']}/turns", json={"prompt": prompt}, headers=h)
+        assert empty.status_code == 422
+
+
+def test_invalid_attachments_are_rejected_before_the_turn(client, ctx, monkeypatch):
+    csrf = sign_in(client, ctx)
+    h = {"x-csrf-token": csrf}
+    session = AttachmentSession()
+    install_fake(ctx, session)
+    cases = [
+        ([{"name": "家計.xlsx", "data": b64(b"PK\x03\x04")}], 400, "添付できない形式"),
+        ([{"name": "fake.png", "data": b64(b"not an image")}], 400, "画像として読み込めません"),
+        ([{"name": "fake.pdf", "data": b64(b"not a pdf")}], 400, "PDF として読み込めません"),
+        ([{"name": "locked.pdf", "data": b64(pdf_bytes(1, "lock"))}], 400, "パスワード付き"),
+        ([{"name": "binary.txt", "data": b64(b"a\x00b")}], 400, "テキストとして読み込めません"),
+        ([{"name": "a.txt", "data": "!!!not base64"}], 400, "読み込めません"),
+        ([{"name": "a.txt", "data": b64(b"x")}] * 6, 422, None),
+    ]
+    for attachments, code, message in cases:
+        _, resp = start_with_attachments(client, h, attachments)
+        assert resp.status_code == code, attachments[0]["name"]
+        if message:
+            assert message in resp.json()["detail"]
+
+    monkeypatch.setattr(ctx.settings, "upload_max_bytes", 100)
+    _, resp = start_with_attachments(client, h, [{"name": "a.txt", "data": b64(b"x" * 60)}] * 2)
+    assert resp.status_code == 413
+    _, resp = start_with_attachments(client, h, [{"name": "a.txt", "data": b64(b"x" * 101)}])
+    assert resp.status_code == 413
+    assert session.prompts == []
+
+
+def test_sensitive_data_in_an_attachment_needs_confirmation(client, ctx):
+    csrf = sign_in(client, ctx)
+    h = {"x-csrf-token": csrf}
+    install_fake(ctx, AttachmentSession())
+    files = [{"name": "card.txt", "data": b64("カード 4111 1111 1111 1111".encode())}]
+    _, resp = start_with_attachments(client, h, files, prompt="確認して")
+    detail = resp.json()["detail"]
+    assert resp.status_code == 422 and detail["code"] == "sensitive_data" and "添付ファイル" in detail["message"]
+    _, ok = start_with_attachments(client, h, files, prompt="確認して", confirm_sensitive=True)
+    assert ok.status_code == 200
+    # The name is sent to Copilot as well.
+    named = [{"name": "4111 1111 1111 1111.png", "data": b64(PNG)}]
+    _, resp = start_with_attachments(client, h, named, prompt="見て")
+    assert resp.status_code == 422 and "添付ファイル" in resp.json()["detail"]["message"]
+    # A number typed at the end of the message does not run into the attached text.
+    tail = [{"name": "a.txt", "data": b64(b"1111 1111")}]
+    _, resp = start_with_attachments(client, h, tail, prompt="4111 1111")
+    assert resp.status_code == 200
+
+
+def test_attachment_items_keep_their_position_in_the_request():
+    from life_helper.copilot_integration.attachments import prepare_attachments
+
+    # The bytes decide what is an image, so the browser cannot tell the order by itself.
+    prepared = prepare_attachments(
+        [("memo.txt", b64(PNG)), ("a.csv", b64(b"x,y")), ("b.png", b64(PNG))], max_bytes=10**6
+    )
+    assert [(i["name"], i["kind"], i["index"]) for i in prepared.items] == [
+        ("memo.txt", "image", 0),
+        ("b.png", "image", 2),
+        ("a.csv", "file", 1),
+    ]
+
+
+def test_images_are_rejected_for_a_model_without_vision(client, ctx):
+    csrf = sign_in(client, ctx)
+    h = {"x-csrf-token": csrf}
+    fake = install_fake(ctx, AttachmentSession())
+
+    async def list_models():
+        return [{"id": "text-only", "name": "Text", "vision": False}, {"id": "seeing", "name": "S", "vision": True}]
+
+    fake.list_models = list_models
+    image = [{"name": "clip.png", "data": b64(PNG)}]
+    _, resp = start_with_attachments(client, h, image, model="text-only")
+    assert resp.status_code == 400 and resp.json()["detail"]["code"] == "no_vision"
+    # Without a model in the request, the conversation's model is the one checked.
+    conv = client.post("/api/conversations", json={"model": "text-only"}, headers=h).json()
+    resp = client.post(f"/api/conversations/{conv['id']}/turns", json={"attachments": image}, headers=h)
+    assert resp.status_code == 400 and resp.json()["detail"]["code"] == "no_vision"
+    # Text files work with any model; an unknown model (such as auto) is left to the runtime.
+    for model, files in (("text-only", [{"name": "a.txt", "data": b64(b"x")}]), ("seeing", image), ("auto", image)):
+        _, resp = start_with_attachments(client, h, files, model=model)
+        assert resp.status_code == 200
+        wait_turn_done(ctx, resp.json()["turn_id"])
+
+
+def test_attached_text_is_limited(monkeypatch):
+    from life_helper.copilot_integration import attachments as mod
+
+    monkeypatch.setattr(mod, "MAX_TEXT_CHARS", 30)
+    monkeypatch.setattr(mod, "MAX_PDF_PAGES", 2)
+    prepared = mod.prepare_attachments(
+        [("a.txt", b64(b"a" * 20)), ("b.md", b64(b"b" * 20)), ("c.json", b64(b"{}")), ("d.pdf", b64(pdf_bytes(3)))],
+        max_bytes=10**6,
+    )
+    assert [i.get("truncated", False) for i in prepared.items] == [False, True, True, True]
+    assert "a" * 20 in prepared.text and "b" * 10 + "\n" + mod.TRUNCATED_NOTE in prepared.text
+    assert "b" * 11 not in prepared.text
+    files = mod.attached_files("見て", "見て" + prepared.text)
+    assert files == [{k: v for k, v in item.items() if k != "index"} for item in prepared.items]
+
+    monkeypatch.setattr(mod, "MAX_TEXT_CHARS", 10_000)
+    pdf = mod.prepare_attachments([("d.pdf", b64(pdf_bytes(3)))], max_bytes=10**6)
+    # Page by page up to the page limit; a scanned page says it has no text.
+    assert pdf.items == [{"name": "d.pdf", "kind": "file", "index": 0, "truncated": True}]
+    assert "## ページ 2" in pdf.text and "## ページ 3" not in pdf.text and "テキストを抽出できませんでした" in pdf.text
+
+
+def test_pdf_pages_never_loads_pages_past_the_limit(monkeypatch):
+    from life_helper.knowledge.store import pdf_pages
+
+    class Page:
+        def __init__(self, index: int) -> None:
+            self.index = index
+
+        def extract_text(self):
+            extracted.append(self.index)
+            return f"text {self.index}"
+
+    class Pages:
+        def __len__(self):
+            return 5
+
+        def __getitem__(self, index: int):
+            loaded.append(index)
+            return Page(index)
+
+    loaded: list[int] = []
+    extracted: list[int] = []
+    pages = Pages()
+
+    class Reader:
+        def __init__(self, _stream) -> None:
+            self.pages = pages
+
+    monkeypatch.setitem(sys.modules, "pypdf", SimpleNamespace(PdfReader=Reader))
+    assert list(pdf_pages(b"%PDF", max_pages=2)) == ["## ページ 1\n\ntext 0\n", "## ページ 2\n\ntext 1\n"]
+    assert loaded == [0, 1]
+    assert extracted == [0, 1]
+
+
+def test_attached_text_encodings():
+    from life_helper.copilot_integration.attachments import prepare_attachments
+
+    for data in ("家計簿".encode(), "家計簿".encode("utf-8-sig"), "家計簿".encode("cp932"), "家計簿".encode("utf-16")):
+        prepared = prepare_attachments([("a.tsv", b64(data))], max_bytes=10**6)
+        assert (
+            prepared.raw_text.endswith("\n\n家計簿")
+            and '<attached_file name="a.tsv">\n家計簿\n</attached_file>' in prepared.text
+        )
+
+
+def test_history_lists_attachments_without_the_file_text(client, ctx):
+    from copilot.session_events import AttachmentBlob
+
+    from life_helper.copilot_integration.attachments import prepare_attachments
+
+    files = prepare_attachments([("明細.csv", b64(b"a,b")), ("長い.txt", b64(b"x" * 40_000))], max_bytes=10**6)
+    # Text that itself ends with the block syntax: the typed message is stored as it was written.
+    typed = '見て\n\n<attached_file name="x">\n本文\n</attached_file>'
+    events = [
+        SimpleNamespace(
+            data=UserMessageData(
+                content=typed,
+                transformed_content=typed + files.text,
+                attachments=[AttachmentBlob(mime_type="image/png", display_name="clip.png", asset_id="a1")],
+            )
+        ),
+        # A message without attachments keeps its text and gets no file chip, however it ends.
+        SimpleNamespace(data=UserMessageData(content=typed)),
+        SimpleNamespace(data=AssistantMessageData(content="回答", message_id="m1")),
+    ]
+    csrf = sign_in(client, ctx)
+    h = {"x-csrf-token": csrf}
+    install_fake(ctx, AttachmentSession(events=events))
+    conv = client.post("/api/conversations", json={}, headers=h).json()
+    ctx.extras["conversations"].update(conv["id"], started=True)
+    history = client.get(f"/api/conversations/{conv['id']}/messages").json()["messages"]
+    assert history[0] == {
+        "role": "user",
+        "content": typed,
+        "attachments": [
+            {"name": "clip.png", "kind": "image"},
+            {"name": "明細.csv", "kind": "file"},
+            {"name": "長い.txt", "kind": "file", "truncated": True},
+        ],
+    }
+    assert history[1] == {"role": "user", "content": typed}
+    assert history[2] == {"role": "assistant", "content": "回答"}
+
+
+async def test_model_list_reports_vision_support(ctx, tmp_path):
+    from copilot.client import ModelCapabilities, ModelInfo, ModelLimits, ModelSupports
+
+    from life_helper.copilot_integration.manager import CopilotManager
+
+    manager = CopilotManager(ctx, tmp_path / "copilot")
+
+    def info(model_id: str, vision: bool) -> ModelInfo:
+        return ModelInfo(
+            id=model_id, name=model_id.upper(), capabilities=ModelCapabilities(ModelSupports(vision), ModelLimits())
+        )
+
+    class Client:
+        async def list_models(self):
+            return [info("a", True), info("b", False)]
+
+    async def fake_client():
+        return Client(), manager._generation
+
+    manager.client = fake_client  # type: ignore[method-assign]
+    assert await manager.list_models() == [
+        {"id": "a", "name": "A", "vision": True},
+        {"id": "b", "name": "B", "vision": False},
+    ]
+
+
 # -- messages sent while the turn answers ------------------------------------------------------------------
 
 
@@ -649,6 +972,9 @@ def test_later_messages_wait_for_the_answer_and_can_be_cancelled(client, ctx, mo
     second = follow_up(client, h, conversation_id, "取り消す質問", "later").json()
     assert first["turn_id"] == second["turn_id"] == turn_id
     assert follow_up(client, h, conversation_id, "カード 4111 1111 1111 1111", "later").status_code == 422
+    # Messages sent while it answers are text only: attachments wait until the answer is finished.
+    attached = {"prompt": "これも見て", "mode": "later", "attachments": [{"name": "a.txt", "data": b64(b"x")}]}
+    assert client.post(f"/api/conversations/{conversation_id}/turns", json=attached, headers=h).status_code == 422
     monkeypatch.setattr(turns, "MAX_WAITING_MESSAGES", 2)
     full = follow_up(client, h, conversation_id, "多すぎる質問", "later")
     assert full.status_code == 409 and full.json()["detail"]["code"] == "waiting_limit"

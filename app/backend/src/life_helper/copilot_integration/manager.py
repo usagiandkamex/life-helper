@@ -126,7 +126,14 @@ class CopilotManager:
     async def list_models(self) -> list[dict]:
         client, _ = await self.client()
         models = await client.list_models()
-        return [{"id": m.id, "name": getattr(m, "name", None) or m.id} for m in models]
+        return [
+            {
+                "id": m.id,
+                "name": getattr(m, "name", None) or m.id,
+                "vision": bool(getattr(getattr(getattr(m, "capabilities", None), "supports", None), "vision", False)),
+            }
+            for m in models
+        ]
 
     # -- sessions ----------------------------------------------------------------------------------------
 

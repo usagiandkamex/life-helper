@@ -1,4 +1,7 @@
-import type { ApprovalStatus, ChartData, FollowUpMode, HistoryMessage, Screenshot, TurnEvent } from './types'
+import type { ApprovalStatus, AttachmentInfo, ChartData, FollowUpMode, HistoryMessage, Screenshot, TurnEvent } from './types'
+
+// url: a thumbnail of an image attached in this browser session (data: URL; CSP allows no blob: images).
+export type ShownAttachment = AttachmentInfo & { url?: string }
 
 export type ApprovalItem = {
   kind: 'approval'
@@ -11,7 +14,7 @@ export type ApprovalItem = {
 }
 
 export type Item =
-  | { kind: 'user'; text: string }
+  | { kind: 'user'; text: string; attachments?: ShownAttachment[] }
   | { kind: 'assistant'; text: string; streaming?: boolean }
   | {
       kind: 'tool'
@@ -109,7 +112,11 @@ export function applyEvent(items: Item[], ev: TurnEvent, turnId = ''): Item[] {
 
 export function fromHistory(messages: HistoryMessage[]): Item[] {
   return messages.map((m) =>
-    m.role === 'tool' ? { kind: 'tool', name: m.name, args: m.args, success: true } : { kind: m.role, text: m.content },
+    m.role === 'tool'
+      ? { kind: 'tool', name: m.name, args: m.args, success: true }
+      : m.role === 'user'
+        ? { kind: 'user', text: m.content, attachments: m.attachments }
+        : { kind: 'assistant', text: m.content },
   )
 }
 

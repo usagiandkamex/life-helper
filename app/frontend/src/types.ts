@@ -45,8 +45,11 @@ export type TurnEvent =
   // unsent: the waiting messages Copilot never read (中断, timeout, error); they go back to the composer.
   | { type: 'end'; unsent?: UnsentMessage[] }
 
+// Files and images attached to a chat message (the history API returns only their names, not the contents).
+export type AttachmentInfo = { name: string; kind: 'image' | 'file'; truncated?: boolean }
+
 export type HistoryMessage =
-  | { role: 'user'; content: string }
+  | { role: 'user'; content: string; attachments?: AttachmentInfo[] }
   | { role: 'assistant'; content: string }
   | { role: 'tool'; name: string; args: string }
 

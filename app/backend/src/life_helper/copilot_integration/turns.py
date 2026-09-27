@@ -163,14 +163,22 @@ class TurnManager:
         if loop is not None:
             loop.call_later(TURN_RETENTION_SECONDS, self._turns.pop, turn.id, None)
 
-    async def start(self, conversation_id: str, prompt: str, model: str) -> Turn:
+    async def start(
+        self,
+        conversation_id: str,
+        prompt: str,
+        model: str,
+        *,
+        attachments: list[dict] | None = None,
+        display_prompt: str | None = None,
+    ) -> Turn:
         if self.busy(conversation_id):
             raise TurnBusyError("this conversation is already answering")
         self._loop = asyncio.get_running_loop()
         turn = Turn(id=uuid.uuid4().hex, conversation_id=conversation_id)
         self._turns[turn.id] = turn
         self._busy[conversation_id] = turn.id
-        turn.task = asyncio.create_task(self._run(turn, prompt, model))
+        turn.task = asyncio.create_task(self._run(turn, prompt, model, attachments or [], display_prompt))
         return turn
 
     # -- messages sent while the turn answers --------------------------------------------------------------
@@ -240,7 +248,9 @@ class TurnManager:
     def _emit_threadsafe(self, turn: Turn, event: dict) -> None:
         self._on_loop(self._emit, turn, event)
 
-    async def _run(self, turn: Turn, prompt: str, model: str) -> None:
+    async def _run(
+        self, turn: Turn, prompt: str, model: str, attachments: list[dict], display_prompt: str | None = None
+    ) -> None:
         conversation = self.conversations.get(turn.conversation_id)
         scope = WriteScope(
             approver=lambda path, diff: self._approve(turn, path, diff),
@@ -258,7 +268,12 @@ class TurnManager:
             self.conversations.update(turn.conversation_id, started=True, model=model)
             unsubscribe = turn.active.session.on(lambda ev: self._on_event(turn, ev))
             try:
-                await self._answer(turn, prompt)
+                # Images go as blob attachments; other attached files are already text in the prompt. The typed
+                # text goes as the display prompt, so the history knows which part of the message the user wrote.
+                extra = {"attachments": attachments} if attachments else {}
+                if display_prompt is not None:
+                    extra["display_prompt"] = display_prompt
+                await self._answer(turn, prompt, **extra)
                 # 「あとで送信」: each message gets its own answer once the answers before it are finished.
                 while (message := self._next_waiting(turn, "later")) is not None:
                     message.state = "sent"
@@ -307,9 +322,10 @@ class TurnManager:
     def _user_event(self, message: FollowUp) -> dict:
         return {"type": "user", "id": message.id, "text": self.masker.mask_text(message.text), "mode": message.mode}
 
-    async def _answer(self, turn: Turn, prompt: str, message: FollowUp | None = None) -> None:
-        """Sends a request and waits until Copilot has answered it, together with the 「すぐに送信」 messages sent
-        meanwhile: the runtime reads them before its next model request, so they join the answer in progress."""
+    async def _answer(self, turn: Turn, prompt: str, message: FollowUp | None = None, **options: Any) -> None:
+        """Sends a request (options: its attachments and display prompt) and waits until Copilot has answered it,
+        together with the 「すぐに送信」 messages sent meanwhile: the runtime reads them before its next model request,
+        so they join the answer in progress."""
         assert turn.active is not None
         if turn.stopping:
             # 中断 came while the session was opening: send nothing.
@@ -318,7 +334,7 @@ class TurnManager:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.timeout_seconds
         idles = turn.idles
-        message_id = await session.send(prompt)
+        message_id = await session.send(prompt, **options)
         if message is not None:
             message.message_id = message_id
         steering: list[FollowUp] = []

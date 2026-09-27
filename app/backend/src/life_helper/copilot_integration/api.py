@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from ..auth import CurrentUser, require_user
 from ..context import AppContext, get_ctx
 from ..security import SENSITIVE_LABELS, detect_sensitive
+from .attachments import (
+    ATTACHMENT_ONLY_PROMPT,
+    MAX_ATTACHMENTS,
+    AttachmentError,
+    PreparedAttachments,
+    prepare_attachments,
+)
 from .events import history_from_events
 from .manager import NoTokenError, SessionStateError
 from .turns import (
@@ -41,13 +49,28 @@ class UpdateConversation(BaseModel):
     model: str | None = None
 
 
+class AttachmentBody(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    data: str = Field(min_length=1)  # base64
+
+
 class TurnBody(BaseModel):
-    prompt: str = Field(min_length=1, max_length=20000)
+    prompt: str = Field(default="", max_length=20000)
     model: str | None = None
     confirm_sensitive: bool = False
+    attachments: list[AttachmentBody] = Field(default_factory=list, max_length=MAX_ATTACHMENTS)
     # Sent while the conversation answers: "now" joins the answer in progress, "later" waits until it is finished.
     # A conversation that is not answering (any more) starts a turn with it as usual.
     mode: Literal["now", "later"] | None = None
+
+    @model_validator(mode="after")
+    def _not_empty(self) -> TurnBody:
+        if not self.prompt.strip() and not self.attachments:
+            raise ValueError("a prompt or an attachment is required")
+        # A message sent while the conversation answers is text only: attachments wait until the answer is finished.
+        if self.mode is not None and self.attachments:
+            raise ValueError("attachments cannot be sent while the conversation answers")
+        return self
 
 
 class ApprovalBody(BaseModel):
@@ -142,33 +165,81 @@ async def conversation_messages(
     return {"messages": history_from_events(events, ctx.masker), "busy": False, "unsent": unsent}
 
 
-async def _start_turn(ctx: AppContext, conversation_id: str, prompt: str, model: str | None) -> dict:
+async def _start_turn(
+    ctx: AppContext,
+    conversation_id: str,
+    prompt: str,
+    model: str | None,
+    attachments: PreparedAttachments | None = None,
+) -> dict:
     conv = ctx.extras["conversations"].get(conversation_id)
     if conv is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "conversation not found")
     if not ctx.github_token():
         raise _reauth()
+    attachments = attachments or PreparedAttachments()
+    lines = prompt.strip().splitlines()
     if conv.title == "新しい会話":
-        ctx.extras["conversations"].update(conversation_id, title=prompt.strip().splitlines()[0][:40])
+        title = lines[0] if lines else attachments.items[0]["name"]
+        ctx.extras["conversations"].update(conversation_id, title=title[:40])
+    shown = prompt if lines else ATTACHMENT_ONLY_PROMPT
     try:
-        turn = await ctx.turns.start(conversation_id, prompt, model or conv.model)
+        turn = await ctx.turns.start(
+            conversation_id,
+            shown + attachments.text,
+            model or conv.model,
+            attachments=attachments.blobs,
+            # Only the typed text is shown in the timeline: the file blocks stay out of the stored message.
+            display_prompt=shown if attachments.text else None,
+        )
     except TurnBusyError as e:
         raise HTTPException(status.HTTP_409_CONFLICT, "the conversation is already answering") from e
-    return {"turn_id": turn.id, "conversation_id": conversation_id}
+    return {
+        "turn_id": turn.id,
+        "conversation_id": conversation_id,
+        "message": {"content": shown, "attachments": attachments.items},
+    }
+
+
+async def _reject_images_without_vision(ctx: AppContext, model: str) -> None:
+    # The runtime would drop the image with an English error after the turn started; say so before sending.
+    try:
+        models = await ctx.copilot.list_models()
+    except Exception:  # noqa: BLE001 - the turn itself reports connection and sign-in problems
+        return
+    info = next((m for m in models if m["id"] == model), None)
+    if info is not None and info.get("vision") is False:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            {
+                "code": "no_vision",
+                "message": "選択中のモデルは画像を読み取れません。画像に対応したモデルを選んでください",
+            },
+        )
 
 
 @router.post("/conversations/{conversation_id}/turns")
 async def start_turn(
     conversation_id: str, body: TurnBody, user: CurrentUser = Depends(require_user), ctx: AppContext = Depends(get_ctx)
 ) -> dict:
-    kinds = detect_sensitive(body.prompt)
+    conv = ctx.extras["conversations"].get(conversation_id)
+    if conv is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "conversation not found")
+    try:
+        prepared = await asyncio.to_thread(
+            prepare_attachments, [(a.name, a.data) for a in body.attachments], max_bytes=ctx.settings.upload_max_bytes
+        )
+    except AttachmentError as e:
+        raise HTTPException(e.status_code, str(e)) from e
+    kinds = detect_sensitive(f"{body.prompt}\n\n{prepared.raw_text}")
     if kinds and not body.confirm_sensitive:
+        where = "（添付ファイルを含む）" if detect_sensitive(prepared.raw_text) else ""
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             {
                 "code": "sensitive_data",
                 "kinds": kinds,
-                "message": "機微情報の可能性があります: " + "、".join(SENSITIVE_LABELS[k] for k in kinds),
+                "message": f"機微情報の可能性があります{where}: " + "、".join(SENSITIVE_LABELS[k] for k in kinds),
             },
         )
     if body.mode is not None:
@@ -179,7 +250,11 @@ async def start_turn(
         if added is not None:
             turn, message = added
             return {"turn_id": turn.id, "conversation_id": conversation_id, "message_id": message.id}
-    return await _start_turn(ctx, conversation_id, body.prompt, body.model)
+    # Decided once: the model checked for images is the one the turn uses.
+    model = body.model or conv.model
+    if prepared.blobs:
+        await _reject_images_without_vision(ctx, model)
+    return await _start_turn(ctx, conversation_id, body.prompt, model, prepared)
 
 
 @router.get("/turns/{turn_id}/events")
