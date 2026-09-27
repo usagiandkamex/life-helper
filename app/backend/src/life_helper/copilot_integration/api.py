@@ -258,9 +258,7 @@ async def start_turn(
                         {"code": "no_vision", "message": NO_VISION_WHILE_ANSWERING},
                     )
                 try:
-                    added = ctx.turns.add_message(
-                        conversation_id, body.prompt, body.mode, prepared, expected=answering
-                    )
+                    added = ctx.turns.add_message(conversation_id, body.prompt, body.mode, prepared, expected=answering)
                 except WaitingLimitError as e:
                     raise HTTPException(status.HTTP_409_CONFLICT, {"code": "waiting_limit", "message": str(e)}) from e
                 if added is not None:
