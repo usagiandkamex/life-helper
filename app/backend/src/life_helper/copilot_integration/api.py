@@ -171,7 +171,12 @@ async def _start_turn(
     shown = prompt if lines else ATTACHMENT_ONLY_PROMPT
     try:
         turn = await ctx.turns.start(
-            conversation_id, shown + attachments.text, model or conv.model, attachments=attachments.blobs
+            conversation_id,
+            shown + attachments.text,
+            model or conv.model,
+            attachments=attachments.blobs,
+            # Only the typed text is shown in the timeline: the file blocks stay out of the stored message.
+            display_prompt=shown if attachments.text else None,
         )
     except TurnBusyError as e:
         raise HTTPException(status.HTTP_409_CONFLICT, "the conversation is already answering") from e

@@ -183,11 +183,15 @@ def _pdf_to_markdown(data: bytes) -> str:
     return "\n".join(pdf_pages(data))
 
 
-def pdf_pages(data: bytes) -> Iterator[str]:
-    """Yields each page of a PDF as a Markdown section; pages are read one at a time, so a caller may stop early."""
+def pdf_pages(data: bytes, *, max_pages: int | None = None) -> Iterator[str]:
+    """Yields each page of a PDF as a Markdown section; pages are read one at a time, so a caller may stop early.
+
+    Text is extracted only for the pages that are asked for, and never past ``max_pages``.
+    """
     from pypdf import PdfReader
 
     reader = PdfReader(io.BytesIO(data))
-    for i, page in enumerate(reader.pages, start=1):
+    pages = reader.pages if max_pages is None else reader.pages[:max_pages]
+    for i, page in enumerate(pages, start=1):
         text = (page.extract_text() or "").strip()
         yield f"## ページ {i}\n\n{text or '（テキストを抽出できませんでした。スキャン画像の PDF は非対応です）'}\n"

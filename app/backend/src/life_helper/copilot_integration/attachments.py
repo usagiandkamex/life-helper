@@ -31,7 +31,7 @@ TRUNCATED_NOTE = "…（文字数の上限を超えたため、ここから先�
 # The file text is HTML-escaped, so a block body never contains "<" and cannot close the tag early.
 _BLOCK = r'\n\n<attached_file name="([^"<>]*)"( truncated="true")?>\n([^<]*)\n</attached_file>'
 BLOCK_RE = re.compile(_BLOCK)
-TRAILING_BLOCKS_RE = re.compile(rf"(?:{_BLOCK})+\Z")
+BLOCKS_RE = re.compile(rf"(?:{_BLOCK})+")
 
 
 class AttachmentError(ValueError):
@@ -120,16 +120,27 @@ def prepare_attachments(items: list[tuple[str, str]], *, max_bytes: int) -> Prep
     return result
 
 
-def split_attached_files(content: str) -> tuple[str, list[dict]]:
-    """Separates the typed message from the file blocks ``prepare_attachments`` appended to it."""
-    match = TRAILING_BLOCKS_RE.search(content)
+def attached_files(content: str, transformed: str | None) -> list[dict]:
+    """The file blocks ``prepare_attachments`` appended, read from the model-facing copy of the message.
+
+    The message is sent with the typed text as its display prompt, so the runtime stores that text as ``content``
+    and the prompt the model saw as ``transformed_content``: the blocks are only read from the part that follows
+    the typed text, and the text itself is never parsed or cut. A message that merely ends with the same syntax
+    is therefore kept as it was typed. When that relation cannot be shown (an older message, or text that occurs
+    more than once in the transformed copy), no files are reported instead of guessing.
+    """
+    if not content or not transformed:
+        return []
+    start = transformed.find(content)
+    if start < 0 or transformed.find(content, start + 1) >= 0:
+        return []
+    match = BLOCKS_RE.match(transformed, start + len(content))
     if match is None:
-        return content, []
-    files = [
+        return []
+    return [
         {"name": html.unescape(m.group(1)), "kind": "file", **({"truncated": True} if m.group(2) else {})}
         for m in BLOCK_RE.finditer(match.group(0))
     ]
-    return content[: match.start()], files
 
 
 def _decode_text(data: bytes, name: str) -> str:
@@ -148,15 +159,22 @@ def _decode_text(data: bytes, name: str) -> str:
 
 
 def _pdf_text(data: bytes, name: str, budget: int) -> tuple[str, bool]:
-    """Reads pages only until the text budget or the page limit is reached. Returns (text, cut)."""
+    """Reads pages only until the text budget or the page limit is reached. Returns (text, cut).
+
+    A page is read only when the iterator is asked for it, so the limits are checked before that: no page past
+    them is ever extracted. A file with exactly ``MAX_PDF_PAGES`` pages is reported as cut, which is the safe
+    way round (the model is told that something may be missing).
+    """
     parts: list[str] = []
     size = 0
     try:
-        for i, page in enumerate(pdf_pages(data)):
-            if i >= MAX_PDF_PAGES or size > budget:
-                return "\n".join(parts), True
+        pages = pdf_pages(data, max_pages=MAX_PDF_PAGES)
+        while size < budget and len(parts) < MAX_PDF_PAGES:
+            page = next(pages, None)
+            if page is None:
+                return "\n".join(parts), False
             parts.append(page)
             size += len(page) + 1
     except Exception as e:  # noqa: BLE001 - pypdf raises many exception types for broken or locked files
         raise AttachmentError(400, f"{name} を読み込めませんでした（パスワード付きや壊れた PDF は読めません）") from e
-    return "\n".join(parts), False
+    return "\n".join(parts), True

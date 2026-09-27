@@ -18,7 +18,7 @@ from copilot.session_events import (
 )
 
 from ..security import SecretMasker
-from .attachments import split_attached_files
+from .attachments import attached_files
 
 ARG_PREVIEW_LIMIT = 600
 RESULT_PREVIEW_LIMIT = 1200
@@ -111,7 +111,8 @@ def history_from_events(events: list[Any], masker: SecretMasker) -> list[dict]:
         data = getattr(event, "data", None)
         match data:
             case UserMessageData():
-                content, files = split_attached_files(data.content or "")
+                content = data.content or ""
+                files = attached_files(content, data.transformed_content)
                 message = {"role": "user", "content": masker.mask_text(content)}
                 images = [
                     {"name": masker.mask_text(a.display_name or "画像"), "kind": "image"}

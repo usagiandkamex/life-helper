@@ -564,10 +564,12 @@ class AttachmentSession(FakeSession):
     def __init__(self, events=None, **kwargs) -> None:
         super().__init__(**kwargs)
         self.attachments: list = []
+        self.display_prompts: list = []
         self.events = events
 
-    async def send_and_wait(self, prompt: str, timeout: float = 60, attachments=None):
+    async def send_and_wait(self, prompt: str, timeout: float = 60, attachments=None, display_prompt=None):
         self.attachments.append(attachments)
+        self.display_prompts.append(display_prompt)
         return await super().send_and_wait(prompt, timeout)
 
     async def get_events(self):
@@ -600,7 +602,7 @@ def start_with_attachments(client, h, attachments, prompt="これを見て", **e
 
 
 def test_turn_sends_images_as_blobs_and_files_as_escaped_text(client, ctx):
-    from life_helper.copilot_integration.attachments import split_attached_files
+    from life_helper.copilot_integration.attachments import attached_files
 
     csrf = sign_in(client, ctx)
     h = {"x-csrf-token": csrf}
@@ -628,7 +630,9 @@ def test_turn_sends_images_as_blobs_and_files_as_escaped_text(client, ctx):
     assert prompt.startswith('これを見て\n\n<attached_file name="明細_9月.csv">\n日付,金額\n2026-09-01,1000')
     # The file text cannot close the block or add markup of its own.
     assert "&lt;/attached_file&gt;&lt;script&gt;" in prompt and prompt.count("</attached_file>") == 1
-    assert split_attached_files(prompt) == ("これを見て", [{"name": "明細_9月.csv", "kind": "file"}])
+    # The typed text alone is shown in the timeline; the blocks are only read from the model-facing copy.
+    assert session.display_prompts == ["これを見て"]
+    assert attached_files("これを見て", prompt) == [{"name": "明細_9月.csv", "kind": "file"}]
     assert client.get("/api/conversations").json()[0]["title"] == "これを見て"
 
 
@@ -748,7 +752,7 @@ def test_attached_text_is_limited(monkeypatch):
     assert [i.get("truncated", False) for i in prepared.items] == [False, True, True, True]
     assert "a" * 20 in prepared.text and "b" * 10 + "\n" + mod.TRUNCATED_NOTE in prepared.text
     assert "b" * 11 not in prepared.text
-    _, files = mod.split_attached_files("見て" + prepared.text)
+    files = mod.attached_files("見て", "見て" + prepared.text)
     assert files == [{k: v for k, v in item.items() if k != "index"} for item in prepared.items]
 
     monkeypatch.setattr(mod, "MAX_TEXT_CHARS", 10_000)
@@ -772,21 +776,23 @@ def test_attached_text_encodings():
 def test_history_lists_attachments_without_the_file_text(client, ctx):
     from copilot.session_events import AttachmentBlob
 
-    from life_helper.copilot_integration.attachments import prepare_attachments, split_attached_files
+    from life_helper.copilot_integration.attachments import prepare_attachments
 
     files = prepare_attachments([("明細.csv", b64(b"a,b")), ("長い.txt", b64(b"x" * 40_000))], max_bytes=10**6)
-    # Typed text that merely mentions the tag (not at the end) is left alone.
-    typed = '見て <attached_file name="x">\n本文\n</attached_file> と書いた'
+    # Text that itself ends with the block syntax: the typed message is stored as it was written.
+    typed = '見て\n\n<attached_file name="x">\n本文\n</attached_file>'
     events = [
         SimpleNamespace(
             data=UserMessageData(
-                content=typed + files.text,
+                content=typed,
+                transformed_content=typed + files.text,
                 attachments=[AttachmentBlob(mime_type="image/png", display_name="clip.png", asset_id="a1")],
             )
         ),
+        # A message without attachments keeps its text and gets no file chip, however it ends.
+        SimpleNamespace(data=UserMessageData(content=typed)),
         SimpleNamespace(data=AssistantMessageData(content="回答", message_id="m1")),
     ]
-    assert split_attached_files(typed) == (typed, [])
     csrf = sign_in(client, ctx)
     h = {"x-csrf-token": csrf}
     install_fake(ctx, AttachmentSession(events=events))
@@ -802,7 +808,8 @@ def test_history_lists_attachments_without_the_file_text(client, ctx):
             {"name": "長い.txt", "kind": "file", "truncated": True},
         ],
     }
-    assert history[1] == {"role": "assistant", "content": "回答"}
+    assert history[1] == {"role": "user", "content": typed}
+    assert history[2] == {"role": "assistant", "content": "回答"}
 
 
 async def test_model_list_reports_vision_support(ctx, tmp_path):
