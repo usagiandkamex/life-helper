@@ -996,8 +996,10 @@ def test_later_messages_wait_for_the_answer_and_can_be_cancelled(client, ctx, mo
     assert kinds.count("done") == 1 and events[-1] == {"type": "end"}
 
 
-def test_abort_returns_the_messages_copilot_has_not_read(client, ctx):
+def test_abort_returns_the_messages_copilot_has_not_read(client, ctx, monkeypatch):
     import time
+
+    from life_helper.copilot_integration import turns
 
     session = GatedSession(steer_opens=False)
     h, conversation_id, turn_id = start_gated_turn(client, ctx, session)
@@ -1007,6 +1009,10 @@ def test_abort_returns_the_messages_copilot_has_not_read(client, ctx):
         if "immediate" in session.modes:  # handed to Copilot, which has not read it yet
             break
         time.sleep(0.01)
+    # A message handed to Copilot but not read yet still counts toward the waiting limit.
+    monkeypatch.setattr(turns, "MAX_WAITING_MESSAGES", 2)
+    full = follow_up(client, h, conversation_id, "多すぎる", "now")
+    assert full.status_code == 409 and full.json()["detail"]["code"] == "waiting_limit"
     assert client.post(f"/api/turns/{turn_id}/abort", headers=h).json() == {"aborted": True}
     wait_turn_done(ctx, turn_id)
     assert session.prompts == ["最初の質問", "すぐ伝えること"]  # the later one was never sent

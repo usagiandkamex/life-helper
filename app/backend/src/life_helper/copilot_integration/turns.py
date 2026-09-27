@@ -228,7 +228,7 @@ class TurnManager:
         turn = self.answering(conversation_id)
         if turn is None or (expected is not None and turn is not expected):
             return None
-        if sum(m.state == "waiting" for m in turn.follow_ups) >= MAX_WAITING_MESSAGES:
+        if sum(m.unsent for m in turn.follow_ups) >= MAX_WAITING_MESSAGES:
             raise WaitingLimitError(f"送信待ちのメッセージは {MAX_WAITING_MESSAGES} 件までです")
         files = attachments or PreparedAttachments()
         message = FollowUp(id=uuid.uuid4().hex, text=text, mode=mode, attachments=files.items)

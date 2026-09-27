@@ -119,6 +119,9 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   const restoredRef = useRef(new Set<string>())
   // By message id. Not across reloads: a message whose files are gone comes back without them.
   const sentFilesRef = useRef(new Map<string, SentFiles>())
+  // While a message sent during the answer is being posted, the turn's events wait: its user or end event can arrive
+  // before the response that tells which files belong to it.
+  const heldEventsRef = useRef<{ holds: number; queue: (() => void)[] }>({ holds: 0, queue: [] })
   // A message sent just as the answer ended starts the next turn, which is followed once the current one has ended.
   const nextTurnRef = useRef<(() => void) | null>(null)
 
@@ -187,7 +190,12 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
         nextTurnRef.current = null
         next?.()
       }
-      source.onmessage = (msg) => {
+      const handle = (run: () => void) => {
+        const held = heldEventsRef.current
+        if (held.holds > 0) held.queue.push(run)
+        else run()
+      }
+      source.onmessage = (msg) => handle(() => {
         if (sourceRef.current !== source) return // another conversation was opened meanwhile
         const ev = JSON.parse(msg.data) as TurnEvent
         // A message sent with files from here shows their thumbnails (from the history, only their names).
@@ -199,10 +207,10 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
           restoreUnsent(ev.unsent, (sent) => sent.turnId === id)
           ended()
         }
-      }
-      source.onerror = () => {
+      })
+      source.onerror = () => handle(() => {
         if (sourceRef.current === source && source.readyState === EventSource.CLOSED) ended()
-      }
+      })
     },
     [loadConversations, restoreUnsent],
   )
@@ -551,25 +559,30 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
     setFollowUpSending(mode)
     try {
       // message: when the answer ended meanwhile and the message started a new turn, as for send().
-      const res = await api<{
-        turn_id: string
-        message_id?: string
-        message?: { content: string; attachments: SentAttachment[] }
-      }>(`/api/conversations/${id}/turns`, {
-        method: 'POST',
-        body: json({
-          prompt,
-          model,
-          confirm_sensitive: confirmSensitive,
-          mode,
-          attachments: files.map((a) => ({ name: a.name, data: a.data })),
-        }),
-      })
-      // Even if another conversation was opened meanwhile: the files come back with the message if it is not sent.
-      if (res.message_id && files.length)
-        sentFilesRef.current.set(res.message_id, { conversationId: id, turnId: res.turn_id, files })
-      // The server has them now; reopening the same conversation meanwhile keeps the composer, so this comes first.
-      setAttachments((cur) => cur.filter((a) => !files.includes(a)))
+      let res: { turn_id: string; message_id?: string; message?: { content: string; attachments: SentAttachment[] } }
+      const held = heldEventsRef.current
+      held.holds += 1
+      try {
+        res = await api<typeof res>(`/api/conversations/${id}/turns`, {
+          method: 'POST',
+          body: json({
+            prompt,
+            model,
+            confirm_sensitive: confirmSensitive,
+            mode,
+            attachments: files.map((a) => ({ name: a.name, data: a.data })),
+          }),
+        })
+        // Even if another conversation was opened meanwhile: the files come back with the message if it is not sent.
+        if (res.message_id && files.length)
+          sentFilesRef.current.set(res.message_id, { conversationId: id, turnId: res.turn_id, files })
+        // The server has them now; reopening the same conversation meanwhile keeps the composer, so this comes first
+        // (and before the held events, whose end may put them back).
+        setAttachments((cur) => cur.filter((a) => !files.includes(a)))
+      } finally {
+        held.holds -= 1
+        if (held.holds === 0) for (const run of held.queue.splice(0)) run()
+      }
       if (generationRef.current !== generation) return
       if (res.message_id) return // listed above the composer until Copilot takes it
       // The answer ended meanwhile, so the message started a new turn; its events follow those of the current one.
