@@ -944,6 +944,40 @@ def follow_up(client, h, conversation_id: str, text: str, mode: str):
     return client.post(f"/api/conversations/{conversation_id}/turns", json={"prompt": text, "mode": mode}, headers=h)
 
 
+def test_turn_status_requires_sign_in(client):
+    assert client.get("/api/turns/nope").status_code == 401
+
+
+def test_turn_status_preserves_unread_messages_until_expiry(client, ctx, monkeypatch):
+    from life_helper.copilot_integration import turns
+
+    session = GatedSession(steer_opens=False)
+    h, conversation_id, turn_id = start_gated_turn(client, ctx, session)
+    later = follow_up(client, h, conversation_id, "あとで聞くこと", "later").json()["message_id"]
+    now = follow_up(client, h, conversation_id, "すぐ伝えること", "now").json()["message_id"]
+    cancelled = follow_up(client, h, conversation_id, "取り消すこと", "later").json()["message_id"]
+    opened = list(ctx.copilot.opened)
+    endpoint = f"/api/turns/{turn_id}"
+    assert client.get(endpoint).json() == {"done": False, "unread_ids": [later, now, cancelled]}
+    client.delete(f"{endpoint}/queue/{cancelled}", headers=h)
+    assert client.get(endpoint).json() == {"done": False, "unread_ids": [later, now]}
+
+    monkeypatch.setattr(turns, "TURN_RETENTION_SECONDS", 0.2)
+    client.post(f"{endpoint}/abort", headers=h)
+    wait_turn_done(ctx, turn_id)
+    assert client.get(endpoint).json() == {"done": True, "unread_ids": [later, now]}
+    assert ctx.copilot.opened == opened  # polling neither opens the runtime nor reads conversation history
+
+    import time
+
+    for _ in range(200):
+        if client.get(endpoint).status_code == 404:
+            break
+        time.sleep(0.01)
+    else:
+        raise AssertionError("turn status did not expire")
+
+
 def test_message_sent_now_joins_the_answer(client, ctx):
     session = GatedSession()
     h, conversation_id, turn_id = start_gated_turn(client, ctx, session)
@@ -951,6 +985,7 @@ def test_message_sent_now_joins_the_answer(client, ctx):
     assert sent["turn_id"] == turn_id and sent["message_id"]
     wait_turn_done(ctx, turn_id)
     assert session.prompts == ["最初の質問", "追加の依頼"] and session.modes == [None, "immediate"]
+    assert client.get(f"/api/turns/{turn_id}").json() == {"done": True, "unread_ids": []}
 
     events = [e for _, e in parse_sse(client.get(f"/api/turns/{turn_id}/events").text)]
     kinds = [e["type"] for e in events]

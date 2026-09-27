@@ -28,6 +28,7 @@ import type {
 
 // New automation runs are saved by a separate job, so the list is polled while the chat is on screen.
 const THREAD_REFRESH_MS = 60_000
+const ATTACHMENT_REFRESH_MS = 60_000
 
 // The server checks the same limits and the file contents; these only give an early message.
 const MAX_ATTACHMENTS = 5
@@ -202,6 +203,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
         const thumbnails = ev.type === 'user' ? sentFilesRef.current.get(ev.id)?.files.map((f) => f.url) : undefined
         setItems((prev) => applyEvent(prev, ev, id, thumbnails))
         setWaiting((prev) => applyWaitingEvent(prev, ev))
+        if (ev.type === 'user' || ev.type === 'unqueued') sentFilesRef.current.delete(ev.id)
         if (ev.type === 'end') {
           source.close()
           restoreUnsent(ev.unsent, (sent) => sent.turnId === id)
@@ -353,6 +355,51 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
       .catch(() => undefined)
     return () => sourceRef.current?.close()
   }, [loadConversations])
+
+  useEffect(() => {
+    // A turn keeps running after its conversation is closed. Keep only unread files, including those awaiting
+    // restoration after an abort; the server expires that turn 15 minutes after completion.
+    let disposed = false
+    let checking = false
+    const followed = (sent: SentFiles) => {
+      const source = sourceRef.current
+      return source !== null && source.readyState !== EventSource.CLOSED && source.url.endsWith(`/api/turns/${sent.turnId}/events`)
+    }
+    const refresh = async () => {
+      if (checking) return
+      checking = true
+      try {
+        const entries = [...sentFilesRef.current].filter(([, sent]) => !followed(sent))
+        const turns = new Set(entries.map(([, sent]) => sent.turnId))
+        for (const id of turns) {
+          if (disposed) return
+          let unread: Set<string>
+          try {
+            const status = await api<{ unread_ids: string[] }>(`/api/turns/${id}`)
+            unread = new Set(status.unread_ids)
+          } catch (e) {
+            if (!(e instanceof ApiError && e.status === 404)) continue // retry transient failures, without losing drafts
+            unread = new Set()
+          }
+          if (disposed) return
+          for (const [messageId, sent] of entries) {
+            // A conversation may have reopened or a POST may have registered files while the request was in flight.
+            if (sent.turnId === id && !followed(sent) && !unread.has(messageId) && sentFilesRef.current.get(messageId) === sent)
+              sentFilesRef.current.delete(messageId)
+          }
+        }
+      } finally {
+        checking = false
+      }
+    }
+    const timer = window.setInterval(refresh, ATTACHMENT_REFRESH_MS)
+    window.addEventListener('focus', refresh)
+    return () => {
+      disposed = true
+      window.clearInterval(timer)
+      window.removeEventListener('focus', refresh)
+    }
+  }, [])
 
   useEffect(() => {
     const refresh = () => {
@@ -621,7 +668,8 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
     setError('')
     try {
       const res = await api<{ removed: boolean }>(`/api/turns/${turnId}/queue/${messageId}`, { method: 'DELETE' })
-      if (!res.removed) setError('すでに送信したため、取り消せませんでした。')
+      if (res.removed) sentFilesRef.current.delete(messageId)
+      else setError('すでに送信したため、取り消せませんでした。')
     } catch (e) {
       setError((e as Error).message)
     }
@@ -631,6 +679,8 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
     if (!window.confirm('この会話を削除しますか？（Copilot 側の履歴も削除されます）')) return
     try {
       await api(`/api/conversations/${id}`, { method: 'DELETE' })
+      for (const [messageId, sent] of sentFilesRef.current)
+        if (sent.conversationId === id) sentFilesRef.current.delete(messageId)
       if (currentIdRef.current === id) {
         selectConversation(null)
         setItems([])
@@ -819,7 +869,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
                         type="button"
                         className="link small"
                         onClick={() => cancelWaiting(m.id)}
-                        aria-label={`「${m.text.slice(0, 40)}」の送信を取り消す`}
+                        aria-label={`「${m.text.slice(0, 40) || m.attachments?.map((a) => a.name).join('、') || '添付のみのメッセージ'}」の送信を取り消す`}
                       >
                         取り消す
                       </button>

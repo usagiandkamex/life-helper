@@ -273,6 +273,17 @@ async def start_turn(
     return await _start_turn(ctx, conversation_id, body.prompt, model, prepared)
 
 
+@router.get("/turns/{turn_id}")
+async def turn_status(
+    turn_id: str, user: CurrentUser = Depends(require_user), ctx: AppContext = Depends(get_ctx)
+) -> dict:
+    """Checks retained attachments without opening a session or reading its history."""
+    turn = ctx.turns.get(turn_id)
+    if turn is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "turn not found (it may have expired)")
+    return {"done": turn.done, "unread_ids": [m.id for m in turn.follow_ups if m.unsent]}
+
+
 @router.get("/turns/{turn_id}/events")
 async def turn_events(
     turn_id: str,
