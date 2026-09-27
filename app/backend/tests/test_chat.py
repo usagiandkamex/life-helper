@@ -4,9 +4,12 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import pytest
 from copilot.session_events import (
     AssistantMessageData,
     AssistantMessageDeltaData,
+    SessionErrorData,
+    SessionIdleData,
     ToolExecutionStartData,
     UserMessageData,
 )
@@ -17,13 +20,20 @@ from .conftest import sign_in
 
 
 class FakeSession:
+    """Works like the runtime: send() queues the message and returns its id; the messages are answered in order
+    (user.message, the answer), and the session goes idle once none is left. abort() drops the queued ones."""
+
     def __init__(self, reply: str = "こんにちは", delay: float = 0.0, fail: Exception | None = None) -> None:
         self.reply = reply
         self.delay = delay
         self.fail = fail
         self.handlers: list = []
         self.prompts: list[str] = []
+        self.modes: list[str | None] = []
         self.aborted = False
+        self.cancelled = False  # the current run was aborted
+        self.pending: list[tuple[str, str]] = []
+        self.worker: asyncio.Task | None = None
 
     def on(self, handler):
         self.handlers.append(handler)
@@ -33,16 +43,35 @@ class FakeSession:
         for h in list(self.handlers):
             h(SimpleNamespace(data=data))
 
-    async def send_and_wait(self, prompt: str, timeout: float = 60):
+    async def send(self, prompt: str, mode: str | None = None) -> str:
         self.prompts.append(prompt)
+        self.modes.append(mode)
         if self.fail:
             raise self.fail
+        message_id = f"u{len(self.prompts)}"
+        self.pending.append((message_id, prompt))
+        if self.worker is None or self.worker.done():
+            self.cancelled = False
+            self.worker = asyncio.create_task(self._work())
+        return message_id
+
+    async def _work(self) -> None:
+        try:
+            while self.pending and not self.cancelled:
+                message_id, prompt = self.pending.pop(0)
+                self._fire(UserMessageData(content=prompt, message_id=message_id))
+                await self.answer(prompt)
+        except Exception as exc:  # noqa: BLE001
+            self._fire(SessionErrorData(error_type="error", message=str(exc)))
+        finally:
+            self._fire(SessionIdleData(aborted=self.cancelled or None))
+
+    async def answer(self, prompt: str) -> None:
         self._fire(ToolExecutionStartData(tool_call_id="t1", tool_name="grep", arguments={"pattern": "NISA"}))
         for ch in self.reply:
             self._fire(AssistantMessageDeltaData(delta_content=ch, message_id="m1"))
             await asyncio.sleep(self.delay)
         self._fire(AssistantMessageData(content=self.reply, message_id="m1"))
-        return None
 
     async def get_events(self):
         return [
@@ -53,6 +82,8 @@ class FakeSession:
 
     async def abort(self):
         self.aborted = True
+        self.cancelled = True
+        self.pending.clear()
 
 
 class FakeManager:
@@ -325,7 +356,7 @@ class WritingSession(FakeSession):
         self.manager: FakeManager | None = None
         self.results: list = []
 
-    async def send_and_wait(self, prompt: str, timeout: float = 60):
+    async def answer(self, prompt: str) -> None:
         assert self.manager is not None
         approver = self.manager.approver
         if self.parallel:
@@ -435,7 +466,7 @@ class AbortAfterApprovalSession(FakeSession):
         self.aborted = True
         self.aborted_gate.set()
 
-    async def send_and_wait(self, prompt: str, timeout: float = 60):
+    async def answer(self, prompt: str) -> None:
         assert self.manager is not None
         self.approval = await self.manager.approver("memories/a.md", "+++ b/memories/a.md\n+fact")
         await self.aborted_gate.wait()
@@ -493,7 +524,7 @@ class ToolCallingSession(FakeSession):
         self.tools: dict = {}
         self.result = None
 
-    async def send_and_wait(self, prompt: str, timeout: float = 60):
+    async def answer(self, prompt: str) -> None:
         from copilot import ToolInvocation
 
         self.result = await self.tools["write_knowledge_file"].handler(
@@ -547,3 +578,208 @@ def test_real_write_tool_saves_only_after_the_card_is_approved(client, ctx):
     assert written["approval_id"] == card["id"]
     assert kinds.index("approval_request") < kinds.index("approval_result") < kinds.index("file_write")
     assert fake.policy.write_scope is None  # the finished turn is not kept alive by the cached policy
+
+
+# -- messages sent while the turn answers ------------------------------------------------------------------
+
+
+class GatedSession(FakeSession):
+    """Keeps answering the first request until the gate opens (中断, or a 「すぐに送信」 message when steer_opens), so
+    follow-ups can be sent while it answers."""
+
+    def __init__(self, steer_opens: bool = True) -> None:
+        super().__init__(reply="回答")
+        self.steer_opens = steer_opens
+        self.gate = asyncio.Event()
+
+    async def send(self, prompt: str, mode: str | None = None) -> str:
+        message_id = await super().send(prompt, mode)
+        if mode == "immediate" and self.steer_opens:
+            self.gate.set()
+        return message_id
+
+    async def answer(self, prompt: str) -> None:
+        if prompt == self.prompts[0]:
+            await self.gate.wait()
+        await super().answer(prompt)
+
+    async def abort(self):
+        await super().abort()
+        self.gate.set()
+
+
+def start_gated_turn(client, ctx, session: GatedSession) -> tuple[dict, str, str]:
+    csrf = sign_in(client, ctx)
+    h = {"x-csrf-token": csrf}
+    install_fake(ctx, session)
+    conv = client.post("/api/conversations", json={}, headers=h).json()
+    turn = client.post(f"/api/conversations/{conv['id']}/turns", json={"prompt": "最初の質問"}, headers=h).json()
+    return h, conv["id"], turn["turn_id"]
+
+
+def follow_up(client, h, conversation_id: str, text: str, mode: str):
+    return client.post(f"/api/conversations/{conversation_id}/turns", json={"prompt": text, "mode": mode}, headers=h)
+
+
+def test_message_sent_now_joins_the_answer(client, ctx):
+    session = GatedSession()
+    h, conversation_id, turn_id = start_gated_turn(client, ctx, session)
+    sent = follow_up(client, h, conversation_id, "追加の依頼", "now").json()
+    assert sent["turn_id"] == turn_id and sent["message_id"]
+    wait_turn_done(ctx, turn_id)
+    assert session.prompts == ["最初の質問", "追加の依頼"] and session.modes == [None, "immediate"]
+
+    events = [e for _, e in parse_sse(client.get(f"/api/turns/{turn_id}/events").text)]
+    kinds = [e["type"] for e in events]
+    queued = {"type": "queued", "id": sent["message_id"], "text": "追加の依頼", "mode": "now"}
+    assert events[kinds.index("queued")] == queued
+    # Shown once Copilot reads it: after the answer so far, in the same turn.
+    user = kinds.index("user")
+    assert events[user] == {"type": "user", "id": sent["message_id"], "text": "追加の依頼", "mode": "now"}
+    assert kinds.index("queued") < kinds.index("message") < user and kinds[user:].count("message") == 1
+    assert kinds.count("done") == 1 and kinds[-2:] == ["done", "end"] and events[-1] == {"type": "end"}
+
+
+def test_later_messages_wait_for_the_answer_and_can_be_cancelled(client, ctx, monkeypatch):
+    from life_helper.copilot_integration import turns
+
+    session = GatedSession(steer_opens=False)
+    h, conversation_id, turn_id = start_gated_turn(client, ctx, session)
+    first = follow_up(client, h, conversation_id, "次の質問", "later").json()
+    second = follow_up(client, h, conversation_id, "取り消す質問", "later").json()
+    assert first["turn_id"] == second["turn_id"] == turn_id
+    assert follow_up(client, h, conversation_id, "カード 4111 1111 1111 1111", "later").status_code == 422
+    monkeypatch.setattr(turns, "MAX_WAITING_MESSAGES", 2)
+    full = follow_up(client, h, conversation_id, "多すぎる質問", "later")
+    assert full.status_code == 409 and full.json()["detail"]["code"] == "waiting_limit"
+
+    queue = f"/api/turns/{turn_id}/queue"
+    assert client.delete(f"{queue}/{second['message_id']}").status_code == 403
+    assert client.delete(f"{queue}/{second['message_id']}", headers=h).json() == {"removed": True}
+    assert client.delete(f"{queue}/{second['message_id']}", headers=h).json() == {"removed": False}
+    assert client.delete(f"/api/turns/nope/queue/{first['message_id']}", headers=h).status_code == 404
+    ctx.turns._loop.call_soon_threadsafe(session.gate.set)
+    wait_turn_done(ctx, turn_id)
+    assert session.prompts == ["最初の質問", "次の質問"] and session.modes == [None, None]
+    assert client.delete(f"{queue}/{first['message_id']}", headers=h).json() == {"removed": False}
+
+    events = [e for _, e in parse_sse(client.get(f"/api/turns/{turn_id}/events").text)]
+    kinds = [e["type"] for e in events]
+    assert {"type": "unqueued", "id": second["message_id"]} in events
+    # Sent once the first answer is finished, and answered in the same turn.
+    user = kinds.index("user")
+    assert events[user] == {"type": "user", "id": first["message_id"], "text": "次の質問", "mode": "later"}
+    assert kinds.index("message") < user and kinds[user:].count("message") == 1
+    assert kinds.count("done") == 1 and events[-1] == {"type": "end"}
+
+
+def test_abort_returns_the_messages_copilot_has_not_read(client, ctx):
+    import time
+
+    session = GatedSession(steer_opens=False)
+    h, conversation_id, turn_id = start_gated_turn(client, ctx, session)
+    later = follow_up(client, h, conversation_id, "あとで聞くこと", "later").json()
+    now = follow_up(client, h, conversation_id, "すぐ伝えること", "now").json()
+    for _ in range(200):
+        if "immediate" in session.modes:  # handed to Copilot, which has not read it yet
+            break
+        time.sleep(0.01)
+    assert client.post(f"/api/turns/{turn_id}/abort", headers=h).json() == {"aborted": True}
+    wait_turn_done(ctx, turn_id)
+    assert session.prompts == ["最初の質問", "すぐ伝えること"]  # the later one was never sent
+
+    events = [e for _, e in parse_sse(client.get(f"/api/turns/{turn_id}/events").text)]
+    unsent = [
+        {"id": later["message_id"], "text": "あとで聞くこと"},
+        {"id": now["message_id"], "text": "すぐ伝えること"},
+    ]
+    assert events[-1] == {"type": "end", "unsent": unsent}
+    assert "user" not in [e["type"] for e in events]
+    # A client that was not following the turn gets them with the conversation.
+    assert client.get(f"/api/conversations/{conversation_id}/messages").json()["unsent"] == unsent
+
+    # Once the turn is over, a message starts a new turn as usual.
+    again = follow_up(client, h, conversation_id, "もう一度", "now").json()
+    assert again["turn_id"] != turn_id and "message_id" not in again
+    wait_turn_done(ctx, again["turn_id"])
+    assert client.get(f"/api/conversations/{conversation_id}/messages").json()["unsent"] == []
+
+
+async def start_turn_directly(ctx, session: FakeSession, timeout: float = 5):
+    from life_helper.bootstrap import init_chat, init_core
+
+    init_core(ctx)
+    init_chat(ctx)
+    ctx.turns.timeout_seconds = timeout  # a turn that waits for the wrong thing fails fast
+    install_fake(ctx, session)
+    conv = ctx.extras["conversations"].create("t", "auto")
+    return conv.id, await ctx.turns.start(conv.id, "最初の質問", "auto")
+
+
+class LateSteeringSession(FakeSession):
+    """The first answer is finished (the session goes idle) before a 「すぐに送信」 message reaches the runtime, so
+    the message starts another run."""
+
+    async def send(self, prompt: str, mode: str | None = None) -> str:
+        if mode == "immediate":
+            await self.worker
+        return await super().send(prompt, mode)
+
+
+async def test_message_sent_now_after_the_answer_gets_its_own_answer(ctx):
+    session = LateSteeringSession(reply="abc")
+    conversation_id, turn = await start_turn_directly(ctx, session)
+    ctx.turns.add_message(conversation_id, "追加の依頼", "now")
+    [chunk async for chunk in ctx.turns.stream(turn)]
+    kinds = [e["type"] for e in turn.events]
+    assert session.prompts == ["最初の質問", "追加の依頼"]
+    # The turn waits for the second run instead of ending at the first idle.
+    assert kinds.count("message") == 2 and kinds.index("message") < kinds.index("user")
+    assert kinds[-2:] == ["done", "end"] and turn.events[-1] == {"type": "end"}
+
+
+class EagerSession(FakeSession):
+    """Reads a 「すぐに送信」 message at once: its user.message comes before send returns (with or without an id)."""
+
+    def __init__(self, ids: bool) -> None:
+        super().__init__(reply="abc")
+        self.ids = ids
+        self.gate = asyncio.Event()
+
+    async def send(self, prompt: str, mode: str | None = None) -> str:
+        if mode != "immediate":
+            return await super().send(prompt, mode)
+        self.prompts.append(prompt)
+        self.modes.append(mode)
+        message_id = f"u{len(self.prompts)}"
+        self._fire(UserMessageData(content=prompt, message_id=message_id if self.ids else None))
+        self.gate.set()
+        return message_id
+
+    async def answer(self, prompt: str) -> None:
+        await self.gate.wait()
+        await super().answer(prompt)
+
+
+@pytest.mark.parametrize("ids", [True, False])
+async def test_message_read_before_send_returns_is_recognised(ctx, ids):
+    session = EagerSession(ids)
+    conversation_id, turn = await start_turn_directly(ctx, session)
+    _, message = ctx.turns.add_message(conversation_id, "追加の依頼", "now")
+    [chunk async for chunk in ctx.turns.stream(turn)]
+    kinds = [e["type"] for e in turn.events]
+    assert "error" not in kinds and kinds[-2:] == ["done", "end"] and turn.events[-1] == {"type": "end"}
+    user = [e for e in turn.events if e["type"] == "user"]
+    assert user == [{"type": "user", "id": message.id, "text": "追加の依頼", "mode": "now"}]
+
+
+async def test_stopping_turn_takes_no_more_messages(ctx):
+    session = FakeSession()
+    conversation_id, turn = await start_turn_directly(ctx, session)
+    _, waiting = ctx.turns.add_message(conversation_id, "あとで聞くこと", "later")
+    assert await ctx.turns.abort(turn.id)
+    assert ctx.turns.add_message(conversation_id, "もうひとつ", "later") is None
+    assert not ctx.turns.unqueue(turn.id, waiting.id)
+    [chunk async for chunk in ctx.turns.stream(turn)]
+    assert session.prompts == []  # 中断 came before the session was open: nothing was sent
+    assert turn.events[-1] == {"type": "end", "unsent": [{"id": waiting.id, "text": "あとで聞くこと"}]}

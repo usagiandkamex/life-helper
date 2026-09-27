@@ -14,7 +14,13 @@ from ..context import AppContext, get_ctx
 from ..security import SENSITIVE_LABELS, detect_sensitive
 from .events import history_from_events
 from .manager import NoTokenError, SessionStateError
-from .turns import ApprovalNotFoundError, ApprovalResolvedError, TurnBusyError
+from .turns import (
+    ApprovalNotFoundError,
+    ApprovalResolvedError,
+    TurnBusyError,
+    TurnNotFoundError,
+    WaitingLimitError,
+)
 
 router = APIRouter(prefix="/api")
 
@@ -39,6 +45,9 @@ class TurnBody(BaseModel):
     prompt: str = Field(min_length=1, max_length=20000)
     model: str | None = None
     confirm_sensitive: bool = False
+    # Sent while the conversation answers: "now" joins the answer in progress, "later" waits until it is finished.
+    # A conversation that is not answering (any more) starts a turn with it as usual.
+    mode: Literal["now", "later"] | None = None
 
 
 class ApprovalBody(BaseModel):
@@ -115,8 +124,10 @@ async def conversation_messages(
     if ctx.turns.busy(conversation_id):
         # Do not touch the live session while it answers; the client re-attaches to the running turn instead.
         return {"messages": [], "busy": True, "turn_id": ctx.turns.active_turn_id(conversation_id)}
+    # Messages the last turn could not send, for a client that was not following it when it ended.
+    unsent = ctx.turns.unsent(conversation_id)
     if not conv.started:
-        return {"messages": [], "busy": False}
+        return {"messages": [], "busy": False, "unsent": unsent}
     try:
         # Reserve so a turn cannot start while the history is being read from the session.
         async with ctx.turns.reserve(conversation_id):
@@ -128,7 +139,7 @@ async def conversation_messages(
         raise _reauth() from e
     except SessionStateError as e:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(e)) from e
-    return {"messages": history_from_events(events, ctx.masker), "busy": False}
+    return {"messages": history_from_events(events, ctx.masker), "busy": False, "unsent": unsent}
 
 
 async def _start_turn(ctx: AppContext, conversation_id: str, prompt: str, model: str | None) -> dict:
@@ -160,6 +171,14 @@ async def start_turn(
                 "message": "機微情報の可能性があります: " + "、".join(SENSITIVE_LABELS[k] for k in kinds),
             },
         )
+    if body.mode is not None:
+        try:
+            added = ctx.turns.add_message(conversation_id, body.prompt, body.mode)
+        except WaitingLimitError as e:
+            raise HTTPException(status.HTTP_409_CONFLICT, {"code": "waiting_limit", "message": str(e)}) from e
+        if added is not None:
+            turn, message = added
+            return {"turn_id": turn.id, "conversation_id": conversation_id, "message_id": message.id}
     return await _start_turn(ctx, conversation_id, body.prompt, body.model)
 
 
@@ -189,6 +208,17 @@ async def abort_turn(
     turn_id: str, user: CurrentUser = Depends(require_user), ctx: AppContext = Depends(get_ctx)
 ) -> dict:
     return {"aborted": await ctx.turns.abort(turn_id)}
+
+
+@router.delete("/turns/{turn_id}/queue/{message_id}")
+async def cancel_queued_message(
+    turn_id: str, message_id: str, user: CurrentUser = Depends(require_user), ctx: AppContext = Depends(get_ctx)
+) -> dict:
+    """Cancels a 「あとで送信」 message; removed is false once it has been sent or the turn is ending."""
+    try:
+        return {"removed": ctx.turns.unqueue(turn_id, message_id)}
+    except TurnNotFoundError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "turn not found (it may have expired)") from e
 
 
 @router.post("/turns/{turn_id}/approvals/{approval_id}")
