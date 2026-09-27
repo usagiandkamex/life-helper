@@ -116,6 +116,12 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   const handledLinkRef = useRef<string | null>(null)
   // Where to scroll once a loaded automation conversation is rendered ('bottom' or an element id).
   const scrollTargetRef = useRef<string | null>(null)
+  // New output scrolls the thread only while its end is in view: reading an earlier answer keeps the place.
+  const followRef = useRef(true)
+  const lastScrollTopRef = useRef(0)
+  // Approvals already brought into view. Several writes can wait at once, so the latest pending one is not enough:
+  // resolving one would make an older, already shown approval look new again.
+  const approvalsRef = useRef(new Set<string>())
   // Unsent messages already put back into the composer: both the turn's end and the conversation report them.
   const restoredRef = useRef(new Set<string>())
   // By message id. Not across reloads: a message whose files are gone comes back without them.
@@ -128,6 +134,9 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
 
   const selectConversation = useCallback((id: string | null) => {
     generationRef.current += 1
+    // What is shown next starts at its latest message; its content going back to the top is not the user scrolling up.
+    followRef.current = true
+    lastScrollTopRef.current = 0
     currentIdRef.current = id
     setCurrentId(id)
     threadIdRef.current = null
@@ -431,8 +440,23 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   }, [params, setParams, openThread])
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+    // A write waiting for approval holds up the answer: it is brought into view even while an earlier answer is read.
+    for (const item of items) {
+      if (item.kind !== 'approval' || item.status !== 'pending') continue
+      if (!approvalsRef.current.has(item.id)) {
+        approvalsRef.current.add(item.id)
+        followRef.current = true
+      }
+    }
+    if (followRef.current) bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [items])
+
+  // Only scrolling up stops following: the smooth scroll to new output passes through places short of the end.
+  const trackScroll = (el: HTMLDivElement) => {
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 40) followRef.current = true
+    else if (el.scrollTop < lastScrollTopRef.current) followRef.current = false
+    lastScrollTopRef.current = el.scrollTop
+  }
 
   useEffect(() => {
     const target = scrollTargetRef.current
@@ -530,6 +554,8 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
     }
     setError('')
     setSending(true)
+    // Sending from here goes back to the latest message; scrolling up while it is being sent still wins.
+    followRef.current = true
     try {
       let generation = generationRef.current
       // The ref, not the render's value: a retry after the sensitive-data prompt must reuse the conversation just made.
@@ -797,7 +823,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
           </button>
           <Disclaimer short />
         </div>
-        <div className="messages" ref={messagesRef}>
+        <div className="messages" ref={messagesRef} onScroll={(e) => trackScroll(e.currentTarget)}>
           {threadId ? (
             thread ? (
               <AutomationThreadView
@@ -914,8 +940,9 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
             />
             <div className="composer-actions">
               <div className="composer-tools">
-                <label className="button small" title="画像・テキスト・CSV・JSON・PDF を添付（5 件・合計 10 MB まで）">
-                  📎 添付
+                <label className="button icon" title="画像・テキスト・CSV・JSON・PDF を添付（5 件・合計 10 MB まで）">
+                  <span aria-hidden="true">📎</span>
+                  <span className="visually-hidden">添付</span>
                   <input
                     type="file"
                     accept={ATTACH_ACCEPT}
@@ -946,7 +973,13 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
                     disabled={(!input.trim() && attachments.length === 0) || followUpBlocked}
                     title="回答中の内容に反映します（元の依頼と、追加の内容の両方に対応します）"
                   >
-                    {followUpSending === 'now' ? '送信中…' : reading ? '読み込み中…' : 'すぐに送信'}
+                    {/* On a phone the label stays 送信 (the row has no room for more); the whole label is still read out. */}
+                    <span className="wide-only">
+                      {followUpSending === 'now' ? '送信中…' : reading ? '読み込み中…' : 'すぐに送信'}
+                    </span>
+                    <span className="mobile-only" aria-hidden="true">
+                      送信
+                    </span>
                   </button>
                   <button
                     type="button"
@@ -957,8 +990,9 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
                   >
                     {followUpSending === 'later' ? '送信中…' : 'あとで送信'}
                   </button>
-                  <button type="button" className="button" onClick={abort} disabled={stopping}>
-                    {stopping ? '中断中…' : '中断'}
+                  <button type="button" className="button stop" onClick={abort} disabled={stopping}>
+                    <span className="stop-icon mobile-only" aria-hidden="true" />
+                    <span className="wide-only">{stopping ? '中断中…' : '中断'}</span>
                   </button>
                 </div>
               ) : (
