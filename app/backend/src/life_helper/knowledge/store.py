@@ -191,7 +191,10 @@ def pdf_pages(data: bytes, *, max_pages: int | None = None) -> Iterator[str]:
     from pypdf import PdfReader
 
     reader = PdfReader(io.BytesIO(data))
-    pages = reader.pages if max_pages is None else reader.pages[:max_pages]
-    for i, page in enumerate(pages, start=1):
+    page_count = len(reader.pages)
+    if max_pages is not None:
+        page_count = min(page_count, max_pages)
+    for i in range(page_count):
+        page = reader.pages[i]
         text = (page.extract_text() or "").strip()
-        yield f"## ページ {i}\n\n{text or '（テキストを抽出できませんでした。スキャン画像の PDF は非対応です）'}\n"
+        yield f"## ページ {i + 1}\n\n{text or '（テキストを抽出できませんでした。スキャン画像の PDF は非対応です）'}\n"

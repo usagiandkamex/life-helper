@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from types import SimpleNamespace
 
 from copilot.session_events import (
@@ -760,6 +761,39 @@ def test_attached_text_is_limited(monkeypatch):
     # Page by page up to the page limit; a scanned page says it has no text.
     assert pdf.items == [{"name": "d.pdf", "kind": "file", "index": 0, "truncated": True}]
     assert "## ページ 2" in pdf.text and "## ページ 3" not in pdf.text and "テキストを抽出できませんでした" in pdf.text
+
+
+def test_pdf_pages_never_loads_pages_past_the_limit(monkeypatch):
+    from life_helper.knowledge.store import pdf_pages
+
+    class Page:
+        def __init__(self, index: int) -> None:
+            self.index = index
+
+        def extract_text(self):
+            extracted.append(self.index)
+            return f"text {self.index}"
+
+    class Pages:
+        def __len__(self):
+            return 5
+
+        def __getitem__(self, index: int):
+            loaded.append(index)
+            return Page(index)
+
+    loaded: list[int] = []
+    extracted: list[int] = []
+    pages = Pages()
+
+    class Reader:
+        def __init__(self, _stream) -> None:
+            self.pages = pages
+
+    monkeypatch.setitem(sys.modules, "pypdf", SimpleNamespace(PdfReader=Reader))
+    assert list(pdf_pages(b"%PDF", max_pages=2)) == ["## ページ 1\n\ntext 0\n", "## ページ 2\n\ntext 1\n"]
+    assert loaded == [0, 1]
+    assert extracted == [0, 1]
 
 
 def test_attached_text_encodings():

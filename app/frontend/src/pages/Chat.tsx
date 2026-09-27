@@ -380,6 +380,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   }
 
   const send = async (confirmSensitive = false) => {
+    const draft = input
     const prompt = input.trim()
     const files = attachments
     if ((!prompt && files.length === 0) || turnId || sending || reading) return
@@ -424,7 +425,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
           url: a.kind === 'image' ? files[index]?.url : undefined,
         }))
         setItems((prev) => [...prev, { kind: 'user', text: res.message.content, attachments: shown }])
-        setInput('')
+        setInput((cur) => (cur === draft ? '' : cur))
         setAttachments((cur) => cur.filter((a) => !files.includes(a)))
         attach(res.turn_id)
       } catch (e) {
