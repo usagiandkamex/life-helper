@@ -568,8 +568,9 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
       // Even if another conversation was opened meanwhile: the files come back with the message if it is not sent.
       if (res.message_id && files.length)
         sentFilesRef.current.set(res.message_id, { conversationId: id, turnId: res.turn_id, files })
-      if (generationRef.current !== generation) return
+      // The server has them now; reopening the same conversation meanwhile keeps the composer, so this comes first.
       setAttachments((cur) => cur.filter((a) => !files.includes(a)))
+      if (generationRef.current !== generation) return
       if (res.message_id) return // listed above the composer until Copilot takes it
       // The answer ended meanwhile, so the message started a new turn; its events follow those of the current one.
       loadConversations()
