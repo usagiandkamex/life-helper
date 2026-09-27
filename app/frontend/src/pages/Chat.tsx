@@ -119,7 +119,9 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   // New output scrolls the thread only while its end is in view: reading an earlier answer keeps the place.
   const followRef = useRef(true)
   const lastScrollTopRef = useRef(0)
-  const approvalRef = useRef<string | null>(null)
+  // Approvals already brought into view. Several writes can wait at once, so the latest pending one is not enough:
+  // resolving one would make an older, already shown approval look new again.
+  const approvalsRef = useRef(new Set<string>())
   // Unsent messages already put back into the composer: both the turn's end and the conversation report them.
   const restoredRef = useRef(new Set<string>())
   // By message id. Not across reloads: a message whose files are gone comes back without them.
@@ -439,10 +441,13 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
 
   useEffect(() => {
     // A write waiting for approval holds up the answer: it is brought into view even while an earlier answer is read.
-    const approval = items.findLast((i) => i.kind === 'approval' && i.status === 'pending')
-    const approvalId = approval?.kind === 'approval' ? approval.id : null
-    if (approvalId && approvalId !== approvalRef.current) followRef.current = true
-    approvalRef.current = approvalId
+    for (const item of items) {
+      if (item.kind !== 'approval' || item.status !== 'pending') continue
+      if (!approvalsRef.current.has(item.id)) {
+        approvalsRef.current.add(item.id)
+        followRef.current = true
+      }
+    }
     if (followRef.current) bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [items])
 
