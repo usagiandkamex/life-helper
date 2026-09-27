@@ -54,7 +54,7 @@ export function applyEvent(
   thumbnails: (string | undefined)[] = [],
 ): Item[] {
   const next = [...items]
-  // Not always the last item: a message sent with 「すぐに送信」 can appear while the answer is still streaming.
+  // The streaming assistant, if any: the answer's continuation appends to it as more deltas arrive.
   const streaming = next.findLastIndex((i) => i.kind === 'assistant' && i.streaming)
   const current = streaming >= 0 ? (next[streaming] as Extract<Item, { kind: 'assistant' }>) : null
   const closeStreaming = () => {
@@ -117,8 +117,9 @@ export function applyEvent(
       next.push({ kind: 'note', text: '結果の報告を依頼し直しました' })
       return next
     case 'user':
-      // A queued message starts a new answer; one sent with 「すぐに送信」 joins the answer that is still streaming.
-      if (ev.mode !== 'now') closeStreaming()
+      // Copilot took a waiting message: finalize the answer so far so the follow-up, and the continuation Copilot
+      // writes after it, keep the order the reloaded history shows (a 'now' message joins the same turn's answer).
+      closeStreaming()
       next.push({
         kind: 'user',
         text: ev.text,

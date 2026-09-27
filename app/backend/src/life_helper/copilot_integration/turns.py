@@ -90,7 +90,7 @@ class FollowUp:
     request: dict = field(default_factory=dict)
     state: str = "waiting"  # waiting → sent (handed to Copilot), or cancelled (取り消し)
     message_id: str | None = None  # Copilot's id for it, once Copilot has taken it
-    read_at: int | None = None  # for "now": Turn.idles when Copilot read it
+    read_at: int | None = None  # Turn.idles when Copilot read it (its user.message arrived)
 
     @property
     def shown(self) -> str:
@@ -104,12 +104,11 @@ class FollowUp:
 
     @property
     def unsent(self) -> bool:
-        """Copilot never got to it: it is still waiting, or the turn ended before Copilot read it."""
+        """Copilot never got to it: it is still waiting, or the turn ended before Copilot read it. A message is
+        read only when its user.message arrives (read_at is set), so one the runtime dropped on 中断 comes back."""
         if self.state != "sent":
             return self.state == "waiting"
-        # 「あとで送信」 is read at once, as Copilot is idle when it is sent; 「すぐに送信」 waits for the next model
-        # request, and the runtime drops it on 中断.
-        return self.read_at is None if self.mode == "now" else self.message_id is None
+        return self.read_at is None
 
 
 @dataclass
@@ -208,17 +207,26 @@ class TurnManager:
         return turn if turn is not None and not turn.stopping else None
 
     def add_message(
-        self, conversation_id: str, text: str, mode: str, attachments: PreparedAttachments | None = None
+        self,
+        conversation_id: str,
+        text: str,
+        mode: str,
+        attachments: PreparedAttachments | None = None,
+        *,
+        expected: Turn | None = None,
     ) -> tuple[Turn, FollowUp] | None:
         """Hands a message to the turn answering in the conversation; None when it is not answering (any more).
 
         Its attachments go as with the first message of a turn: the images as blobs, the files' text appended to the
         prompt and the typed text as the display prompt. At most MAX_WAITING_MESSAGES of them wait at once.
+
+        ``expected`` is the turn the caller vision-checked; if the answering turn changed while that check awaited,
+        the message is not queued (its images were not checked against the new turn's model) and None is returned.
         """
         if mode not in FOLLOW_UP_MODES:
             raise ValueError(f"unknown mode: {mode}")
         turn = self.answering(conversation_id)
-        if turn is None:
+        if turn is None or (expected is not None and turn is not expected):
             return None
         if sum(m.state == "waiting" for m in turn.follow_ups) >= MAX_WAITING_MESSAGES:
             raise WaitingLimitError(f"送信待ちのメッセージは {MAX_WAITING_MESSAGES} 件までです")
@@ -310,10 +318,10 @@ class TurnManager:
                 if display_prompt is not None:
                     extra["display_prompt"] = display_prompt
                 await self._answer(turn, prompt, **extra)
-                # 「あとで送信」: each message gets its own answer once the answers before it are finished.
+                # 「あとで送信」: each message gets its own answer once the answers before it are finished. It is shown
+                # (and counted as read) only when Copilot's user.message for it arrives, as for 「すぐに送信」.
                 while (message := self._next_waiting(turn, "later")) is not None:
                     message.state = "sent"
-                    self._emit(turn, self._message_event("user", message))
                     later_prompt, options = message.take_request()
                     await self._answer(turn, later_prompt, message, **options)
             finally:
@@ -388,6 +396,9 @@ class TurnManager:
         message_id = await session.send(prompt, **options)
         if message is not None:
             message.message_id = message_id
+            # Its user.message may be handled before send returns (a runtime that reports ids fills turn.read).
+            if message.read_at is None and message_id in turn.read:
+                self._mark_read(turn, message, turn.read[message_id])
         steering: list[FollowUp] = []
         while True:
             while (extra := self._next_waiting(turn, "now")) is not None:
@@ -426,13 +437,15 @@ class TurnManager:
                 if turn.error is None:
                     turn.error = f"Session error: {data.message or str(data)}"
                 turn.wake.set()
+                # _answer() raises turn.error and _run() emits the single user-facing error: do not emit it twice.
+                return
         mapped = map_event(event, self.masker)
         if mapped is not None:
             self._emit(turn, mapped)
 
     def _note_read(self, turn: Turn, data: UserMessageData) -> None:
-        """Records a user message Copilot has read and shows it when it is a 「すぐに送信」 message."""
-        unread = [m for m in turn.follow_ups if m.mode == "now" and m.state == "sent" and m.read_at is None]
+        """Records a user message Copilot has read and shows it (「すぐに送信」 and 「あとで送信」 alike)."""
+        unread = [m for m in turn.follow_ups if m.state == "sent" and m.read_at is None]
         if data.message_id:
             turn.read[data.message_id] = turn.idles
             message = next((m for m in unread if m.message_id == data.message_id), None)

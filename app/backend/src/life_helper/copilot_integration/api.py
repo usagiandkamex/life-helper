@@ -242,16 +242,21 @@ async def start_turn(
         )
     if body.mode is not None:
         answering = ctx.turns.answering(conversation_id)
-        if answering is not None and prepared.blobs:
-            await _reject_images_without_vision(ctx, answering.model, NO_VISION_WHILE_ANSWERING)
-        try:
-            added = ctx.turns.add_message(conversation_id, body.prompt, body.mode, prepared)
-        except WaitingLimitError as e:
-            raise HTTPException(status.HTTP_409_CONFLICT, {"code": "waiting_limit", "message": str(e)}) from e
-        if added is not None:
-            turn, message = added
-            return {"turn_id": turn.id, "conversation_id": conversation_id, "message_id": message.id}
-    # Decided once: the model checked for images is the one the turn uses.
+        if answering is not None:
+            # The message joins this turn's answer, so the answering model reads its images: check that model, then
+            # queue only if it is still the answering turn (add_message returns None if it changed while we awaited).
+            if prepared.blobs:
+                await _reject_images_without_vision(ctx, answering.model, NO_VISION_WHILE_ANSWERING)
+            try:
+                added = ctx.turns.add_message(
+                    conversation_id, body.prompt, body.mode, prepared, expected=answering
+                )
+            except WaitingLimitError as e:
+                raise HTTPException(status.HTTP_409_CONFLICT, {"code": "waiting_limit", "message": str(e)}) from e
+            if added is not None:
+                turn, message = added
+                return {"turn_id": turn.id, "conversation_id": conversation_id, "message_id": message.id}
+    # Not answering (any more): start a new turn, which checks the chosen model's vision itself.
     model = body.model or conv.model
     if prepared.blobs:
         await _reject_images_without_vision(ctx, model)
