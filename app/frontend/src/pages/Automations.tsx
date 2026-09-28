@@ -55,6 +55,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   const [runs, setRuns] = useState<RunRecord[]>([])
   const [run, setRun] = useState<RunRecord | null>(null)
   const [runsOpen, setRunsOpen] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
   const detailRef = useRef<HTMLDivElement>(null)
@@ -115,6 +116,19 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
       await load()
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e))
+    }
+  }
+
+  // 定期実行は裏で動き、結果は終わったときに記録される。画面を開いたままでも新しい実行を取り込めるようにする。
+  const refresh = async () => {
+    setError('')
+    setRefreshing(true)
+    try {
+      await load()
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e))
+    } finally {
+      setRefreshing(false)
     }
   }
 
@@ -219,6 +233,9 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
       <section className="panel">
         <div className="row list-head">
           <h2 className="grow">実行履歴</h2>
+          <button className="button small" onClick={refresh} disabled={refreshing}>
+            {refreshing ? '更新中…' : '更新'}
+          </button>
           <button className="button small" aria-expanded={runsOpen} aria-controls="run-list" onClick={() => setRunsOpen(!runsOpen)}>
             {runsOpen ? '一覧を閉じる' : '一覧を開く'}
           </button>
