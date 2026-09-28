@@ -203,6 +203,24 @@ def test_turn_rejects_sensitive_prompt_without_confirmation(client, ctx):
     assert ok.status_code == 200
 
 
+def test_long_pasted_text_is_sent_up_to_the_limit(client, ctx):
+    from life_helper.copilot_integration.api import MAX_PROMPT_CHARS
+
+    csrf = sign_in(client, ctx)
+    h = {"x-csrf-token": csrf}
+    fake = install_fake(ctx, FakeSession())
+    conv = client.post("/api/conversations", json={}, headers=h).json()
+    # A pasted error log: it reaches Copilot whole, not clipped.
+    log = "エラーが出ました\n" + "a" * (MAX_PROMPT_CHARS - len("エラーが出ました\n"))
+    resp = client.post(f"/api/conversations/{conv['id']}/turns", json={"prompt": log}, headers=h)
+    assert resp.status_code == 200
+    wait_turn_done(ctx, resp.json()["turn_id"])
+    assert fake.session.prompts == [log]
+
+    too_long = client.post(f"/api/conversations/{conv['id']}/turns", json={"prompt": f"{log}a"}, headers=h)
+    assert too_long.status_code == 422
+
+
 def test_turn_requires_token(client, ctx):
     csrf = sign_in(client, ctx)
     h = {"x-csrf-token": csrf}
