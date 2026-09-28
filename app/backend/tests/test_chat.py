@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -188,6 +189,14 @@ def wait_turn_done(ctx, turn_id: str) -> None:
 
         time.sleep(0.01)
     raise AssertionError("turn did not finish")
+
+
+def without_time(entry: dict) -> dict:
+    """The message (or event) without the time the chat shows on it, after checking it is one the browser can read."""
+    rest = dict(entry)
+    at = rest.pop("at", None)
+    assert isinstance(at, str) and datetime.fromisoformat(at).tzinfo is not None, f"no usable time: {at!r}"
+    return rest
 
 
 def test_chat_flow_with_sse_replay(client, ctx):
@@ -736,7 +745,7 @@ def test_turn_sends_images_as_blobs_and_files_as_escaped_text(client, ctx):
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["message"] == {
+    assert without_time(body["message"]) == {
         "content": "これを見て",
         "attachments": [
             {"name": "clip", "kind": "image", "index": 0},
@@ -964,6 +973,39 @@ def test_history_lists_attachments_without_the_file_text(client, ctx):
     assert history[2] == {"role": "assistant", "content": "回答"}
 
 
+def test_message_times_come_from_the_session_events(client, ctx):
+    from life_helper.copilot_integration.events import map_event
+    from life_helper.security import SecretMasker
+
+    posted = datetime.fromisoformat("2026-09-28T20:15:00+09:00")
+    # A runtime that stamps in naive UTC, and one that does not stamp the event at all.
+    answered = datetime.fromisoformat("2026-09-28T11:16:00")
+    events = [
+        SimpleNamespace(data=UserMessageData(content="質問"), timestamp=posted),
+        SimpleNamespace(
+            data=ToolExecutionStartData(tool_call_id="t1", tool_name="grep", arguments={}), timestamp=posted
+        ),
+        SimpleNamespace(data=AssistantMessageData(content="回答", message_id="m1"), timestamp=answered),
+        SimpleNamespace(data=AssistantMessageData(content="続き", message_id="m2")),
+    ]
+    csrf = sign_in(client, ctx)
+    h = {"x-csrf-token": csrf}
+    install_fake(ctx, AttachmentSession(events=events))
+    conv = client.post("/api/conversations", json={}, headers=h).json()
+    ctx.extras["conversations"].update(conv["id"], started=True)
+    history = client.get(f"/api/conversations/{conv['id']}/messages").json()["messages"]
+    assert history[0] == {"role": "user", "content": "質問", "at": "2026-09-28T20:15:00+09:00"}
+    assert history[1] == {"role": "tool", "name": "grep", "args": "{}"}  # a look-up is not a message
+    assert history[2] == {"role": "assistant", "content": "回答", "at": "2026-09-28T11:16:00+00:00"}
+    assert history[3] == {"role": "assistant", "content": "続き"}
+
+    masker = SecretMasker([])
+    # The answer is stamped when it is finished: a time on every delta would about double the stream.
+    assert map_event(events[2], masker) == {"type": "message", "content": "回答", "at": "2026-09-28T11:16:00+00:00"}
+    delta = SimpleNamespace(data=AssistantMessageDeltaData(delta_content="回", message_id="m1"), timestamp=posted)
+    assert map_event(delta, masker) == {"type": "delta", "text": "回"}
+
+
 async def test_model_list_reports_vision_support(ctx, tmp_path):
     from copilot.client import ModelCapabilities, ModelInfo, ModelLimits, ModelSupports
 
@@ -1078,9 +1120,9 @@ def test_message_sent_now_joins_the_answer(client, ctx):
     kinds = [e["type"] for e in events]
     queued = {"type": "queued", "id": sent["message_id"], "text": "追加の依頼", "mode": "now"}
     assert events[kinds.index("queued")] == queued
-    # Shown once Copilot reads it: after the answer so far, in the same turn.
+    # Shown once Copilot reads it: after the answer so far, in the same turn, with the time it was taken.
     user = kinds.index("user")
-    assert events[user] == {"type": "user", "id": sent["message_id"], "text": "追加の依頼", "mode": "now"}
+    assert without_time(events[user]) == {"type": "user", "id": sent["message_id"], "text": "追加の依頼", "mode": "now"}
     assert kinds.index("queued") < kinds.index("message") < user and kinds[user:].count("message") == 1
     assert kinds.count("done") == 1 and kinds[-2:] == ["done", "end"] and events[-1] == {"type": "end"}
 
@@ -1115,7 +1157,12 @@ def test_later_messages_wait_for_the_answer_and_can_be_cancelled(client, ctx, mo
     assert {"type": "unqueued", "id": second["message_id"]} in events
     # Sent once the first answer is finished, and answered in the same turn.
     user = kinds.index("user")
-    assert events[user] == {"type": "user", "id": first["message_id"], "text": "次の質問", "mode": "later"}
+    assert without_time(events[user]) == {
+        "type": "user",
+        "id": first["message_id"],
+        "text": "次の質問",
+        "mode": "later",
+    }
     assert kinds.index("message") < user and kinds[user:].count("message") == 1
     assert kinds.count("done") == 1 and events[-1] == {"type": "end"}
 
@@ -1200,7 +1247,8 @@ def test_messages_sent_while_answering_carry_their_attachments(client, ctx):
             {"name": "メモ.txt", "kind": "file", "index": 0},
         ],
     }
-    assert [e for e in events if e["type"] in ("queued", "user")] == [
+    shown_events = [e for e in events if e["type"] in ("queued", "user")]
+    assert [shown_events[0], *map(without_time, shown_events[1:])] == [
         {"type": "queued", **shown},
         {"type": "user", **shown},
     ]
@@ -1226,7 +1274,7 @@ def test_later_message_with_only_attachments(client, ctx):
     assert session.attachments == [None, [blob]] and session.display_prompts == [None, None]
 
     events = [e for _, e in parse_sse(client.get(f"/api/turns/{turn_id}/events").text)]
-    assert next(e for e in events if e["type"] == "user") == {
+    assert without_time(next(e for e in events if e["type"] == "user")) == {
         "type": "user",
         "id": sent["message_id"],
         "text": ATTACHMENT_ONLY_PROMPT,
@@ -1359,7 +1407,7 @@ async def test_message_read_before_send_returns_is_recognised(ctx, ids, only_fil
     kinds = [e["type"] for e in turn.events]
     assert "error" not in kinds and kinds[-2:] == ["done", "end"] and turn.events[-1] == {"type": "end"}
     user = [e for e in turn.events if e["type"] == "user"]
-    assert user == [{"type": "user", "id": message.id, "mode": "now", **shown}]
+    assert [without_time(e) for e in user] == [{"type": "user", "id": message.id, "mode": "now", **shown}]
 
 
 async def test_stopping_turn_takes_no_more_messages(ctx):

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from datetime import UTC, datetime
 from typing import Any
 
 from copilot.session_events import (
@@ -34,6 +35,22 @@ def _preview(value: Any, limit: int, masker: SecretMasker) -> str:
     text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
     text = masker.mask_text(text)
     return text if len(text) <= limit else text[:limit] + "…"
+
+
+def posted_at(event: Any) -> dict:
+    """When the event happened, as ``{"at": ISO 8601}``; empty when the runtime did not stamp it.
+
+    The chat shows this time (in JST) next to the message, so the browser and the reloaded history agree on it.
+    """
+    stamp = getattr(event, "timestamp", None)
+    if not isinstance(stamp, datetime):
+        return {}
+    return {"at": (stamp if stamp.tzinfo else stamp.replace(tzinfo=UTC)).isoformat()}
+
+
+def posted_now() -> dict:
+    """The same ``{"at": ...}`` for a message the server shows itself, before its session event arrives."""
+    return {"at": datetime.now(UTC).isoformat()}
 
 
 def extract_chart(result: Any) -> dict | None:
@@ -118,7 +135,8 @@ def map_event(event: Any, masker: SecretMasker) -> dict | None:
         case AssistantMessageDeltaData() if not sub and not data.parent_tool_call_id:
             return {"type": "delta", "text": masker.mask_text(data.delta_content or "")}
         case AssistantMessageData() if not sub and not data.parent_tool_call_id:
-            return {"type": "message", "content": masker.mask_text(data.content or "")}
+            # The deltas carry no time (there is one per token); the answer's bubble is stamped when it is finished.
+            return {"type": "message", "content": masker.mask_text(data.content or ""), **posted_at(event)}
         case ToolExecutionStartData():
             # A sub-agent's look-ups are shown like the session's own, so its delegated work stays visible in the chat.
             started = {
@@ -165,7 +183,7 @@ def history_from_events(events: list[Any], masker: SecretMasker) -> list[dict]:
             case UserMessageData() if not sub:
                 content = data.content or ""
                 files = attached_files(content, data.transformed_content)
-                message = {"role": "user", "content": masker.mask_text(content)}
+                message = {"role": "user", "content": masker.mask_text(content), **posted_at(event)}
                 images = [
                     {"name": masker.mask_text(a.display_name or "画像"), "kind": "image"}
                     for a in data.attachments or []
@@ -175,7 +193,7 @@ def history_from_events(events: list[Any], masker: SecretMasker) -> list[dict]:
                     message["attachments"] = images + [f | {"name": masker.mask_text(f["name"])} for f in files]
                 messages.append(message)
             case AssistantMessageData() if not sub and not data.parent_tool_call_id and data.content:
-                messages.append({"role": "assistant", "content": masker.mask_text(data.content)})
+                messages.append({"role": "assistant", "content": masker.mask_text(data.content), **posted_at(event)})
             case ToolExecutionStartData():
                 call = {
                     "role": "tool",
