@@ -39,10 +39,11 @@ RESEARCH_AGENT_PROMPT = """\
 def build_research_agent(knowledge_root_posix: str) -> dict[str, Any]:
     """The ``custom_agents`` entry for the chat session.
 
-    ``infer`` is left at the runtime's default (true): the SDK documents it as "whether agent is available for model
-    inference", so turning it off would likely stop the model from starting the agent with ``task``, which is the
-    whole point here. What a started agent may do is checked again in ``pre_tool_use``, and how many may run is
-    capped per answer.
+    ``infer`` is turned off so the runtime never auto-selects this agent straight from the prompt. Such an inferred
+    start would skip ``pre_tool_use`` and so escape the per-answer cap, letting more than ``MAX_TASKS_PER_ANSWER``
+    sub-agents run. Explicit ``task`` calls still reach the agent (``infer`` only governs model auto-selection, per
+    the SDK: "whether agent is available for model inference"), and those go through ``pre_tool_use`` where the agent,
+    its mode and the cap are all checked.
     """
     return {
         "name": RESEARCH_AGENT,
@@ -50,4 +51,5 @@ def build_research_agent(knowledge_root_posix: str) -> dict[str, Any]:
         "description": RESEARCH_AGENT_DESCRIPTION,
         "tools": list(RESEARCH_AGENT_TOOLS),
         "prompt": RESEARCH_AGENT_PROMPT.format(kb=knowledge_root_posix),
+        "infer": False,
     }

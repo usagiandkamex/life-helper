@@ -267,9 +267,6 @@ async def test_run_success_without_github_notify_is_default(auto_env):
     ctx, runner, manager = auto_env
     issues = _mock_github()
     a = ctx.automations.upsert(Automation(name="毎朝", prompt="{{today}} の予定"))
-    ctx, runner, manager = auto_env
-    issues = _mock_github()
-    a = ctx.automations.upsert(Automation(name="毎朝", prompt="{{today}} の予定"))
     record = await runner.run(a.id)
     assert record["status"] == "success" and record["summary"] == "要約" and record["requests"] == 1
     assert record["notified"] is False and not issues.called

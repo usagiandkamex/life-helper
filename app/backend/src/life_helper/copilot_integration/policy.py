@@ -37,7 +37,6 @@ AGENT_TYPE_KEYS = ("agent_type", "agentType", "subagent_type", "subagentType")
 AGENT_ID_KEYS = ("agentId", "agent_id")
 # Only the foreground mode is allowed: a background sub-agent would outlive the answer (中断 and timeouts included).
 SYNC_MODE = "sync"
-BACKGROUND = "background"
 BACKGROUND_KEYS = ("background", "detach", "detached", "run_in_background", "runInBackground")
 # Dropped from a task call: the sub-agent follows the session's model, so one answer cannot run up the cost.
 TASK_OVERRIDE_KEYS = ("model", "reasoning_effort", "reasoningEffort", "context_tier", "contextTier")
@@ -247,16 +246,12 @@ class ToolPolicy:
         agent = next(iter(agents), "")
         if agent != RESEARCH_AGENT:
             return self._hook_deny(f"task で使えるのは {RESEARCH_AGENT} だけです（指定: {agent or 'なし'}）")
-        mode = args.get("mode")
-        # Fail closed: only the foreground mode, under whichever argument the runtime would read it. The background
-        # string is looked for only under mode-like keys (``mode``/``agentMode``/…), so a prompt that merely says
-        # "background" is not mistaken for a mode.
-        background = mode is not None and (not isinstance(mode, str) or mode.strip().lower() != SYNC_MODE)
-        background = background or any(
-            isinstance(v, str) and v.strip().lower() == BACKGROUND
-            for k, v in args.items()
-            if k.lower().endswith("mode")
-        )
+        # Fail closed: every mode-like key (``mode``/``agentMode``/…) must be the foreground ``sync`` mode. Any other
+        # value (a different mode name such as "fleet", or an empty/non-string value) is treated as background, so a
+        # name we do not know cannot slip a non-sync mode past this check. Only ``*mode`` keys are inspected, so a
+        # prompt that merely says "background" is not mistaken for a mode.
+        mode_values = [v for k, v in args.items() if k.lower().endswith("mode") and v is not None]
+        background = any(not isinstance(v, str) or v.strip().lower() != SYNC_MODE for v in mode_values)
         background = background or any(args.get(key) for key in BACKGROUND_KEYS)
         if background:
             return self._hook_deny(

@@ -192,6 +192,10 @@ async def test_task_tool_only_starts_the_research_agent(policy):
         {"detach": True},
         {"run_in_background": True},
         {"agentMode": "background"},  # a mode under a name we do not know
+        {"agentMode": "fleet"},  # any non-sync value under an alias is refused, not just "background"
+        {"agentMode": 0},
+        {"agentMode": ""},
+        {"mode": "sync", "agentMode": "fleet"},  # every mode-like key must agree on sync
     ):
         out = await task(agent_type=RESEARCH_AGENT, prompt="x", **args)
         assert out["permissionDecision"] == "deny", args
@@ -372,6 +376,9 @@ def test_research_agent_is_read_only(kb):
     # No writers, no sub-agents of its own, no browser and no connector tools.
     assert agent["tools"] == list(RESEARCH_AGENT_TOOLS)
     assert not {"task", "create", "edit", "apply_patch", "write_knowledge_file"} & set(agent["tools"])
+    # Not auto-selected from the prompt: an inferred start would skip the per-answer cap, so only explicit task calls
+    # (which go through pre_tool_use) may start it.
+    assert agent["infer"] is False
     assert kb.resolve().as_posix() in agent["prompt"]
     assert "外部の信頼できないデータ" in agent["prompt"]
 
