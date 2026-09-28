@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api, ApiError, formatDate, json } from '../api'
-import { runAnswer, runStatusText, STATUS_LABELS } from '../automationRuns'
+import { hasResult, runAnswer, runStatusText, STATUS_LABELS } from '../automationRuns'
 import { Markdown } from '../components/Markdown'
 import type { Automation, AutomationList, NotifySettings, RunRecord, Schedule } from '../types'
 
@@ -56,6 +56,8 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   const [run, setRun] = useState<RunRecord | null>(null)
   const [runsOpen, setRunsOpen] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
+  // 実行中の記録を見張るためのカウンタ（進めると、次の読み直しが予約される）。
+  const [tick, setTick] = useState(0)
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
   const detailRef = useRef<HTMLDivElement>(null)
@@ -71,7 +73,8 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
     async (automationId: string, runId: string) => {
       const record = await api<RunRecord>(`/api/automations/${automationId}/runs/${runId}`)
       setRun(record)
-      if (!record.read) {
+      // 実行中の記録には読むものがないので、既読にしない（結果が出たときに未読のまま残す）。
+      if (!record.read && hasResult(record)) {
         await api(`/api/automations/${automationId}/runs/${runId}/read`, { method: 'POST' })
         load()
       }
@@ -91,6 +94,19 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
     // スマホでは結果が一覧の下に出るので、選んだら結果まで送る（横に並ぶ画面幅では動かさない）。
     if (run && window.matchMedia('(max-width: 760px)').matches) detailRef.current?.scrollIntoView({ block: 'start' })
   }, [run])
+
+  // 実行中の記録にはまだ結果がないので、終わるまで読み直して、開いたままでも結果に変わるようにする。
+  // tick は毎回進めるので、途中の読み込みが失敗しても見張りは続く。
+  const watching = runs.some((r) => r.status === 'running') || run?.status === 'running'
+  useEffect(() => {
+    if (!watching) return
+    const timer = window.setTimeout(async () => {
+      await load().catch(() => undefined)
+      if (run?.status === 'running') await openRun(run.automation_id, run.id).catch(() => undefined)
+      setTick((n) => n + 1)
+    }, 10_000)
+    return () => window.clearTimeout(timer)
+  }, [watching, tick, run, load, openRun])
 
   useEffect(() => {
     // Deep links: "この質問を定期実行" (?new=1&prompt=) and GitHub notifications (?automation=&run=).
@@ -139,27 +155,35 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   }
 
   const runNow = async (a: Automation) => {
-    const known = new Set(runs.filter((r) => r.automation_id === a.id).map((r) => r.id))
+    // 一覧は全オートメーションの新しい 50 件までなので、このオートメーションの実行だけを見て「新しい実行」を決める。
+    const before = await api<RunRecord[]>(`/api/automations/runs?automation_id=${a.id}`).catch(() =>
+      runs.filter((r) => r.automation_id === a.id),
+    )
+    const known = new Set(before.map((r) => r.id))
     await api(`/api/automations/${a.id}/run`, { method: 'POST' })
-    setMessage(`「${a.name}」を実行しています。終わると実行履歴に表示されます（最大 20 分）。`)
-    // Poll until the new run record appears (runs are saved when they finish).
+    setMessage(`「${a.name}」を実行しています。実行中も実行履歴に出て、終わると結果に変わります（最大 20 分）。`)
+    // 記録は実行を始めたときに書かれる。現れたら選んで、あとは実行中の記録の見張りが結果まで追いかける。
     const started = Date.now()
     const poll = async () => {
       const latest = await api<RunRecord[]>(`/api/automations/runs?automation_id=${a.id}`).catch(() => [] as RunRecord[])
       const fresh = latest.find((r) => !known.has(r.id))
       if (fresh) {
         await load()
-        setMessage(`「${a.name}」の実行が終わりました。`)
         openRun(a.id, fresh.id).catch(() => undefined)
-      } else if (Date.now() - started < 25 * 60_000) {
-        window.setTimeout(poll, 10_000)
+      } else if (Date.now() - started < 60_000) {
+        window.setTimeout(poll, 3_000)
+      } else {
+        // 前の実行が続いていると、そのオートメーションは実行されない（API は受け付けたことだけを返す）。
+        setMessage(`「${a.name}」の実行を確認できませんでした。ほかの実行が続いている可能性があります。`)
       }
     }
-    window.setTimeout(poll, 5_000)
+    window.setTimeout(poll, 2_000)
   }
 
   if (!list) return <div className="panel">{error || '読み込み中…'}</div>
   const usage = list.usage
+  // 同じオートメーションは同時に実行できないので、実行中の記録がある間は「今すぐ実行」を押せないようにする。
+  const running = new Set(runs.filter((r) => r.status === 'running').map((r) => r.automation_id))
   return (
     <div className="stack">
       {message && <div className="banner ok">{message}</div>}
@@ -194,9 +218,16 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
               {list.automations.map((a) => (
                 <tr key={a.id} className={a.enabled ? '' : 'muted'}>
                   <td className="run-now">
-                    <button className="button icon" onClick={() => runNow(a)} title="今すぐ実行">
+                    <button
+                      className="button icon"
+                      onClick={() => runNow(a)}
+                      disabled={running.has(a.id)}
+                      title={running.has(a.id) ? '実行中です' : '今すぐ実行'}
+                    >
                       <PlayIcon />
-                      <span className="visually-hidden">「{a.name}」を今すぐ実行</span>
+                      <span className="visually-hidden">
+                        {running.has(a.id) ? `「${a.name}」は実行中です` : `「${a.name}」を今すぐ実行`}
+                      </span>
                     </button>
                   </td>
                   <td>{a.name}</td>
@@ -245,7 +276,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
         <div className={`runs-layout${runsOpen ? '' : ' list-closed'}`}>
           <ul id="run-list" className="runs" aria-label="実行履歴の一覧" hidden={!runsOpen}>
             {runs.map((r) => (
-              <li key={r.id} className={[r.read ? '' : 'unread', run?.id === r.id ? 'selected' : ''].filter(Boolean).join(' ')}>
+              <li key={r.id} className={[r.read || !hasResult(r) ? '' : 'unread', run?.id === r.id ? 'selected' : ''].filter(Boolean).join(' ')}>
                 <button className="link" aria-current={run?.id === r.id ? 'true' : undefined} onClick={() => openRun(r.automation_id, r.id)}>
                   <span className="run-name">{r.name}</span>
                   <small>
@@ -267,29 +298,40 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
               <h3>
                 {run.name}（{formatDate(run.started_at)}・{runStatusText(run)}）
               </h3>
-              {run.chat_thread_id && (
-                <p>
-                  <Link to={`/chat?thread=${encodeURIComponent(run.chat_thread_id)}&run=${encodeURIComponent(run.id)}`}>
-                    チャットで見る
-                  </Link>
-                </p>
-              )}
-              {run.error && <div className="banner error">{run.error}</div>}
-              <Markdown text={runAnswer(run)} />
-              {run.signals && Object.keys(run.signals).length > 0 && <p className="hint">ツールの結果: {JSON.stringify(run.signals)}</p>}
-              {run.issue_url && (
+              {/* 実行中の記録には結果がない（実行内容は終わってから記録される） */}
+              {!hasResult(run) ? (
                 <p className="hint">
-                  GitHub 通知:{' '}
-                  <a href={run.issue_url} target="_blank" rel="noopener noreferrer">
-                    Issue
-                  </a>
+                  {run.status === 'running'
+                    ? '実行中です。終わると、ここに結果を表示します。'
+                    : '実行中のまま記録が途切れました（アプリや定期実行のジョブが止まった可能性があります）。結果は残っていません。'}
                 </p>
+              ) : (
+                <>
+                  {run.chat_thread_id && (
+                    <p>
+                      <Link to={`/chat?thread=${encodeURIComponent(run.chat_thread_id)}&run=${encodeURIComponent(run.id)}`}>
+                        チャットで見る
+                      </Link>
+                    </p>
+                  )}
+                  {run.error && <div className="banner error">{run.error}</div>}
+                  <Markdown text={runAnswer(run)} />
+                  {run.signals && Object.keys(run.signals).length > 0 && <p className="hint">ツールの結果: {JSON.stringify(run.signals)}</p>}
+                  {run.issue_url && (
+                    <p className="hint">
+                      GitHub 通知:{' '}
+                      <a href={run.issue_url} target="_blank" rel="noopener noreferrer">
+                        Issue
+                      </a>
+                    </p>
+                  )}
+                  {run.notify_error && <p className="error-text">通知エラー: {run.notify_error}</p>}
+                  <details>
+                    <summary>実行の詳細（ツール・書き込み）</summary>
+                    <pre>{(run.events ?? []).map((e) => JSON.stringify(e)).join('\n')}</pre>
+                  </details>
+                </>
               )}
-              {run.notify_error && <p className="error-text">通知エラー: {run.notify_error}</p>}
-              <details>
-                <summary>実行の詳細（ツール・書き込み）</summary>
-                <pre>{(run.events ?? []).map((e) => JSON.stringify(e)).join('\n')}</pre>
-              </details>
             </div>
           )}
         </div>

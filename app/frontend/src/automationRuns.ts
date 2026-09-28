@@ -3,6 +3,9 @@ import { applyEvent, type Item } from './chatItems'
 import type { RunRecord } from './types'
 
 export const STATUS_LABELS: Record<string, string> = {
+  running: '実行中',
+  // A run that stopped while it was running (the app or the job ended); the API reports it instead of "running".
+  interrupted: '中断',
   success: '成功',
   error: '失敗',
   timeout: 'タイムアウト',
@@ -16,6 +19,10 @@ const QUOTE_PROMPT_LIMIT = 8000
 const QUOTE_RESULT_LIMIT = 8000
 
 export const statusLabel = (status: string) => STATUS_LABELS[status] ?? status
+
+// 実行は始まったときに履歴に記録され、終わったときに結果で置き換わる。実行中と、実行中のまま止まった記録には、
+// まだ読むものがない（既読にも未読にもせず、結果の代わりに状況だけを見せる）。
+export const hasResult = (run: RunRecord) => run.status !== 'running' && run.status !== 'interrupted'
 
 // How long a run took. Runs recorded before a crash (and older records) have no finished_at, so it can be empty.
 export function runDuration(run: RunRecord): string {
