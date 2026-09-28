@@ -63,6 +63,8 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   const [message, setMessage] = useState('')
   const detailRef = useRef<HTMLDivElement>(null)
   const selectedRunIdRef = useRef<string | null>(null)
+  // 実際に表示できた記録の id。取得に失敗したとき、選択参照をここへ戻す拠り所にする。
+  const displayedRunIdRef = useRef<string | null>(null)
   const selectionGenerationRef = useRef(0)
   const openRunRequestRef = useRef(0)
   const interruptedWatchRef = useRef<{ runId: string; since: number } | null>(null)
@@ -76,6 +78,9 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
 
   const openRun = useCallback(
     async (automationId: string, runId: string, select = true) => {
+      // 取得に失敗したら、楽観的に進めた選択を表示中の記録へ戻すために控えておく。
+      const restoreRunId = displayedRunIdRef.current
+      const restoreInterruptedWatch = interruptedWatchRef.current
       if (select) {
         selectionGenerationRef.current += 1
         if (selectedRunIdRef.current !== runId) interruptedWatchRef.current = null
@@ -84,7 +89,18 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
         return
       }
       const request = ++openRunRequestRef.current
-      const record = await api<RunRecord>(`/api/automations/${automationId}/runs/${runId}`)
+      let record: RunRecord
+      try {
+        record = await api<RunRecord>(`/api/automations/${automationId}/runs/${runId}`)
+      } catch (e) {
+        // 選択参照だけが先へ進むと、表示中の記録のポーリングが二度と回らなくなる。
+        // ほかの選択に追い越されていなければ、選択参照と見張りを表示中の記録へ戻す。
+        if (selectedRunIdRef.current === runId && openRunRequestRef.current === request) {
+          selectedRunIdRef.current = restoreRunId
+          interruptedWatchRef.current = restoreInterruptedWatch
+        }
+        throw e
+      }
       if (selectedRunIdRef.current !== runId || openRunRequestRef.current !== request) return
       if (record.status === 'interrupted') {
         if (interruptedWatchRef.current?.runId !== record.id) {
@@ -94,6 +110,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
         interruptedWatchRef.current = null
       }
       setRun(record)
+      displayedRunIdRef.current = record.id
       // 実行中の記録には読むものがないので、既読にしない（結果が出たときに未読のまま残す）。
       if (!record.read && hasResult(record)) {
         await api(`/api/automations/${automationId}/runs/${runId}/read`, { method: 'POST' })
