@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import UTC, datetime
 from typing import Annotated, Literal
 
@@ -263,7 +264,8 @@ async def run_now(
     if _store(ctx).get(automation_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "automation not found")
     runner: AutomationRunner = ctx.extras.setdefault("automation_runner", AutomationRunner(ctx, _store(ctx)))
-    task = asyncio.create_task(runner.run(automation_id))
+    run_id = uuid.uuid4().hex[:16]
+    task = asyncio.create_task(runner.run(automation_id, run_id=run_id))
     ctx.extras.setdefault("automation_tasks", set()).add(task)
     task.add_done_callback(ctx.extras["automation_tasks"].discard)
-    return {"started": True}
+    return {"started": True, "run_id": run_id}

@@ -96,9 +96,12 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   }, [run])
 
   // 実行中の記録にはまだ結果がないので、終わるまで読み直して、開いたままでも結果に変わるようにする。
+  // 中断表示は保存済みの running を書き換えないため、遅れて完了する可能性がある。選択中なら結果まで見張る。
   // tick は毎回進めるので、途中の読み込みが失敗しても見張りは続く。
   const watching =
-    runs.some((r) => r.status === 'running') || run?.status === 'running' || (list?.running_automation_ids.length ?? 0) > 0
+    runs.some((r) => r.status === 'running') ||
+    (run !== null && !hasResult(run)) ||
+    (list?.running_automation_ids.length ?? 0) > 0
   useEffect(() => {
     if (!watching) return
     let cancelled = false
@@ -106,7 +109,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
       await load().catch(() => undefined)
       // 読み込んでいる間にほかの実行を選ぶこともあるので、選び直されていたら開き直さない。
       if (cancelled) return
-      if (run?.status === 'running') await openRun(run.automation_id, run.id).catch(() => undefined)
+      if (run && !hasResult(run)) await openRun(run.automation_id, run.id).catch(() => undefined)
       if (!cancelled) setTick((n) => n + 1)
     }, 10_000)
     return () => {
@@ -162,21 +165,17 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   }
 
   const runNow = async (a: Automation) => {
-    // 一覧は全オートメーションの新しい 50 件までなので、このオートメーションの実行だけを見て「新しい実行」を決める。
-    const before = await api<RunRecord[]>(`/api/automations/runs?automation_id=${a.id}`).catch(() =>
-      runs.filter((r) => r.automation_id === a.id),
-    )
-    const known = new Set(before.map((r) => r.id))
-    await api(`/api/automations/${a.id}/run`, { method: 'POST' })
+    const startedRun = await api<{ started: boolean; run_id: string }>(`/api/automations/${a.id}/run`, {
+      method: 'POST',
+    })
     setMessage(`「${a.name}」の実行を始めました。実行中も実行履歴に出て、終わると結果に変わります（最大 20 分）。`)
-    // 記録は実行を始めたときに書かれる。現れたら選んで、あとは実行中の記録の見張りが結果まで追いかける。
+    // 同時に定期実行が始まっても取り違えないよう、API が割り当てた記録だけを待つ。
     const started = Date.now()
     const poll = async () => {
-      const latest = await api<RunRecord[]>(`/api/automations/runs?automation_id=${a.id}`).catch(() => [] as RunRecord[])
-      const fresh = latest.find((r) => !known.has(r.id))
-      if (fresh) {
+      const record = await api<RunRecord>(`/api/automations/${a.id}/runs/${startedRun.run_id}`).catch(() => null)
+      if (record) {
         await load()
-        openRun(a.id, fresh.id).catch(() => undefined)
+        openRun(a.id, startedRun.run_id).catch(() => undefined)
       } else if (Date.now() - started < 60_000) {
         window.setTimeout(poll, 3_000)
       } else {

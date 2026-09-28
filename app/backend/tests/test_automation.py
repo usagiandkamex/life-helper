@@ -5,7 +5,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -1073,9 +1073,10 @@ async def test_a_run_is_in_the_history_while_it_runs(auto_env, monkeypatch):
         await session(*args, **kwargs)
 
     monkeypatch.setattr(runner, "_run_session", spy)
-    record = await runner.run(a.id)
+    record = await runner.run(a.id, run_id="a000000000000001")
 
     # While it runs the history shows the run without a result, and there is nothing to read or to replay yet.
+    assert record["id"] == "a000000000000001"
     assert [(r["id"], r["status"]) for r in during["runs"]] == [(record["id"], "running")]
     assert "summary" not in during["runs"][0] and during["runs"][0]["events"] == []
     assert during["unread"] == 0 and during["threads"] == []
@@ -1144,3 +1145,20 @@ def test_automation_list_reports_runs_in_progress_beyond_the_history(client, ctx
     assert "a000000000000001" not in {r["id"] for r in client.get("/api/automations/runs").json()}
     # The interrupted run is not reported as running, so its automation can be started again.
     assert client.get("/api/automations").json()["running_automation_ids"] == ["aaaaaa000001"]
+
+
+def test_run_now_returns_the_id_reserved_for_its_task(client, ctx):
+    csrf = sign_in(client, ctx)
+    automation = ctx.automations.upsert(Automation(name="定期チェック", prompt="確認して"))
+    runner = SimpleNamespace(
+        run=AsyncMock(return_value={"status": "success"}), manager=SimpleNamespace(reset=AsyncMock())
+    )
+    ctx.extras["automation_runner"] = runner
+
+    response = client.post(f"/api/automations/{automation.id}/run", headers={"x-csrf-token": csrf})
+
+    assert response.status_code == 200
+    run_id = response.json()["run_id"]
+    assert response.json() == {"started": True, "run_id": run_id}
+    assert len(run_id) == 16
+    runner.run.assert_called_once_with(automation.id, run_id=run_id)
