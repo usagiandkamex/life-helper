@@ -233,7 +233,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
       <section className="panel">
         <div className="row list-head">
           <h2 className="grow">実行履歴</h2>
-          <button className="button small" onClick={refresh} disabled={refreshing}>
+          <button className="button small" aria-label={refreshing ? '実行履歴を更新中' : '実行履歴を更新'} onClick={refresh} disabled={refreshing}>
             {refreshing ? '更新中…' : '更新'}
           </button>
           <button className="button small" aria-expanded={runsOpen} aria-controls="run-list" onClick={() => setRunsOpen(!runsOpen)}>
