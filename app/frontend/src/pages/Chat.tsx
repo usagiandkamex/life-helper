@@ -119,6 +119,9 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   const [drawer, setDrawer] = useState(false)
   const [error, setError] = useState('')
   const sourceRef = useRef<EventSource | null>(null)
+  // Opening a conversation ends after this page is left (another tab was chosen): the event stream is not started
+  // then, because the cleanup that would close it has already run.
+  const mountedRef = useRef(true)
   const bottomRef = useRef<HTMLDivElement | null>(null)
   const messagesRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLTextAreaElement | null>(null)
@@ -209,6 +212,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
 
   const attach = useCallback(
     (id: string) => {
+      if (!mountedRef.current) return
       sourceRef.current?.close()
       setTurnId(id)
       setWaiting([]) // the replay below lists them again
@@ -387,6 +391,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   }
 
   useEffect(() => {
+    mountedRef.current = true
     loadConversations().catch((e) => setError(e.message))
     api<{ default: string; models: { id: string; name: string }[] }>('/api/models')
       .then((d) => {
@@ -394,7 +399,10 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
         setModel(d.default)
       })
       .catch(() => undefined)
-    return () => sourceRef.current?.close()
+    return () => {
+      mountedRef.current = false
+      sourceRef.current?.close()
+    }
   }, [loadConversations])
 
   useEffect(() => {
