@@ -393,6 +393,38 @@ async def test_run_due_only_runs_due_automations(auto_env):
     assert datetime.fromisoformat(ctx.automations.get(a.id).state.next_run_at) > next_run
 
 
+async def test_run_due_records_real_start_time_but_shares_now(auto_env, monkeypatch):
+    ctx, runner, manager = auto_env
+    schedule = Schedule(kind="daily", time="00:00")  # 00:00 JST
+    a = ctx.automations.upsert(Automation(name="A", prompt="{{today}} A", schedule=schedule))
+    b = ctx.automations.upsert(Automation(name="B", prompt="{{today}} B", schedule=schedule))
+    # 2026-01-01 23:59 JST: the shared scheduled tick expands {{today}} to 2026-01-01 and schedules 00:00 JST next day.
+    scheduled = datetime(2026, 1, 1, 14, 59, tzinfo=UTC)
+    for auto in (a, b):
+        ctx.automations.update_state(auto.id, next_run_at=(scheduled - timedelta(minutes=1)).isoformat())
+
+    # Real wall clock is 2026-01-02 00:01 JST and advances 1s per call, so it lands on a different JST day than the
+    # scheduled tick. This makes a regression to the shared `now` visible in both the start time and the JST date.
+    ticks = (datetime(2026, 1, 1, 15, 1, s, tzinfo=UTC) for s in range(1, 60))
+    monkeypatch.setattr("life_helper.automation.runner.datetime", SimpleNamespace(now=lambda tz=None: next(ticks)))
+
+    results = await runner.run_due(scheduled)
+
+    assert [r["status"] for r in results] == ["success", "success"]
+    # Each record keeps its own real start time; a shared `now` would make them identical (both == scheduled).
+    assert {r["started_at"] for r in results} == {
+        datetime(2026, 1, 1, 15, 1, 1, tzinfo=UTC).isoformat(),
+        datetime(2026, 1, 1, 15, 1, 3, tzinfo=UTC).isoformat(),
+    }
+    # Prompt expansion (both the stored prompt and the sent prompt) uses the shared scheduled `now`, not the clock.
+    assert all("2026-01-01" in p and "2026-01-02" not in p for p in manager.prompts)
+    assert all("2026-01-01" in r["prompt"] and "2026-01-02" not in r["prompt"] for r in results)
+    # Scheduling the next run also uses the shared `now`: 00:00 JST on 2026-01-02 (= 2026-01-01 15:00 UTC).
+    expected_next = schedule.next_after(scheduled).isoformat()
+    assert ctx.automations.get(a.id).state.next_run_at == expected_next
+    assert ctx.automations.get(b.id).state.next_run_at == expected_next
+
+
 # -- API --------------------------------------------------------------------------------------------------
 
 
