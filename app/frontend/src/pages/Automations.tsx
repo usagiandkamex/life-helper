@@ -57,6 +57,8 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   const [run, setRun] = useState<RunRecord | null>(null)
   const [runsOpen, setRunsOpen] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
+  const [pendingRunIds, setPendingRunIds] = useState<Set<string>>(new Set())
+  const pendingRunIdsRef = useRef(new Set<string>())
   // 実行中の記録を見張るためのカウンタ（進めると、次の読み直しが予約される）。
   const [tick, setTick] = useState(0)
   const [error, setError] = useState('')
@@ -209,35 +211,48 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   }
 
   const runNow = async (a: Automation) => {
+    if (pendingRunIdsRef.current.has(a.id) || list?.running_automation_ids.includes(a.id)) return
+    pendingRunIdsRef.current.add(a.id)
+    setPendingRunIds(new Set(pendingRunIdsRef.current))
     const selectionGeneration = selectionGenerationRef.current
-    const startedRun = await api<{ started: boolean; run_id: string }>(`/api/automations/${a.id}/run`, {
-      method: 'POST',
-    })
-    setMessage(`「${a.name}」の実行を始めました。実行中も実行履歴に出て、終わると結果に変わります（最大 20 分）。`)
-    // 同時に定期実行が始まっても取り違えないよう、API が割り当てた記録だけを待つ。
-    const started = Date.now()
-    const poll = async () => {
-      const record = await api<RunRecord>(`/api/automations/${a.id}/runs/${startedRun.run_id}`).catch(() => null)
-      if (record) {
-        await load()
-        if (selectionGenerationRef.current === selectionGeneration) {
-          openRun(a.id, startedRun.run_id).catch(() => undefined)
+    setError('')
+    try {
+      const startedRun = await api<{ started: boolean; run_id: string }>(`/api/automations/${a.id}/run`, {
+        method: 'POST',
+      })
+      setMessage(`「${a.name}」の実行を始めました。実行中も実行履歴に出て、終わると結果に変わります（最大 20 分）。`)
+      // 同時に定期実行が始まっても取り違えないよう、API が割り当てた記録だけを待つ。
+      const started = Date.now()
+      await new Promise((resolve) => window.setTimeout(resolve, 2_000))
+      while (true) {
+        const record = await api<RunRecord>(`/api/automations/${a.id}/runs/${startedRun.run_id}`).catch(() => null)
+        if (record) {
+          await load()
+          if (selectionGenerationRef.current === selectionGeneration) {
+            openRun(a.id, startedRun.run_id).catch(() => undefined)
+          }
+          return
         }
-      } else if (Date.now() - started < 60_000) {
-        window.setTimeout(poll, 3_000)
-      } else {
-        // 前の実行が続いていると、そのオートメーションは実行されない（API は受け付けたことだけを返す）。
-        setMessage(`「${a.name}」の実行を確認できませんでした。ほかの実行が続いている可能性があります。`)
+        if (Date.now() - started >= 60_000) {
+          // 前の実行が続いていると、そのオートメーションは実行されない（API は受け付けたことだけを返す）。
+          setMessage(`「${a.name}」の実行を確認できませんでした。ほかの実行が続いている可能性があります。`)
+          return
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 3_000))
       }
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e))
+    } finally {
+      pendingRunIdsRef.current.delete(a.id)
+      setPendingRunIds(new Set(pendingRunIdsRef.current))
     }
-    window.setTimeout(poll, 2_000)
   }
 
   if (!list) return <div className="panel">{error || '読み込み中…'}</div>
   const usage = list.usage
   // 同じオートメーションは同時に実行できないので、実行中の記録がある間は「今すぐ実行」を押せないようにする。
   // 実行履歴は新しい 50 件までなので、上限のない一覧側の実行中のオートメーションで決める。
-  const running = new Set(list.running_automation_ids)
+  const running = new Set([...list.running_automation_ids, ...pendingRunIds])
   return (
     <div className="stack">
       {message && <div className="banner ok">{message}</div>}

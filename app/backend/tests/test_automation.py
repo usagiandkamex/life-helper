@@ -1140,11 +1140,23 @@ def test_automation_list_reports_runs_in_progress_beyond_the_history(client, ctx
     store.save_run(_running_record("aaaaaa000009", "a000000000000009", started=now))  # a deleted automation
     for i in range(50):  # newer runs push the one in progress out of the (capped) history
         record = _running_record("aaaaaa000003", f"b{i:015d}", started=now - timedelta(seconds=i))
-        store.save_run(record | {"status": "success", "summary": "要約"})
+        store.save_run(record | {"status": "success" if i % 2 else "error", "read": i < 10, "summary": "要約"})
 
     assert "a000000000000001" not in {r["id"] for r in client.get("/api/automations/runs").json()}
     # The interrupted run is not reported as running, so its automation can be started again.
-    assert client.get("/api/automations").json()["running_automation_ids"] == ["aaaaaa000001"]
+    with patch.object(store, "list_run_meta", wraps=store.list_run_meta) as scan:
+        listing = client.get("/api/automations").json()
+    scan.assert_called_once_with()
+    assert listing["running_automation_ids"] == ["aaaaaa000001"]
+    assert listing["unread"] == 40
+
+
+def test_automation_list_scans_empty_history_once(client, ctx):
+    sign_in(client, ctx)
+    with patch.object(ctx.automations, "list_run_meta", wraps=ctx.automations.list_run_meta) as scan:
+        listing = client.get("/api/automations").json()
+    scan.assert_called_once_with()
+    assert listing["running_automation_ids"] == [] and listing["unread"] == 0
 
 
 def test_run_now_returns_the_id_reserved_for_its_task(client, ctx):

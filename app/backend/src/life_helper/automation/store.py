@@ -255,9 +255,11 @@ class AutomationStore:
                 records.append(record)
         self._save_runs(records)
 
-    def unread_count(self) -> int:
+    def unread_count(self, metas: list[dict] | None = None) -> int:
         # A run that is still in progress has nothing to read yet.
-        return sum(1 for r in self.list_run_meta() if not r.get("read") and r.get("status") != RUNNING_STATUS)
+        if metas is None:
+            metas = self.list_run_meta()
+        return sum(1 for r in metas if not r.get("read") and r.get("status") != RUNNING_STATUS)
 
     # -- chat view state ---------------------------------------------------------------------------------
     # Kept apart from the run records so hiding a conversation never rewrites a result (or races with "read").
