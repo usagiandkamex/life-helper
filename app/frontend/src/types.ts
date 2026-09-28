@@ -226,6 +226,8 @@ export type Automation = {
 
 export type AutomationList = {
   automations: Automation[]
+  // 実行中の記録があるオートメーション（実行履歴の件数の上限に関係なく、すべての記録から求める）
+  running_automation_ids: string[]
   usage: { runs_this_month: number; monthly_limit: number; estimated_runs_per_month: number }
   unread: number
   github_notify_configured: boolean

@@ -5,7 +5,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -1039,3 +1039,138 @@ def test_chat_api(client, ctx):
     assert run["chat_thread_id"] == "r-bbbbbb000001-b000000000000001"
     store.save_run({"id": "0dd0000000000001", "automation_id": "bbbbbb000001", "started_at": "2026-09-01"})
     assert client.get("/api/automations/bbbbbb000001/runs/0dd0000000000001").json()["chat_thread_id"] is None
+
+
+# -- runs in progress (issue #61) ---------------------------------------------------------------------------
+
+
+def _running_record(automation_id: str, run_id: str, *, started: datetime | None = None) -> dict:
+    """A record as the runner writes it when a run starts: no result and no transcript yet."""
+    return {
+        "id": run_id,
+        "automation_id": automation_id,
+        "name": "定期チェック",
+        "started_at": (started or datetime(2026, 9, 25, 0, 0, tzinfo=UTC)).isoformat(),
+        "status": "running",
+        "read": False,
+        "transcript_version": 1,
+        "conversation_mode": "new",
+        "prompt": "確認して",
+        "events": [],
+    }
+
+
+async def test_a_run_is_in_the_history_while_it_runs(auto_env, monkeypatch):
+    ctx, runner, manager = auto_env
+    a = ctx.automations.upsert(Automation(name="毎朝", prompt="予定"))
+    during: dict = {}
+    session = runner._run_session
+
+    async def spy(*args, **kwargs):
+        during["runs"] = ctx.automations.list_runs(a.id)
+        during["unread"] = ctx.automations.unread_count()
+        during["threads"] = chat.list_threads(ctx.automations)
+        await session(*args, **kwargs)
+
+    monkeypatch.setattr(runner, "_run_session", spy)
+    record = await runner.run(a.id, run_id="a000000000000001")
+
+    # While it runs the history shows the run without a result, and there is nothing to read or to replay yet.
+    assert record["id"] == "a000000000000001"
+    assert [(r["id"], r["status"]) for r in during["runs"]] == [(record["id"], "running")]
+    assert "summary" not in during["runs"][0] and during["runs"][0]["events"] == []
+    assert during["unread"] == 0 and during["threads"] == []
+    # The same record is replaced by the result, so a run never appears twice.
+    assert [(r["id"], r["status"]) for r in ctx.automations.list_runs(a.id)] == [(record["id"], "success")]
+    assert ctx.automations.unread_count() == 1
+    assert [t["id"] for t in chat.list_threads(ctx.automations)] == [f"r-{a.id}-{record['id']}"]
+
+
+def test_marking_a_run_in_progress_read_does_not_replace_the_result(tmp_path):
+    store = AutomationStore(tmp_path)
+    aid, rid = "aaaaaa000001", "a000000000000001"
+    store.save_run(_running_record(aid, rid))
+    store.mark_read(aid, rid)
+    assert store.get_run(aid, rid)["read"] is False  # the record the runner is about to replace is left alone
+    store.save_run(_chat_record(aid, rid))  # the run finishes
+    store.mark_read(aid, rid)
+    saved = store.get_run(aid, rid)
+    assert saved["read"] is True and saved["summary"] == "要約"
+
+
+def test_runs_api_shows_a_run_in_progress_and_an_abandoned_one(client, ctx, settings):
+    csrf = sign_in(client, ctx)
+    store = ctx.automations
+    now = datetime.now(UTC)
+    store.save_run(_running_record("aaaaaa000001", "a000000000000001", started=now))
+    left_behind = now - timedelta(seconds=settings.automation_lock_ttl_seconds + 60)
+    store.save_run(_running_record("aaaaaa000001", "a000000000000002", started=left_behind))
+
+    runs = {r["id"]: r for r in client.get("/api/automations/runs").json()}
+    assert runs["a000000000000001"]["status"] == "running"
+    # A run that is still recorded as running long after it could be is shown as interrupted, not as running.
+    assert runs["a000000000000002"]["status"] == "interrupted"
+    detail = client.get("/api/automations/aaaaaa000001/runs/a000000000000002").json()
+    assert detail["status"] == "interrupted" and detail["chat_thread_id"] is None
+    assert store.get_run("aaaaaa000001", "a000000000000002")["status"] == "running"  # the record is left alone
+
+    assert client.get("/api/automations").json()["unread"] == 0  # a run without a result is not unread
+    for rid in ("a000000000000001", "a000000000000002"):
+        read = client.post(f"/api/automations/aaaaaa000001/runs/{rid}/read", headers={"x-csrf-token": csrf})
+        assert read.status_code == 200 and store.get_run("aaaaaa000001", rid)["read"] is False
+
+
+def test_a_run_in_progress_without_a_usable_start_time_stays_running(client, ctx):
+    sign_in(client, ctx)
+    record = _running_record("aaaaaa000001", "a000000000000001")
+    record["started_at"] = "2026-09-25 00:00:00"  # a start time without a timezone cannot be compared
+    ctx.automations.save_run(record)
+    assert client.get("/api/automations/runs").json()[0]["status"] == "running"
+
+
+def test_automation_list_reports_runs_in_progress_beyond_the_history(client, ctx, settings):
+    sign_in(client, ctx)
+    store = ctx.automations
+    store.upsert(Automation(id="aaaaaa000001", name="定期チェック", prompt="確認して", schedule=Schedule(kind="daily")))
+    store.upsert(Automation(id="aaaaaa000002", name="定期チェック", prompt="確認して", schedule=Schedule(kind="daily")))
+    now = datetime.now(UTC)
+    store.save_run(_running_record("aaaaaa000001", "a000000000000001", started=now - timedelta(minutes=5)))
+    left_behind = now - timedelta(seconds=settings.automation_lock_ttl_seconds + 60)
+    store.save_run(_running_record("aaaaaa000002", "a000000000000002", started=left_behind))
+    store.save_run(_running_record("aaaaaa000009", "a000000000000009", started=now))  # a deleted automation
+    for i in range(50):  # newer runs push the one in progress out of the (capped) history
+        record = _running_record("aaaaaa000003", f"b{i:015d}", started=now - timedelta(seconds=i))
+        store.save_run(record | {"status": "success" if i % 2 else "error", "read": i < 10, "summary": "要約"})
+
+    assert "a000000000000001" not in {r["id"] for r in client.get("/api/automations/runs").json()}
+    # The interrupted run is not reported as running, so its automation can be started again.
+    with patch.object(store, "list_run_meta", wraps=store.list_run_meta) as scan:
+        listing = client.get("/api/automations").json()
+    scan.assert_called_once_with()
+    assert listing["running_automation_ids"] == ["aaaaaa000001"]
+    assert listing["unread"] == 40
+
+
+def test_automation_list_scans_empty_history_once(client, ctx):
+    sign_in(client, ctx)
+    with patch.object(ctx.automations, "list_run_meta", wraps=ctx.automations.list_run_meta) as scan:
+        listing = client.get("/api/automations").json()
+    scan.assert_called_once_with()
+    assert listing["running_automation_ids"] == [] and listing["unread"] == 0
+
+
+def test_run_now_returns_the_id_reserved_for_its_task(client, ctx):
+    csrf = sign_in(client, ctx)
+    automation = ctx.automations.upsert(Automation(name="定期チェック", prompt="確認して"))
+    runner = SimpleNamespace(
+        run=AsyncMock(return_value={"status": "success"}), manager=SimpleNamespace(reset=AsyncMock())
+    )
+    ctx.extras["automation_runner"] = runner
+
+    response = client.post(f"/api/automations/{automation.id}/run", headers={"x-csrf-token": csrf})
+
+    assert response.status_code == 200
+    run_id = response.json()["run_id"]
+    assert response.json() == {"started": True, "run_id": run_id}
+    assert len(run_id) == 16
+    runner.run.assert_called_once_with(automation.id, run_id=run_id)

@@ -23,7 +23,7 @@ from ..tools.registry import ToolSpec
 from .locks import FileLock
 from .models import Automation, expand_prompt
 from .notify import GitHubNotifier, NotifyError
-from .store import AutomationStore
+from .store import RUNNING_STATUS, AutomationStore
 
 if TYPE_CHECKING:
     from ..context import AppContext
@@ -125,7 +125,9 @@ class AutomationRunner:
                 results.append(await self.run(automation.id, now=now, scheduled=True))
         return results
 
-    async def run(self, automation_id: str, *, now: datetime | None = None, scheduled: bool = False) -> dict:
+    async def run(
+        self, automation_id: str, *, now: datetime | None = None, scheduled: bool = False, run_id: str | None = None
+    ) -> dict:
         now = now or datetime.now(UTC)
         lock = self._lock(automation_id)
         if not lock.try_acquire():
@@ -139,12 +141,12 @@ class AutomationRunner:
                 return {"automation_id": automation_id, "status": "skipped_not_due"}
             # Schedule the next run first so a crash cannot cause a tight retry loop.
             self.store.update_state(automation.id, next_run_at=automation.schedule.next_after(now).isoformat())
-            return await self._execute(automation, now)
+            return await self._execute(automation, now, run_id=run_id)
         finally:
             lock.release()
 
-    async def _execute(self, automation: Automation, now: datetime) -> dict:
-        run_id = uuid.uuid4().hex[:16]
+    async def _execute(self, automation: Automation, now: datetime, *, run_id: str | None = None) -> dict:
+        run_id = run_id or uuid.uuid4().hex[:16]
         record: dict[str, Any] = {
             "id": run_id,
             "automation_id": automation.id,
@@ -152,6 +154,9 @@ class AutomationRunner:
             # Due automations run one after another with the same scheduled ``now``, so the record keeps the time this
             # run really started; the history shows how long it took (finished_at - started_at).
             "started_at": datetime.now(UTC).isoformat(),
+            # Recorded as running before any work starts, so the run history shows that the run is in progress
+            # (scheduled runs happen in the job process, so the shared volume is the only place the app can see it).
+            "status": RUNNING_STATUS,
             "read": False,
             "notified": False,
             # Records carrying these fields are replayed as a conversation in the chat (older ones are not).
@@ -168,6 +173,8 @@ class AutomationRunner:
             "attempts": 0,
             "requests": 0,
         }
+        # Every later write replaces this record, so the result never appears twice in the history.
+        self.store.save_run(record)
         missing = [
             c
             for c in automation.connectors

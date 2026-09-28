@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .store import AutomationStore
+from .store import RUNNING_STATUS, AutomationStore
 
 THREAD_ID_RE = re.compile(
     r"^(?:c-(?P<continue_id>[0-9a-f]{6,32})|r-(?P<new_id>[0-9a-f]{6,32})-(?P<run_id>[0-9a-f]{6,32}))$"
@@ -20,8 +20,9 @@ ANCHOR_LIMIT = 100
 
 
 def thread_id_for(record: dict) -> str | None:
-    """The chat conversation a run belongs to, or None for runs recorded before transcripts existed."""
-    if not isinstance(record.get("transcript_version"), int):
+    """The chat conversation a run belongs to, or None for a run that is still in progress (its transcript is
+    written when it finishes) and for runs recorded before transcripts existed."""
+    if not isinstance(record.get("transcript_version"), int) or record.get("status") == RUNNING_STATUS:
         return None
     automation_id, run_id = record.get("automation_id"), record.get("id")
     if not automation_id or not run_id:
