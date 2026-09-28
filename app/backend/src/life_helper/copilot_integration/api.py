@@ -32,8 +32,9 @@ from .turns import (
 
 router = APIRouter(prefix="/api")
 
-# One typed (or pasted) message: long enough for an error log or a stack trace. The attached files of the same
-# message add up to MAX_TEXT_CHARS on top of it. The composer checks the same number before sending.
+# One typed (or pasted) message: long enough for an error log or a stack trace. Up to MAX_TEXT_CHARS of text
+# taken from the files attached to the same message is appended to it. The composer checks the same number
+# before sending.
 MAX_PROMPT_CHARS = 50_000
 
 ORGANIZE_PROMPT = (

@@ -206,6 +206,8 @@ def test_turn_rejects_sensitive_prompt_without_confirmation(client, ctx):
 def test_long_pasted_text_is_sent_up_to_the_limit(client, ctx):
     from life_helper.copilot_integration.api import MAX_PROMPT_CHARS
 
+    assert MAX_PROMPT_CHARS == 50_000  # the composer says this number; both are changed together
+
     csrf = sign_in(client, ctx)
     h = {"x-csrf-token": csrf}
     fake = install_fake(ctx, FakeSession())

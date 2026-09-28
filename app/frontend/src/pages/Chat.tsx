@@ -133,6 +133,9 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   const [error, setError] = useState('')
   // What is sent, counted while it is typed: a pasted error log is over the limit long before that can be seen.
   const promptChars = useMemo(() => promptLength(input.trim()), [input])
+  const promptTooLong = promptChars > MAX_PROMPT_CHARS
+  // Near the limit the count is worth the room it takes in the composer; a short message never sees it.
+  const showPromptChars = promptChars > MAX_PROMPT_CHARS * 0.9
   const sourceRef = useRef<EventSource | null>(null)
   // Opening a conversation ends after this page is left (another tab was chosen): the event stream is not started
   // then, because the cleanup that would close it has already run.
@@ -932,7 +935,11 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
           )}
           <div ref={bottomRef} />
         </div>
-        {error && <div className="banner error">{error}</div>}
+        {error && (
+          <div className="banner error" role="alert">
+            {error}
+          </div>
+        )}
         {threadId ? (
           <div className="composer readonly">
             <p className="hint">
@@ -1000,6 +1007,9 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
                 turnId ? '回答中も追加で送信できます（Ctrl+Enter ですぐに送信）' : 'メッセージを入力（Ctrl+Enter で送信。画像は貼り付けでも添付できます）'
               }
               rows={3}
+              // Read out with the input field instead of at every keystroke, which a live region would do.
+              aria-describedby={showPromptChars ? 'prompt-chars' : undefined}
+              aria-invalid={promptTooLong || undefined}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
                   e.preventDefault()
@@ -1015,11 +1025,12 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
                 addAttachments(files)
               }}
             />
-            {/* Shown only near the limit, so the usual short message keeps the composer as it is. */}
-            {promptChars > MAX_PROMPT_CHARS * 0.9 && (
-              <p className={promptChars > MAX_PROMPT_CHARS ? 'banner error' : 'hint'} role="status">
+            {/* Shown only near the limit, so the usual short message keeps the composer as it is. Sending says
+                how much has to go; here the count alone is enough. */}
+            {showPromptChars && (
+              <p id="prompt-chars" className={promptTooLong ? 'banner error' : 'hint'}>
                 {promptChars.toLocaleString('ja-JP')} / {MAX_PROMPT_CHARS.toLocaleString('ja-JP')} 文字
-                {promptChars > MAX_PROMPT_CHARS && '（このままでは送信できません。減らすか、いくつかに分けて送信してください）'}
+                {promptTooLong && '（このままでは送信できません）'}
               </p>
             )}
             <div className="composer-actions">
