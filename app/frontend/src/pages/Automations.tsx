@@ -63,6 +63,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   const [message, setMessage] = useState('')
   const detailRef = useRef<HTMLDivElement>(null)
   const selectedRunIdRef = useRef<string | null>(null)
+  const openRunRequestRef = useRef(0)
   const interruptedWatchRef = useRef<{ runId: string; since: number } | null>(null)
 
   const load = useCallback(async () => {
@@ -80,8 +81,9 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
       } else if (selectedRunIdRef.current !== runId) {
         return
       }
+      const request = ++openRunRequestRef.current
       const record = await api<RunRecord>(`/api/automations/${automationId}/runs/${runId}`)
-      if (selectedRunIdRef.current !== runId) return
+      if (selectedRunIdRef.current !== runId || openRunRequestRef.current !== request) return
       if (record.status === 'interrupted') {
         if (interruptedWatchRef.current?.runId !== record.id) {
           interruptedWatchRef.current = { runId: record.id, since: Date.now() }
