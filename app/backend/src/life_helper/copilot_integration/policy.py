@@ -97,7 +97,8 @@ class ToolPolicy:
     allow_write: bool = True
     # Chat: every knowledge-base write waits for the user's approval, and is refused without an approver.
     require_approval: bool = False
-    # Chat only: the answer may run look-ups in parallel with the read-only research sub-agent (``task``).
+    # The answer may run look-ups in parallel with the read-only research sub-agent (``task``); chat and automation
+    # alike. The automation runner waits for its own agent's idle so a sub-agent's idle does not end the run early.
     allow_subagents: bool = False
     write_scope: WriteScope | None = None
     on_tool_result: Callable[[str, Any], None] | None = None

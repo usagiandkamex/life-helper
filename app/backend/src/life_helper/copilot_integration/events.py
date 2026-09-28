@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import Any
@@ -12,6 +13,8 @@ from copilot.session_events import (
     AssistantUsageData,
     AttachmentBlob,
     SessionErrorData,
+    SessionIdleData,
+    SessionMode,
     ToolExecutionCompleteData,
     ToolExecutionStartData,
     UserMessageData,
@@ -74,6 +77,38 @@ def subagent_event(event: Any) -> bool:
     own events do not have one. Their tokens are not the answer and their idle/error do not end the turn.
     """
     return bool(getattr(event, "agent_id", None))
+
+
+async def send_and_wait_own(session: Any, prompt: str) -> None:
+    """Send ``prompt`` and wait until the session's own agent goes idle.
+
+    Like ``session.send_and_wait``, but a research sub-agent (``task``) shares the session's event stream and raises
+    its own idle/error; those must not end the wait, or an unattended automation would stop at the first sub-agent
+    that finishes instead of when its own agent is done. Only a non-sub-agent idle (or error) completes it — the same
+    rule the chat turn loop uses via ``subagent_event``. The caller bounds the wait with ``asyncio.wait_for``.
+    """
+    idle = asyncio.Event()
+    failure: list[Exception] = []
+
+    def handler(event: Any) -> None:
+        if subagent_event(event):
+            return
+        data = getattr(event, "data", None)
+        if isinstance(data, SessionIdleData) and data.mode != SessionMode.AUTOPILOT:
+            idle.set()
+        elif isinstance(data, SessionErrorData):
+            # Mirror the SDK: surface the error after the wait, never raise from inside the event callback.
+            failure.append(RuntimeError(f"Session error: {data.message or str(data)}"))
+            idle.set()
+
+    unsubscribe = session.on(handler)
+    try:
+        await session.send(prompt)
+        await idle.wait()
+    finally:
+        unsubscribe()
+    if failure:
+        raise failure[0]
 
 
 def map_event(event: Any, masker: SecretMasker) -> dict | None:

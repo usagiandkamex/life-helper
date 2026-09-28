@@ -157,7 +157,7 @@ def test_available_builtins_exclude_writers():
     assert not {"create", "edit", "apply_patch", "str_replace_editor", "bash", "powershell"} & set(ALLOWED_BUILTINS)
     chat = [f"builtin:{t}" for t in ALLOWED_BUILTINS] + ["custom:*"]
     assert available_toolset(True, True).to_list() == chat
-    # Automations answer nobody and end at the first idle event: no research sub-agents there.
+    # Without the research agent enabled, task is not offered; skill needs skills present.
     assert available_toolset(True).to_list() == [t for t in chat if t != "builtin:task"]
     assert available_toolset(False).to_list() == [t for t in chat if t not in ("builtin:task", "builtin:skill")]
 
@@ -168,7 +168,7 @@ async def test_task_tool_only_starts_the_research_agent(policy):
     async def task(**args):
         return await policy.pre_tool_use({"toolName": "task", "toolArgs": args}, {})
 
-    # Chat only: an automation (allow_subagents=False, the default) cannot start sub-agents at all.
+    # A session that was not given the research agent (allow_subagents=False, the default) cannot start sub-agents.
     assert (await task(agent_type=RESEARCH_AGENT, prompt="x"))["permissionDecision"] == "deny"
     policy.allow_subagents = True
 
@@ -353,11 +353,15 @@ def test_system_message_contains_kb_profile_and_rules(kb):
     # The result is read later in the run history, so the rules say how to write it (issue #41).
     assert "実行履歴" in auto and "Markdown" in auto and "表" in auto
     assert "承認ボタン" not in auto  # unattended runs never wait for a user
-    # Batching independent look-ups into one answer helps everywhere; sub-agents are for the chat only (issue #56).
+    # Batching independent look-ups into one answer helps everywhere; the sub-agent rules are added only when the
+    # session is given the research agent (issue #56).
     assert "まとめて出して" in msg and "まとめて出して" in auto
     assert "task" not in msg and "task" not in auto
     research = build_system_message(kb, subagents=True)
     assert "task" in research and "researcher" in research and "最大 6 件" in research
+    # Automations may also run the research sub-agent, so its rules appear when subagents is on.
+    auto_research = build_system_message(kb, automation=True, allow_write=False, subagents=True)
+    assert "task" in auto_research and "researcher" in auto_research and "report_result" in auto_research
 
 
 def test_research_agent_is_read_only(kb):
@@ -385,11 +389,11 @@ def test_chat_sessions_require_approval_but_automations_do_not(ctx):
         allow_write=False
     )
     assert not auto_policy.require_approval and not auto_policy.allow_write
-    # Sub-agents are for the chat: an automation waits for the first idle event, which a sub-agent would also raise.
-    assert chat_policy.allow_subagents and not auto_policy.allow_subagents
+    # Chat and automation alike may run the read-only research sub-agent (``task``).
+    assert chat_policy.allow_subagents and auto_policy.allow_subagents
 
 
-def test_only_chat_sessions_get_the_research_agent(ctx):
+def test_chat_and_automation_sessions_get_the_research_agent(ctx):
     from life_helper.copilot_integration.manager import CopilotManager
 
     def options(manager, allow_write):
@@ -402,9 +406,11 @@ def test_only_chat_sessions_get_the_research_agent(ctx):
     assert chat["include_sub_agent_streaming_events"] is False
     assert "builtin:task" in chat["available_tools"].to_list()
 
+    # Automations run the same read-only research agent; the runner waits for its own agent's idle.
     auto = options(CopilotManager(ctx, ctx.settings.copilot_automation_dir, automation=True), False)
-    assert "custom_agents" not in auto and "include_sub_agent_streaming_events" not in auto
-    assert "builtin:task" not in auto["available_tools"].to_list()
+    assert [a["name"] for a in auto["custom_agents"]] == ["researcher"]
+    assert auto["include_sub_agent_streaming_events"] is False
+    assert "builtin:task" in auto["available_tools"].to_list()
 
 
 def test_connector_filter(ctx, settings):

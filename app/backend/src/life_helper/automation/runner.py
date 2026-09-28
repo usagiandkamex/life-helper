@@ -16,7 +16,7 @@ from copilot import define_tool
 from pydantic import BaseModel, Field
 
 from ..connectors.registry import get_connectors
-from ..copilot_integration.events import map_event
+from ..copilot_integration.events import map_event, send_and_wait_own
 from ..copilot_integration.manager import CopilotManager, NoTokenError
 from ..security import redact_sensitive
 from ..tools.registry import ToolSpec
@@ -322,7 +322,9 @@ class AutomationRunner:
             remaining = deadline - loop.time()
             if remaining <= 0:
                 raise TimeoutError
-            await asyncio.wait_for(active.session.send_and_wait(prompt, timeout=remaining), remaining)
+            # Each send gets its own budget of research sub-agents, like the chat's per-answer budget.
+            active.policy.begin_answer()
+            await asyncio.wait_for(send_and_wait_own(active.session, prompt), remaining)
             remaining = deadline - loop.time()
             if run_ctx.report is None and remaining > 0:
                 # The report carries the result the user reads in the run history (and the notify decision),
@@ -331,7 +333,8 @@ class AutomationRunner:
                 run_ctx.events.append({"type": "follow_up"})
                 follow_up_start = len(run_ctx.events)
                 try:
-                    await asyncio.wait_for(active.session.send_and_wait(REPORT_FOLLOW_UP, timeout=remaining), remaining)
+                    active.policy.begin_answer()
+                    await asyncio.wait_for(send_and_wait_own(active.session, REPORT_FOLLOW_UP), remaining)
                 except Exception:  # noqa: BLE001
                     logger.warning("automation %s did not report after the follow-up request", automation.id)
                     await self._abort(active.session)
