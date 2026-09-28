@@ -28,8 +28,10 @@ export type ApprovalItem = {
 }
 
 export type Item =
-  | { kind: 'user'; text: string; attachments?: ShownAttachment[] }
-  | { kind: 'assistant'; text: string; streaming?: boolean }
+  // at: when the message was posted (ISO 8601), shown next to it; missing while an answer is still being written,
+  // and on the messages of conversations from before the time was recorded.
+  | { kind: 'user'; text: string; attachments?: ShownAttachment[]; at?: string }
+  | { kind: 'assistant'; text: string; streaming?: boolean; at?: string }
   | {
       kind: 'tool'
       id?: string
@@ -68,8 +70,8 @@ export function applyEvent(
       else next.push({ kind: 'assistant', text: ev.text, streaming: true })
       return next
     case 'message':
-      if (current) next[streaming] = { kind: 'assistant', text: ev.content }
-      else if (ev.content) next.push({ kind: 'assistant', text: ev.content })
+      if (current) next[streaming] = { kind: 'assistant', text: ev.content, at: ev.at }
+      else if (ev.content) next.push({ kind: 'assistant', text: ev.content, at: ev.at })
       return next
     case 'tool_start':
       closeStreaming()
@@ -125,6 +127,7 @@ export function applyEvent(
         kind: 'user',
         text: ev.text,
         attachments: ev.attachments && shownAttachments(ev.attachments, thumbnails),
+        at: ev.at,
       })
       return next
     case 'done':
@@ -141,8 +144,8 @@ export function fromHistory(messages: HistoryMessage[]): Item[] {
     m.role === 'tool'
       ? { kind: 'tool', name: m.name, args: m.args, success: true, subagent: m.subagent }
       : m.role === 'user'
-        ? { kind: 'user', text: m.content, attachments: m.attachments }
-        : { kind: 'assistant', text: m.content },
+        ? { kind: 'user', text: m.content, attachments: m.attachments, at: m.at }
+        : { kind: 'assistant', text: m.content, at: m.at },
   )
 }
 

@@ -653,7 +653,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
       try {
         const res = await api<{
           turn_id: string
-          message: { content: string; attachments: SentAttachment[] }
+          message: { content: string; attachments: SentAttachment[]; at?: string }
         }>(
           `/api/conversations/${id}/turns`,
           {
@@ -670,7 +670,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
         // Opened something else meanwhile: the turn keeps running and is followed when its conversation is opened.
         if (generationRef.current !== generation) return
         const shown = shownAttachments(res.message.attachments, files.map((a) => a.url))
-        setItems((prev) => [...prev, { kind: 'user', text: res.message.content, attachments: shown }])
+        setItems((prev) => [...prev, { kind: 'user', text: res.message.content, attachments: shown, at: res.message.at }])
         setInput((cur) => (cur === draft ? '' : cur))
         setAttachments((cur) => cur.filter((a) => !files.includes(a)))
         attach(res.turn_id)
@@ -712,7 +712,11 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
     setFollowUpSending(mode)
     try {
       // message: when the answer ended meanwhile and the message started a new turn, as for send().
-      let res: { turn_id: string; message_id?: string; message?: { content: string; attachments: SentAttachment[] } }
+      let res: {
+        turn_id: string
+        message_id?: string
+        message?: { content: string; attachments: SentAttachment[]; at?: string }
+      }
       const held = heldEventsRef.current
       held.holds += 1
       try {
@@ -744,7 +748,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
       const shown = shownAttachments(res.message?.attachments ?? [], files.map((a) => a.url))
       const start = () => {
         if (generationRef.current !== generation) return
-        setItems((prev) => [...prev, { kind: 'user', text, attachments: shown }])
+        setItems((prev) => [...prev, { kind: 'user', text, attachments: shown, at: res.message?.at }])
         attach(res.turn_id)
       }
       if (sourceRef.current && sourceRef.current.readyState !== EventSource.CLOSED) nextTurnRef.current = start
@@ -801,13 +805,17 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
 
   const organize = async () => {
     const generation = generationRef.current
-    const res = await api<{ turn_id: string; conversation_id: string }>('/api/memories/organize', { method: 'POST' })
+    const res = await api<{ turn_id: string; conversation_id: string; message: { at?: string } }>(
+      '/api/memories/organize',
+      { method: 'POST' },
+    )
     await loadConversations()
     if (generationRef.current !== generation) return // it keeps running; its conversation shows it when opened
     selectConversation(res.conversation_id)
     setInput('')
     setAttachments([])
-    setItems([{ kind: 'user', text: 'メモリの整理を依頼しました。' }])
+    // The request itself is long; what is shown instead says what was asked, at the time it was asked.
+    setItems([{ kind: 'user', text: 'メモリの整理を依頼しました。', at: res.message.at }])
     attach(res.turn_id)
   }
 

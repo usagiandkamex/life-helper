@@ -1,8 +1,20 @@
+import { formatTime } from '../api'
 import { TOOL_LABELS, type Item } from '../chatItems'
 import { ApprovalCard } from './ApprovalCard'
 import { AttachmentList } from './AttachmentList'
 import { LazyChart } from './LazyChart'
 import { Markdown } from './Markdown'
+
+// 投稿時刻（JST）。時刻がわからない投稿（記録される前の会話や、書き込み中の回答）では何も出さない。
+function PostedAt({ at }: { at?: string }) {
+  const shown = formatTime(at)
+  if (!shown) return null
+  return (
+    <time className="msg-time" dateTime={at}>
+      {shown}
+    </time>
+  )
+}
 
 export function MessageItem({ item, onSchedule }: { item: Item; onSchedule?: (text: string) => void }) {
   switch (item.kind) {
@@ -11,6 +23,7 @@ export function MessageItem({ item, onSchedule }: { item: Item; onSchedule?: (te
         <div className="msg user">
           {item.attachments && item.attachments.length > 0 && <AttachmentList items={item.attachments} />}
           <div className="bubble">{item.text}</div>
+          <PostedAt at={item.at} />
           {/* A schedule keeps only the text, so a question about attached files is not offered. */}
           {onSchedule && !item.attachments?.length && (
             <button className="link small" onClick={() => onSchedule(item.text)}>
@@ -24,6 +37,7 @@ export function MessageItem({ item, onSchedule }: { item: Item; onSchedule?: (te
         <div className="msg assistant">
           <Markdown text={item.text} />
           {item.streaming && <span className="cursor">▍</span>}
+          {!item.streaming && <PostedAt at={item.at} />}
         </div>
       )
     case 'tool':

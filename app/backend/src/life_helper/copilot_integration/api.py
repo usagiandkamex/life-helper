@@ -20,7 +20,7 @@ from .attachments import (
     PreparedAttachments,
     prepare_attachments,
 )
-from .events import history_from_events
+from .events import history_from_events, posted_now
 from .manager import NoTokenError, SessionStateError
 from .turns import (
     ApprovalNotFoundError,
@@ -199,7 +199,8 @@ async def _start_turn(
     return {
         "turn_id": turn.id,
         "conversation_id": conversation_id,
-        "message": {"content": shown, "attachments": attachments.items},
+        # at: the time the chat shows on the message until the history is read again from the session.
+        "message": {"content": shown, "attachments": attachments.items, **posted_now()},
     }
 
 

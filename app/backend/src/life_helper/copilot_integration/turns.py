@@ -27,7 +27,7 @@ from copilot.session_events import SessionErrorData, SessionIdleData, SessionMod
 from ..security import SecretMasker
 from .attachments import ATTACHMENT_ONLY_PROMPT, PreparedAttachments
 from .conversations import ConversationStore
-from .events import map_event, subagent_event
+from .events import map_event, posted_now, subagent_event
 from .manager import ActiveSession, CopilotManager, NoTokenError, SessionStateError
 from .policy import Approval, WriteScope
 
@@ -367,8 +367,11 @@ class TurnManager:
             self._schedule_expiry(turn)
 
     def _message_event(self, kind: str, message: FollowUp) -> dict:
-        """queued / user: the message as the chat shows it."""
+        """queued / user: the message as the chat shows it. Only "user" puts the message in the conversation, so
+        only it carries the time shown on it: the moment Copilot took it, which is what the history records too."""
         event = {"type": kind, "id": message.id, "text": self.masker.mask_text(message.shown), "mode": message.mode}
+        if kind == "user":
+            event.update(posted_now())
         return self._with_attachments(event, message)
 
     def _unsent(self, message: FollowUp) -> dict:

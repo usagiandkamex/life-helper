@@ -56,6 +56,7 @@ function RunTranscript({ run, onAsk }: { run: RunRecord; onAsk: (run: RunRecord)
           </a>
         )}
       </header>
+      {/* The heading above already dates the run, so its prompt is not stamped with the same time again. */}
       {run.prompt && <MessageItem item={{ kind: 'user', text: run.prompt }} />}
       {!!run.events_omitted && <p className="hint">記録が長いため、途中経過のうち最初の {run.events_omitted} 件を省略しています。</p>}
       {items.map((item, i) => (
