@@ -6,6 +6,7 @@ import { Markdown } from '../components/Markdown'
 import type { Automation, AutomationList, NotifySettings, RunRecord, Schedule } from '../types'
 
 const WEEKDAYS = ['月', '火', '水', '木', '金', '土', '日']
+const INTERRUPTED_WATCH_MS = 5 * 60_000
 
 // 表の中の「今すぐ実行」。文字の代わりに再生の形を出す（名前は .visually-hidden で読み上げに残す）。
 function PlayIcon() {
@@ -61,6 +62,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
   const detailRef = useRef<HTMLDivElement>(null)
+  const interruptedWatchRef = useRef<{ runId: string; since: number } | null>(null)
 
   const load = useCallback(async () => {
     const data = await api<AutomationList>('/api/automations')
@@ -72,6 +74,13 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   const openRun = useCallback(
     async (automationId: string, runId: string) => {
       const record = await api<RunRecord>(`/api/automations/${automationId}/runs/${runId}`)
+      if (record.status === 'interrupted') {
+        if (interruptedWatchRef.current?.runId !== record.id) {
+          interruptedWatchRef.current = { runId: record.id, since: Date.now() }
+        }
+      } else if (interruptedWatchRef.current?.runId === record.id) {
+        interruptedWatchRef.current = null
+      }
       setRun(record)
       // 実行中の記録には読むものがないので、既読にしない（結果が出たときに未読のまま残す）。
       if (!record.read && hasResult(record)) {
@@ -96,7 +105,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   }, [run])
 
   // 実行中の記録にはまだ結果がないので、終わるまで読み直して、開いたままでも結果に変わるようにする。
-  // 中断表示は保存済みの running を書き換えないため、遅れて完了する可能性がある。選択中なら結果まで見張る。
+  // 中断表示は保存済みの running を書き換えないため、遅れて完了する可能性がある。選択中なら 5 分だけ見張る。
   // tick は毎回進めるので、途中の読み込みが失敗しても見張りは続く。
   const watching =
     runs.some((r) => r.status === 'running') ||
@@ -104,6 +113,13 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
     (list?.running_automation_ids.length ?? 0) > 0
   useEffect(() => {
     if (!watching) return
+    const interruptedWatch = interruptedWatchRef.current
+    if (
+      run?.status === 'interrupted' &&
+      interruptedWatch?.runId === run.id &&
+      Date.now() - interruptedWatch.since >= INTERRUPTED_WATCH_MS
+    )
+      return
     let cancelled = false
     const timer = window.setTimeout(async () => {
       await load().catch(() => undefined)
