@@ -31,7 +31,10 @@ export function MessageItem({ item, onSchedule }: { item: Item; onSchedule?: (te
         <div className="msg tool">
           <details>
             <summary>
-              {item.success === false ? '⚠️' : item.success ? '✔' : '…'} {TOOL_LABELS[item.name] ?? item.name}
+              {item.success === false ? '⚠️' : item.success ? '✔' : '…'}{' '}
+              {/* A look-up a research sub-agent ran on a delegated theme, not the assistant itself. */}
+              {item.subagent ? '調査 › ' : ''}
+              {TOOL_LABELS[item.name] ?? item.name}
             </summary>
             <pre>{item.args}</pre>
             {item.error && <p className="error-text">{item.error}</p>}

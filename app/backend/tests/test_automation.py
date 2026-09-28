@@ -12,7 +12,7 @@ import pytest
 import respx
 import yaml
 from copilot import ToolInvocation
-from copilot.session_events import AssistantMessageData, AssistantUsageData
+from copilot.session_events import AssistantMessageData, AssistantUsageData, SessionErrorData, SessionIdleData
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from pydantic import SecretStr, ValidationError
@@ -112,6 +112,9 @@ def test_store_roundtrip(tmp_path):
 class FakePolicy:
     on_tool_result = None
 
+    def begin_answer(self):
+        return None
+
 
 class FakeAutoSession:
     def __init__(self, manager: FakeAutoManager) -> None:
@@ -122,7 +125,7 @@ class FakeAutoSession:
         self.handlers.append(handler)
         return lambda: self.handlers.remove(handler)
 
-    async def send_and_wait(self, prompt: str, timeout: float = 60):
+    async def send(self, prompt: str) -> None:
         m = self.manager
         m.prompts.append(prompt)
         if m.fail and m.fail_on_call in (None, len(m.prompts)):
@@ -134,10 +137,12 @@ class FakeAutoSession:
         for h in list(self.handlers):
             h(SimpleNamespace(data=AssistantUsageData(model="gpt-5-mini")))
             h(SimpleNamespace(data=AssistantMessageData(content="空室を確認しました", message_id="m")))
-        if len(m.prompts) < m.report_on_call:
-            return  # the model "forgets" to report on this call
-        report = next(s.tool for s in m.extra_tools if s.tool.name == "report_result")
-        await report.handler(ToolInvocation(arguments={"summary": "要約", "notify": m.report_notify}))
+        if len(m.prompts) >= m.report_on_call:
+            report = next(s.tool for s in m.extra_tools if s.tool.name == "report_result")
+            await report.handler(ToolInvocation(arguments={"summary": "要約", "notify": m.report_notify}))
+        # The session's own agent going idle is what ends the wait (send_and_wait_own filters sub-agent idles).
+        for h in list(self.handlers):
+            h(SimpleNamespace(data=SessionIdleData()))
 
     async def abort(self):
         return None
@@ -207,6 +212,54 @@ def _mock_github():
     return respx.post("https://api.github.com/repos/usagiandkamex/life-helper-notifications/issues").mock(
         return_value=httpx.Response(201, json={"html_url": "https://github.com/x/1"})
     )
+
+
+async def test_send_and_wait_own_ignores_sub_agent_idle_and_error():
+    """A research sub-agent shares the stream; its idle/error must not end the wait — only the root agent's does."""
+    from life_helper.copilot_integration.events import send_and_wait_own
+
+    class Session:
+        def __init__(self) -> None:
+            self.handlers: list = []
+
+        def on(self, handler):
+            self.handlers.append(handler)
+            return lambda: self.handlers.remove(handler)
+
+        async def send(self, prompt: str) -> None:
+            # A sub-agent finishes first (error then idle); the root then answers and goes idle.
+            self._fire(SessionErrorData(error_type="error", message="サブの失敗"), agent_id="a1")
+            self._fire(SessionIdleData(), agent_id="a1")
+            self._fire(AssistantMessageData(content="回答", message_id="m"))
+            self._fire(SessionIdleData())
+
+        def _fire(self, data, agent_id: str | None = None) -> None:
+            for h in list(self.handlers):
+                h(SimpleNamespace(data=data, agent_id=agent_id))
+
+    # Completes on the root idle without raising the sub-agent's error, and unsubscribes afterwards.
+    session = Session()
+    await send_and_wait_own(session, "調べて")
+    assert session.handlers == []
+
+
+async def test_send_and_wait_own_raises_the_root_agents_error():
+    from life_helper.copilot_integration.events import send_and_wait_own
+
+    class Session:
+        def __init__(self) -> None:
+            self.handlers: list = []
+
+        def on(self, handler):
+            self.handlers.append(handler)
+            return lambda: self.handlers.remove(handler)
+
+        async def send(self, prompt: str) -> None:
+            for h in list(self.handlers):
+                h(SimpleNamespace(data=SessionErrorData(error_type="error", message="本体の失敗"), agent_id=None))
+
+    with pytest.raises(RuntimeError, match="本体の失敗"):
+        await send_and_wait_own(Session(), "調べて")
 
 
 @respx.mock
@@ -303,20 +356,20 @@ async def test_failed_follow_up_messages_do_not_replace_the_finished_answer(auto
     ctx, runner, manager = auto_env
     manager.report_on_call = 2
     manager.fail, manager.fail_on_call = failure, 2
-    send_and_wait = FakeAutoSession.send_and_wait
+    send = FakeAutoSession.send
 
-    async def send_with_follow_up_message(session, prompt, timeout=60):
+    async def send_with_follow_up_message(session, prompt):
         if manager.prompts:
             for handler in list(session.handlers):
                 handler(SimpleNamespace(data=AssistantUsageData(model="gpt-5-mini")))
                 handler(SimpleNamespace(data=AssistantMessageData(content="報告を試みます", message_id="follow-up")))
-        return await send_and_wait(session, prompt, timeout)
+        return await send(session, prompt)
 
     async def abort_with_message(session):
         for handler in list(session.handlers):
             handler(SimpleNamespace(data=AssistantMessageData(content="中断しました", message_id="abort")))
 
-    monkeypatch.setattr(FakeAutoSession, "send_and_wait", send_with_follow_up_message)
+    monkeypatch.setattr(FakeAutoSession, "send", send_with_follow_up_message)
     monkeypatch.setattr(FakeAutoSession, "abort", abort_with_message)
     a = ctx.automations.upsert(Automation(name="x", prompt="y"))
     record = await runner.run(a.id)
@@ -521,19 +574,21 @@ async def test_run_record_is_sanitized(auto_env):
     manager.report_notify = False
     a = ctx.automations.upsert(Automation(name="x", prompt="y"))
 
-    original = FakeAutoSession.send_and_wait
+    original = FakeAutoSession.send
 
-    async def leaky(self, prompt, timeout=60):
+    async def leaky(self, prompt):
         report = next(s.tool for s in self.manager.extra_tools if s.tool.name == "report_result")
         await report.handler(
             ToolInvocation(arguments={"summary": "口座番号: 1234567 key SECRET-API-KEY-123", "notify": False})
         )
+        for h in list(self.handlers):
+            h(SimpleNamespace(data=SessionIdleData()))
 
-    FakeAutoSession.send_and_wait = leaky
+    FakeAutoSession.send = leaky
     try:
         record = await runner.run(a.id)
     finally:
-        FakeAutoSession.send_and_wait = original
+        FakeAutoSession.send = original
     stored = json.dumps(ctx.automations.get_run(a.id, record["id"]), ensure_ascii=False)
     assert "1234567" not in stored and "SECRET-API-KEY-123" not in stored
 
@@ -542,9 +597,9 @@ async def test_no_retry_after_side_effects(auto_env, monkeypatch):
     ctx, runner, manager = auto_env
     monkeypatch.setattr("life_helper.automation.runner.asyncio.sleep", _no_sleep)
     a = ctx.automations.upsert(Automation(name="x", prompt="y"))
-    original = FakeAutoSession.send_and_wait
+    original = FakeAutoSession.send
 
-    async def fails_after_tool(self, prompt, timeout=60):
+    async def fails_after_tool(self, prompt):
         self.manager.prompts.append(prompt)
         from copilot.session_events import ToolExecutionStartData
 
@@ -552,11 +607,11 @@ async def test_no_retry_after_side_effects(auto_env, monkeypatch):
             h(SimpleNamespace(data=ToolExecutionStartData(tool_call_id="t", tool_name="edit", arguments={})))
         raise RuntimeError("boom after writing")
 
-    FakeAutoSession.send_and_wait = fails_after_tool
+    FakeAutoSession.send = fails_after_tool
     try:
         record = await runner.run(a.id)
     finally:
-        FakeAutoSession.send_and_wait = original
+        FakeAutoSession.send = original
     assert record["status"] == "error" and len(manager.prompts) == 1
 
 

@@ -12,8 +12,9 @@ from typing import TYPE_CHECKING, Any
 from copilot import CopilotClient, CopilotSession, ToolSet
 
 from ..tools.registry import ToolSpec, build_tools
+from .agents import build_research_agent
 from .knowledge_tools import build_knowledge_tools
-from .policy import ALLOWED_BUILTINS, ToolPolicy, WriteScope, knowledge_write_lock_path
+from .policy import ALLOWED_BUILTINS, TASK_TOOL, ToolPolicy, WriteScope, knowledge_write_lock_path
 from .system_prompt import build_system_message
 
 if TYPE_CHECKING:
@@ -50,8 +51,8 @@ class ActiveSession:
                 logger.warning("failed to release tool resources")
 
 
-def available_toolset(has_skills: bool) -> ToolSet:
-    builtins = [t for t in ALLOWED_BUILTINS if t != "skill" or has_skills]
+def available_toolset(has_skills: bool, subagents: bool = False) -> ToolSet:
+    builtins = [t for t in ALLOWED_BUILTINS if (t != "skill" or has_skills) and (t != TASK_TOOL or subagents)]
     return ToolSet().add_builtin(builtins).add_custom("*")
 
 
@@ -148,6 +149,10 @@ class CopilotManager:
             allow_write=allow_write,
             # Unattended automations cannot answer an approval card; they follow their own allow_write setting.
             require_approval=not self.automation,
+            # Chat and automation alike may delegate a self-contained look-up to the read-only research sub-agent
+            # (``task``); it runs in the foreground, so delegated tasks are served one at a time. The automation runner
+            # waits for its own agent's idle (send_and_wait_own), so a sub-agent's idle does not cut the run short.
+            allow_subagents=True,
             write_lock_path=knowledge_write_lock_path(s),
         )
 
@@ -167,25 +172,31 @@ class CopilotManager:
     ) -> dict[str, Any]:
         s = self.ctx.settings
         has_skills = s.skills_dir.is_dir() and any(s.skills_dir.glob("*/SKILL.md"))
+        subagents = policy.allow_subagents
         system_message = build_system_message(
             s.knowledge_dir,
             automation=self.automation,
             allow_write=allow_write,
             approval=policy.require_approval,
             browser=any(spec.tool.name.startswith("browser_") for spec in specs),
+            subagents=subagents,
         )
         options: dict[str, Any] = {
             "model": model,
             "on_permission_request": policy.handle_permission,
             "hooks": policy.hooks(),
             "tools": [spec.tool for spec in specs],
-            "available_tools": available_toolset(has_skills),
+            "available_tools": available_toolset(has_skills, subagents),
             "system_message": {"mode": "append", "content": system_message},
             "working_directory": str(s.knowledge_dir),
             "streaming": True,
             "infinite_sessions": {"enabled": True},
             "enable_skills": has_skills,
         }
+        if subagents:
+            options["custom_agents"] = [build_research_agent(s.knowledge_dir.resolve().as_posix())]
+            # The sub-agents' own token stream stays out of the answer; their tool calls are still shown.
+            options["include_sub_agent_streaming_events"] = False
         if has_skills:
             options["skill_directories"] = [str(s.skills_dir)]
         return options

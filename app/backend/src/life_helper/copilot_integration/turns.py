@@ -27,7 +27,7 @@ from copilot.session_events import SessionErrorData, SessionIdleData, SessionMod
 from ..security import SecretMasker
 from .attachments import ATTACHMENT_ONLY_PROMPT, PreparedAttachments
 from .conversations import ConversationStore
-from .events import map_event
+from .events import map_event, subagent_event
 from .manager import ActiveSession, CopilotManager, NoTokenError, SessionStateError
 from .policy import Approval, WriteScope
 
@@ -389,6 +389,8 @@ class TurnManager:
         if turn.stopping:
             # 中断 came while the session was opening: send nothing.
             return
+        # Each answer (the first one and every 「あとで送信」 after it) gets its own budget of research sub-agents.
+        turn.active.policy.begin_answer()
         session = turn.active.session
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.timeout_seconds
@@ -424,7 +426,13 @@ class TurnManager:
         self._on_loop(self._handle_event, turn, event)
 
     def _handle_event(self, turn: Turn, event: Any) -> None:
-        match getattr(event, "data", None):
+        data = getattr(event, "data", None)
+        sub = subagent_event(event)
+        if sub and isinstance(data, SessionErrorData):
+            # The session's own agent hears about this as the failed task result and can carry on without it.
+            logger.warning("sub-agent error: %s", self.masker.mask_text(data.message or ""))
+        # Only the session's own agent drives the turn: a sub-agent's user/idle/error events must not end or fail it.
+        match None if sub else data:
             case UserMessageData() as data:
                 self._note_read(turn, data)
             case SessionIdleData() as data if data.mode != SessionMode.AUTOPILOT:

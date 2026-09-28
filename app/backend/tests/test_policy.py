@@ -155,7 +155,88 @@ def test_available_builtins_exclude_writers():
     from life_helper.copilot_integration.policy import ALLOWED_BUILTINS
 
     assert not {"create", "edit", "apply_patch", "str_replace_editor", "bash", "powershell"} & set(ALLOWED_BUILTINS)
-    assert available_toolset(True).to_list() == [f"builtin:{t}" for t in ALLOWED_BUILTINS] + ["custom:*"]
+    chat = [f"builtin:{t}" for t in ALLOWED_BUILTINS] + ["custom:*"]
+    assert available_toolset(True, True).to_list() == chat
+    # Without the research agent enabled, task is not offered; skill needs skills present.
+    assert available_toolset(True).to_list() == [t for t in chat if t != "builtin:task"]
+    assert available_toolset(False).to_list() == [t for t in chat if t not in ("builtin:task", "builtin:skill")]
+
+
+async def test_task_tool_only_starts_the_research_agent(policy):
+    from life_helper.copilot_integration.agents import MAX_TASKS_PER_ANSWER, RESEARCH_AGENT
+
+    async def task(**args):
+        return await policy.pre_tool_use({"toolName": "task", "toolArgs": args}, {})
+
+    # A session that was not given the research agent (allow_subagents=False, the default) cannot start sub-agents.
+    assert (await task(agent_type=RESEARCH_AGENT, prompt="x"))["permissionDecision"] == "deny"
+    policy.allow_subagents = True
+
+    assert await task(agent_type=RESEARCH_AGENT, prompt="ふるさと納税の上限") is None
+    assert policy.tasks_started == 1
+    # The runtime's own agents, a missing agent and disagreeing aliases are all refused.
+    for args in (
+        {"prompt": "x"},
+        {"agent_type": "general-purpose", "prompt": "x"},
+        {"subagent_type": "explore", "prompt": "x"},
+        {"agent_type": RESEARCH_AGENT, "agentType": "general-purpose", "prompt": "x"},
+    ):
+        assert (await task(**args))["permissionDecision"] == "deny", args
+    # A background agent would outlive the answer (中断 and timeouts included); anything but sync is refused.
+    for args in (
+        {"mode": "background"},
+        {"mode": "fleet"},
+        {"mode": 0},  # not a string: the runtime would read something we did not check
+        {"mode": ""},
+        {"background": True},
+        {"detach": True},
+        {"run_in_background": True},
+        {"agentMode": "background"},  # a mode under a name we do not know
+        {"agentMode": "fleet"},  # any non-sync value under an alias is refused, not just "background"
+        {"agentMode": 0},
+        {"agentMode": ""},
+        {"mode": "sync", "agentMode": "fleet"},  # every mode-like key must agree on sync
+    ):
+        out = await task(agent_type=RESEARCH_AGENT, prompt="x", **args)
+        assert out["permissionDecision"] == "deny", args
+    assert await task(agentType=RESEARCH_AGENT, prompt="x", mode="sync") is None
+    # The sub-agent follows the session's model: overrides are dropped instead of refusing the call.
+    out = await task(agent_type=RESEARCH_AGENT, prompt="x", model="gpt-5", reasoningEffort="high")
+    assert out["modifiedArgs"] == {"agent_type": RESEARCH_AGENT, "prompt": "x"}
+    assert policy.tasks_started == 3
+
+    policy.tasks_started = MAX_TASKS_PER_ANSWER
+    assert (await task(agent_type=RESEARCH_AGENT, prompt="x"))["permissionDecision"] == "deny"
+    # The cap counts per answer: the next answer may delegate again.
+    policy.begin_answer()
+    assert await task(agent_type=RESEARCH_AGENT, prompt="x") is None
+
+
+async def test_sub_agent_calls_are_held_to_the_research_tools(policy, kb):
+    """When the runtime tells the hook that a sub-agent is calling, it keeps only its read-only tools."""
+    from life_helper.copilot_integration.agents import RESEARCH_AGENT_TOOLS
+
+    policy.allow_subagents = True
+    ctx = {"session_id": "s1"}
+    calls = [
+        ("task", {"agent_type": "researcher", "prompt": "x"}),  # no sub-agents of its own
+        ("update_holding", {}),  # no custom tools, writing ones least of all
+        ("calculate", {}),
+        ("browser_open", {"url": "https://example.com/"}),
+        ("write_knowledge_file", {"path": "memories/a.md"}),
+    ]
+    # The runtime marks such a call with the sub-agent's id, or delivers it under the sub-agent's own session id.
+    for sub in ({"agentId": "a1"}, {"sessionId": "s1.sub"}):
+        for tool, args in calls:
+            out = await policy.pre_tool_use(sub | {"toolName": tool, "toolArgs": args}, ctx)
+            assert out["permissionDecision"] == "deny", (sub, tool)
+    assert "browser_open" in policy.denials[-2]
+    # Its own tools are still checked as usual: reads stay inside the knowledge base.
+    out = await policy.pre_tool_use({"agentId": "a1", "toolName": "view", "toolArgs": {"path": "INDEX.md"}}, ctx)
+    assert out["modifiedArgs"]["path"] == str((kb / "INDEX.md").resolve())
+    assert set(RESEARCH_AGENT_TOOLS) == {"view", "grep", "rg", "glob", "web_fetch"}
+    # The session's own calls are not mistaken for a sub-agent's: same session id, no agent id.
+    assert await policy.pre_tool_use({"sessionId": "s1", "toolName": "calculate", "toolArgs": {}}, ctx) is None
 
 
 async def test_request_approval_fails_closed(policy):
@@ -276,6 +357,30 @@ def test_system_message_contains_kb_profile_and_rules(kb):
     # The result is read later in the run history, so the rules say how to write it (issue #41).
     assert "実行履歴" in auto and "Markdown" in auto and "表" in auto
     assert "承認ボタン" not in auto  # unattended runs never wait for a user
+    # Batching independent look-ups into one answer helps everywhere; the sub-agent rules are added only when the
+    # session is given the research agent (issue #56).
+    assert "まとめて出して" in msg and "まとめて出して" in auto
+    assert "task" not in msg and "task" not in auto
+    research = build_system_message(kb, subagents=True)
+    assert "task" in research and "researcher" in research and "最大 6 件" in research
+    # Automations may also run the research sub-agent, so its rules appear when subagents is on.
+    auto_research = build_system_message(kb, automation=True, allow_write=False, subagents=True)
+    assert "task" in auto_research and "researcher" in auto_research and "report_result" in auto_research
+
+
+def test_research_agent_is_read_only(kb):
+    from life_helper.copilot_integration.agents import RESEARCH_AGENT_TOOLS, build_research_agent
+
+    agent = build_research_agent(kb.resolve().as_posix())
+    assert agent["name"] == "researcher"
+    # No writers, no sub-agents of its own, no browser and no connector tools.
+    assert agent["tools"] == list(RESEARCH_AGENT_TOOLS)
+    assert not {"task", "create", "edit", "apply_patch", "write_knowledge_file"} & set(agent["tools"])
+    # Not auto-selected from the prompt: an inferred start would skip the per-answer cap, so only explicit task calls
+    # (which go through pre_tool_use) may start it.
+    assert agent["infer"] is False
+    assert kb.resolve().as_posix() in agent["prompt"]
+    assert "外部の信頼できないデータ" in agent["prompt"]
 
 
 def test_chat_sessions_require_approval_but_automations_do_not(ctx):
@@ -291,6 +396,28 @@ def test_chat_sessions_require_approval_but_automations_do_not(ctx):
         allow_write=False
     )
     assert not auto_policy.require_approval and not auto_policy.allow_write
+    # Chat and automation alike may run the read-only research sub-agent (``task``).
+    assert chat_policy.allow_subagents and auto_policy.allow_subagents
+
+
+def test_chat_and_automation_sessions_get_the_research_agent(ctx):
+    from life_helper.copilot_integration.manager import CopilotManager
+
+    def options(manager, allow_write):
+        specs, policy = manager.build_session_tools(allow_write=allow_write)
+        return manager.session_options(model="auto", policy=policy, specs=specs, allow_write=allow_write)
+
+    chat = options(CopilotManager(ctx, ctx.settings.copilot_chat_dir), True)
+    assert [a["name"] for a in chat["custom_agents"]] == ["researcher"]
+    # The sub-agents' own tokens stay out of the answer; their tool calls still arrive.
+    assert chat["include_sub_agent_streaming_events"] is False
+    assert "builtin:task" in chat["available_tools"].to_list()
+
+    # Automations run the same read-only research agent; the runner waits for its own agent's idle.
+    auto = options(CopilotManager(ctx, ctx.settings.copilot_automation_dir, automation=True), False)
+    assert [a["name"] for a in auto["custom_agents"]] == ["researcher"]
+    assert auto["include_sub_agent_streaming_events"] is False
+    assert "builtin:task" in auto["available_tools"].to_list()
 
 
 def test_connector_filter(ctx, settings):

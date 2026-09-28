@@ -27,7 +27,8 @@ export type UnsentMessage = { id: string; text: string; attachments?: SentAttach
 export type TurnEvent =
   | { type: 'delta'; text: string }
   | { type: 'message'; content: string }
-  | { type: 'tool_start'; id: string; name: string; args: string }
+  // subagent: a look-up a research sub-agent ran on a delegated theme, not the assistant itself.
+  | { type: 'tool_start'; id: string; name: string; args: string; subagent?: boolean }
   | { type: 'tool_end'; id: string; success: boolean; error: string; result: string; chart?: ChartData; screenshot?: Screenshot }
   | { type: 'file_write'; path: string; diff: string; approval_id?: string | null }
   | { type: 'approval_request'; id: string; path: string; diff: string }
@@ -54,7 +55,7 @@ export type SentAttachment = AttachmentInfo & { index: number }
 export type HistoryMessage =
   | { role: 'user'; content: string; attachments?: AttachmentInfo[] }
   | { role: 'assistant'; content: string }
-  | { role: 'tool'; name: string; args: string }
+  | { role: 'tool'; name: string; args: string; subagent?: boolean }
 
 export type FileEntry = { path: string; size: number; modified: string; writable: boolean }
 

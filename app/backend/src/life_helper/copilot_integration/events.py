@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import Any
@@ -12,6 +13,8 @@ from copilot.session_events import (
     AssistantUsageData,
     AttachmentBlob,
     SessionErrorData,
+    SessionIdleData,
+    SessionMode,
     ToolExecutionCompleteData,
     ToolExecutionStartData,
     UserMessageData,
@@ -67,20 +70,66 @@ def _as_dict(result: Any) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def subagent_event(event: Any) -> bool:
+    """True when the event comes from a sub-agent (``task``) instead of the session's own agent.
+
+    Sub-agents share the session's event stream and are told apart by ``agent_id`` on the envelope; the session's
+    own events do not have one. Their tokens are not the answer and their idle/error do not end the turn.
+    """
+    return bool(getattr(event, "agent_id", None))
+
+
+async def send_and_wait_own(session: Any, prompt: str) -> None:
+    """Send ``prompt`` and wait until the session's own agent goes idle.
+
+    Like ``session.send_and_wait``, but a research sub-agent (``task``) shares the session's event stream and raises
+    its own idle/error; those must not end the wait, or an unattended automation would stop at the first sub-agent
+    that finishes instead of when its own agent is done. Only a non-sub-agent idle (or error) completes it — the same
+    rule the chat turn loop uses via ``subagent_event``. The caller bounds the wait with ``asyncio.wait_for``.
+    """
+    idle = asyncio.Event()
+    failure: list[Exception] = []
+
+    def handler(event: Any) -> None:
+        if subagent_event(event):
+            return
+        data = getattr(event, "data", None)
+        if isinstance(data, SessionIdleData) and data.mode != SessionMode.AUTOPILOT:
+            idle.set()
+        elif isinstance(data, SessionErrorData):
+            # Mirror the SDK: surface the error after the wait, never raise from inside the event callback.
+            failure.append(RuntimeError(f"Session error: {data.message or str(data)}"))
+            idle.set()
+
+    unsubscribe = session.on(handler)
+    try:
+        await session.send(prompt)
+        await idle.wait()
+    finally:
+        unsubscribe()
+    if failure:
+        raise failure[0]
+
+
 def map_event(event: Any, masker: SecretMasker) -> dict | None:
     data = getattr(event, "data", None)
+    sub = subagent_event(event)
     match data:
-        case AssistantMessageDeltaData() if not data.parent_tool_call_id:
+        case AssistantMessageDeltaData() if not sub and not data.parent_tool_call_id:
             return {"type": "delta", "text": masker.mask_text(data.delta_content or "")}
-        case AssistantMessageData() if not data.parent_tool_call_id:
+        case AssistantMessageData() if not sub and not data.parent_tool_call_id:
             return {"type": "message", "content": masker.mask_text(data.content or "")}
         case ToolExecutionStartData():
-            return {
+            # A sub-agent's look-ups are shown like the session's own, so its delegated work stays visible in the chat.
+            started = {
                 "type": "tool_start",
                 "id": data.tool_call_id,
                 "name": data.tool_name,
                 "args": _preview(data.arguments, ARG_PREVIEW_LIMIT, masker),
             }
+            if sub:
+                started["subagent"] = True
+            return started
         case ToolExecutionCompleteData():
             result = getattr(data.result, "content", None) if data.result is not None else None
             event = {
@@ -97,7 +146,8 @@ def map_event(event: Any, masker: SecretMasker) -> dict | None:
             if screenshot:
                 event["screenshot"] = screenshot
             return event
-        case SessionErrorData():
+        case SessionErrorData() if not sub:
+            # A sub-agent's failure is reported to the session's agent as the task result; it can carry on.
             return {"type": "error", "message": masker.mask_text(data.message or "エラーが発生しました")}
         case AssistantUsageData():
             return {"type": "usage", "model": data.model}
@@ -109,8 +159,10 @@ def history_from_events(events: list[Any], masker: SecretMasker) -> list[dict]:
     messages: list[dict] = []
     for event in events:
         data = getattr(event, "data", None)
+        # A sub-agent's prompt and report are not the conversation: only its tool calls are shown, like live.
+        sub = subagent_event(event)
         match data:
-            case UserMessageData():
+            case UserMessageData() if not sub:
                 content = data.content or ""
                 files = attached_files(content, data.transformed_content)
                 message = {"role": "user", "content": masker.mask_text(content)}
@@ -122,14 +174,15 @@ def history_from_events(events: list[Any], masker: SecretMasker) -> list[dict]:
                 if images or files:
                     message["attachments"] = images + [f | {"name": masker.mask_text(f["name"])} for f in files]
                 messages.append(message)
-            case AssistantMessageData() if not data.parent_tool_call_id and data.content:
+            case AssistantMessageData() if not sub and not data.parent_tool_call_id and data.content:
                 messages.append({"role": "assistant", "content": masker.mask_text(data.content)})
             case ToolExecutionStartData():
-                messages.append(
-                    {
-                        "role": "tool",
-                        "name": data.tool_name,
-                        "args": _preview(data.arguments, ARG_PREVIEW_LIMIT, masker),
-                    }
-                )
+                call = {
+                    "role": "tool",
+                    "name": data.tool_name,
+                    "args": _preview(data.arguments, ARG_PREVIEW_LIMIT, masker),
+                }
+                if sub:
+                    call["subagent"] = True
+                messages.append(call)
     return messages

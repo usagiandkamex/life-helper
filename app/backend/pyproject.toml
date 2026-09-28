@@ -51,5 +51,6 @@ ignore = ["S101", "B008"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S105", "S106", "S108", "ASYNC109", "E501"]
+"src/life_helper/copilot_integration/agents.py" = ["E501"]
 "src/life_helper/copilot_integration/system_prompt.py" = ["E501"]
 "src/life_helper/resources/**" = ["E501"]
