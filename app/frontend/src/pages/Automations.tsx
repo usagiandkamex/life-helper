@@ -100,12 +100,18 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   const watching = runs.some((r) => r.status === 'running') || run?.status === 'running'
   useEffect(() => {
     if (!watching) return
+    let cancelled = false
     const timer = window.setTimeout(async () => {
       await load().catch(() => undefined)
+      // 読み込んでいる間にほかの実行を選ぶこともあるので、選び直されていたら開き直さない。
+      if (cancelled) return
       if (run?.status === 'running') await openRun(run.automation_id, run.id).catch(() => undefined)
-      setTick((n) => n + 1)
+      if (!cancelled) setTick((n) => n + 1)
     }, 10_000)
-    return () => window.clearTimeout(timer)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
   }, [watching, tick, run, load, openRun])
 
   useEffect(() => {
@@ -161,7 +167,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
     )
     const known = new Set(before.map((r) => r.id))
     await api(`/api/automations/${a.id}/run`, { method: 'POST' })
-    setMessage(`「${a.name}」を実行しています。実行中も実行履歴に出て、終わると結果に変わります（最大 20 分）。`)
+    setMessage(`「${a.name}」の実行を始めました。実行中も実行履歴に出て、終わると結果に変わります（最大 20 分）。`)
     // 記録は実行を始めたときに書かれる。現れたら選んで、あとは実行中の記録の見張りが結果まで追いかける。
     const started = Date.now()
     const poll = async () => {

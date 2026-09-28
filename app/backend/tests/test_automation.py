@@ -1114,5 +1114,14 @@ def test_runs_api_shows_a_run_in_progress_and_an_abandoned_one(client, ctx, sett
     assert store.get_run("aaaaaa000001", "a000000000000002")["status"] == "running"  # the record is left alone
 
     assert client.get("/api/automations").json()["unread"] == 0  # a run without a result is not unread
-    read = client.post("/api/automations/aaaaaa000001/runs/a000000000000001/read", headers={"x-csrf-token": csrf})
-    assert read.status_code == 200 and store.get_run("aaaaaa000001", "a000000000000001")["read"] is False
+    for rid in ("a000000000000001", "a000000000000002"):
+        read = client.post(f"/api/automations/aaaaaa000001/runs/{rid}/read", headers={"x-csrf-token": csrf})
+        assert read.status_code == 200 and store.get_run("aaaaaa000001", rid)["read"] is False
+
+
+def test_a_run_in_progress_without_a_usable_start_time_stays_running(client, ctx):
+    sign_in(client, ctx)
+    record = _running_record("aaaaaa000001", "a000000000000001")
+    record["started_at"] = "2026-09-25 00:00:00"  # a start time without a timezone cannot be compared
+    ctx.automations.save_run(record)
+    assert client.get("/api/automations/runs").json()[0]["status"] == "running"
