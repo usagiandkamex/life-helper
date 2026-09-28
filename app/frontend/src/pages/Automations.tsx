@@ -107,32 +107,31 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   // 実行中の記録にはまだ結果がないので、終わるまで読み直して、開いたままでも結果に変わるようにする。
   // 中断表示は保存済みの running を書き換えないため、遅れて完了する可能性がある。選択中なら 5 分だけ見張る。
   // tick は毎回進めるので、途中の読み込みが失敗しても見張りは続く。
-  const watching =
-    runs.some((r) => r.status === 'running') ||
-    (run !== null && !hasResult(run)) ||
-    (list?.running_automation_ids.length ?? 0) > 0
+  const watchingOthers =
+    runs.some((r) => r.status === 'running') || (list?.running_automation_ids.length ?? 0) > 0
+  const watching = watchingOthers || (run !== null && !hasResult(run))
   useEffect(() => {
     if (!watching) return
     const interruptedWatch = interruptedWatchRef.current
-    if (
+    const interruptedWatchExpired =
       run?.status === 'interrupted' &&
       interruptedWatch?.runId === run.id &&
       Date.now() - interruptedWatch.since >= INTERRUPTED_WATCH_MS
-    )
-      return
+    if (!watchingOthers && interruptedWatchExpired) return
     let cancelled = false
     const timer = window.setTimeout(async () => {
       await load().catch(() => undefined)
       // 読み込んでいる間にほかの実行を選ぶこともあるので、選び直されていたら開き直さない。
       if (cancelled) return
-      if (run && !hasResult(run)) await openRun(run.automation_id, run.id).catch(() => undefined)
+      if (run && !hasResult(run) && !interruptedWatchExpired)
+        await openRun(run.automation_id, run.id).catch(() => undefined)
       if (!cancelled) setTick((n) => n + 1)
     }, 10_000)
     return () => {
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [watching, tick, run, load, openRun])
+  }, [watching, watchingOthers, tick, run, load, openRun])
 
   useEffect(() => {
     // Deep links: "この質問を定期実行" (?new=1&prompt=) and GitHub notifications (?automation=&run=).
