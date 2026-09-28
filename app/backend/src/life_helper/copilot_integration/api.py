@@ -32,6 +32,11 @@ from .turns import (
 
 router = APIRouter(prefix="/api")
 
+# One typed (or pasted) message: long enough for an error log or a stack trace. Up to MAX_TEXT_CHARS of text
+# taken from the files attached to the same message is appended to it. The composer checks the same number
+# before sending.
+MAX_PROMPT_CHARS = 50_000
+
 ORGANIZE_PROMPT = (
     "memory-keeper スキルに従って、知識ベースの memories/ を見直してください。"
     "重複している内容は統合し、古くなった情報は更新し、INDEX.md の目次を整えてください。"
@@ -55,7 +60,7 @@ class AttachmentBody(BaseModel):
 
 
 class TurnBody(BaseModel):
-    prompt: str = Field(default="", max_length=20000)
+    prompt: str = Field(default="", max_length=MAX_PROMPT_CHARS)
     model: str | None = None
     confirm_sensitive: bool = False
     attachments: list[AttachmentBody] = Field(default_factory=list, max_length=MAX_ATTACHMENTS)

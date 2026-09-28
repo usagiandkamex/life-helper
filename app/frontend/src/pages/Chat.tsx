@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { api, ApiError, formatDate, json } from '../api'
 import { quoteDraft } from '../automationRuns'
@@ -33,6 +33,11 @@ const ATTACHMENT_REFRESH_MS = 60_000
 // The server checks the same limits and the file contents; these only give an early message.
 const MAX_ATTACHMENTS = 5
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+// Same limit as the turns API (MAX_PROMPT_CHARS), so a long error log is explained here instead of failing
+// with HTTP 422.
+const MAX_PROMPT_CHARS = 50_000
+// Counted like Python does, in code points: an emoji is one character here too, not two.
+const promptLength = (text: string) => [...text].length
 const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp']
 const FILE_SUFFIXES = ['.txt', '.md', '.csv', '.tsv', '.json', '.pdf']
 const ATTACH_ACCEPT = [...IMAGE_TYPES, ...FILE_SUFFIXES].join(',')
@@ -69,6 +74,14 @@ function attachmentProblem(files: PendingAttachment[]): string {
   if (files.reduce((sum, a) => sum + a.size, 0) > MAX_ATTACHMENT_BYTES)
     return '添付ファイルは合計 10 MB までです。いくつか外してから送信してください'
   return ''
+}
+
+// Why the typed text cannot be sent, or "" when it can. How much has to go is said, because a pasted error log is
+// not something the length of which can be guessed.
+function promptProblem(prompt: string): string {
+  const over = promptLength(prompt) - MAX_PROMPT_CHARS
+  if (over <= 0) return ''
+  return `メッセージは ${MAX_PROMPT_CHARS.toLocaleString('ja-JP')} 文字までです。${over.toLocaleString('ja-JP')} 文字減らすか、いくつかに分けて送信してください`
 }
 
 function readAttachment(file: File): Promise<PendingAttachment> {
@@ -118,6 +131,11 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   const [stopping, setStopping] = useState(false)
   const [drawer, setDrawer] = useState(false)
   const [error, setError] = useState('')
+  // What is sent, counted while it is typed: a pasted error log is over the limit long before that can be seen.
+  const promptChars = useMemo(() => promptLength(input.trim()), [input])
+  const promptTooLong = promptChars > MAX_PROMPT_CHARS
+  // Near the limit the count is worth the room it takes in the composer; a short message never sees it.
+  const showPromptChars = promptChars > MAX_PROMPT_CHARS * 0.9
   const sourceRef = useRef<EventSource | null>(null)
   // Opening a conversation ends after this page is left (another tab was chosen): the event stream is not started
   // then, because the cleanup that would close it has already run.
@@ -609,7 +627,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
     const prompt = input.trim()
     const files = attachments
     if ((!prompt && files.length === 0) || turnId || sending || reading || followUpSending) return
-    const problem = attachmentProblem(files)
+    const problem = promptProblem(prompt) || attachmentProblem(files)
     if (problem) {
       setError(problem)
       return
@@ -680,7 +698,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   ) => {
     const id = currentIdRef.current
     if ((!prompt && files.length === 0) || !id || !turnId || followUpBlocked) return
-    const problem = attachmentProblem(files)
+    const problem = promptProblem(prompt) || attachmentProblem(files)
     if (problem) {
       setError(problem)
       return
@@ -917,7 +935,11 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
           )}
           <div ref={bottomRef} />
         </div>
-        {error && <div className="banner error">{error}</div>}
+        {error && (
+          <div className="banner error" role="alert">
+            {error}
+          </div>
+        )}
         {threadId ? (
           <div className="composer readonly">
             <p className="hint">
@@ -985,6 +1007,9 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
                 turnId ? '回答中も追加で送信できます（Ctrl+Enter ですぐに送信）' : 'メッセージを入力（Ctrl+Enter で送信。画像は貼り付けでも添付できます）'
               }
               rows={3}
+              // Read out with the input field instead of at every keystroke, which a live region would do.
+              aria-describedby={showPromptChars ? 'prompt-chars' : undefined}
+              aria-invalid={promptTooLong || undefined}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
                   e.preventDefault()
@@ -1000,6 +1025,14 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
                 addAttachments(files)
               }}
             />
+            {/* Shown only near the limit, so the usual short message keeps the composer as it is. Sending says
+                how much has to go; here the count alone is enough. */}
+            {showPromptChars && (
+              <p id="prompt-chars" className={promptTooLong ? 'banner error' : 'hint'}>
+                {promptChars.toLocaleString('ja-JP')} / {MAX_PROMPT_CHARS.toLocaleString('ja-JP')} 文字
+                {promptTooLong && '（このままでは送信できません）'}
+              </p>
+            )}
             <div className="composer-actions">
               <div className="composer-tools">
                 <label className="button icon" title="画像・テキスト・CSV・JSON・PDF を添付（5 件・合計 10 MB まで）">
