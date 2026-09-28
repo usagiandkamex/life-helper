@@ -1,5 +1,34 @@
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+
+// Answers often end with something to copy (a command, a snippet), so every code block gets a copy button.
+function CodeBlock({ children }: { children?: ReactNode }) {
+  const ref = useRef<HTMLPreElement>(null)
+  const [state, setState] = useState<'' | 'copied' | 'failed'>('')
+  useEffect(() => {
+    if (!state) return
+    const timer = window.setTimeout(() => setState(''), 2000)
+    return () => window.clearTimeout(timer)
+  }, [state])
+  const copy = async () => {
+    try {
+      // The clipboard needs a secure context (https or localhost); where it is refused, the button says so.
+      await navigator.clipboard.writeText(ref.current?.textContent ?? '')
+      setState('copied')
+    } catch {
+      setState('failed')
+    }
+  }
+  return (
+    <div className="code-block">
+      <button type="button" className="button small copy-code" onClick={copy}>
+        {state === 'copied' ? 'コピーしました' : state === 'failed' ? 'コピーできませんでした' : 'コピー'}
+      </button>
+      <pre ref={ref}>{children}</pre>
+    </div>
+  )
+}
 
 // react-markdown does not render raw HTML by default, which keeps model output and file contents inert.
 export function Markdown({ text }: { text: string }) {
@@ -19,6 +48,8 @@ export function Markdown({ text }: { text: string }) {
               <table>{children}</table>
             </div>
           ),
+          // Fenced code blocks only: inline code stays a plain <code> without a button.
+          pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
         }}
       >
         {text}

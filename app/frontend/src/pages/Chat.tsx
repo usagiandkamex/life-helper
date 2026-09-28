@@ -39,6 +39,25 @@ const ATTACH_ACCEPT = [...IMAGE_TYPES, ...FILE_SUFFIXES].join(',')
 
 type PendingAttachment = { name: string; image: boolean; size: number; data: string; url?: string }
 
+// The chat page is unmounted when another tab is opened, so what was open is kept here and opened again on return.
+let lastOpened: { kind: 'chat' | 'automation'; id: string } | null = null
+
+// Windows draws the 📎 emoji as an unusual clip, so the attachment icon is drawn instead of written.
+function ClipIcon({ size = 20 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path
+        d="M21.55 10.23 12.35 19.43a5.5 5.5 0 0 1-7.78-7.78l7.78-7.78a3.65 3.65 0 0 1 5.16 5.16l-6.37 6.37a1.8 1.8 0 0 1-2.55-2.55l4.95-4.95"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
 // Files sent with a message while the chat answered, kept until its turn ends: they give the message its thumbnails
 // when Copilot takes it, and go back to the composer if Copilot never does.
 type SentFiles = { conversationId: string; turnId: string; files: PendingAttachment[] }
@@ -100,6 +119,9 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   const [drawer, setDrawer] = useState(false)
   const [error, setError] = useState('')
   const sourceRef = useRef<EventSource | null>(null)
+  // Opening a conversation ends after this page is left (another tab was chosen): the event stream is not started
+  // then, because the cleanup that would close it has already run.
+  const mountedRef = useRef(true)
   const bottomRef = useRef<HTMLDivElement | null>(null)
   const messagesRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLTextAreaElement | null>(null)
@@ -119,6 +141,9 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   // New output scrolls the thread only while its end is in view: reading an earlier answer keeps the place.
   const followRef = useRef(true)
   const lastScrollTopRef = useRef(0)
+  // A conversation that was just loaded starts at its end without scrolling there, which on a long one would
+  // otherwise run down the whole history.
+  const jumpRef = useRef(false)
   // Approvals already brought into view. Several writes can wait at once, so the latest pending one is not enough:
   // resolving one would make an older, already shown approval look new again.
   const approvalsRef = useRef(new Set<string>())
@@ -131,6 +156,8 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   const heldEventsRef = useRef<{ holds: number; queue: (() => void)[] }>({ holds: 0, queue: [] })
   // A message sent just as the answer ended starts the next turn, which is followed once the current one has ended.
   const nextTurnRef = useRef<(() => void) | null>(null)
+  // Reopening what was open runs once per visit to this page (StrictMode runs effects twice).
+  const restoredSessionRef = useRef(false)
 
   const selectConversation = useCallback((id: string | null) => {
     generationRef.current += 1
@@ -139,6 +166,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
     lastScrollTopRef.current = 0
     currentIdRef.current = id
     setCurrentId(id)
+    lastOpened = id ? { kind: 'chat', id } : null
     threadIdRef.current = null
     setThreadId(null)
     setThread(null)
@@ -184,6 +212,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
 
   const attach = useCallback(
     (id: string) => {
+      if (!mountedRef.current) return
       sourceRef.current?.close()
       setTurnId(id)
       setWaiting([]) // the replay below lists them again
@@ -246,11 +275,15 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
           `/api/conversations/${id}/messages`,
         )
         if (generationRef.current !== generation) return // a slower answer must not replace what was opened since
+        // The whole history arrives at once, so it is shown at its end instead of scrolled there.
+        jumpRef.current = true
         setItems(fromHistory(data.messages))
         if (data.busy && data.turn_id) attach(data.turn_id)
         // The turn ended while this conversation was not followed.
         else restoreUnsent(data.unsent, (sent) => sent.conversationId === id)
       } catch (e) {
+        // A conversation deleted elsewhere must not be opened again every time this page is shown.
+        if (e instanceof ApiError && e.status === 404 && lastOpened?.id === id) lastOpened = null
         if (generationRef.current === generation) setError((e as Error).message)
       }
     },
@@ -286,6 +319,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
       const generation = generationRef.current
       threadIdRef.current = id
       setThreadId(id)
+      lastOpened = { kind: 'automation', id }
       setInput('')
       setAttachments([])
       setDrawer(false)
@@ -299,6 +333,8 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
         setThread(detail)
         markRead(id, detail.runs).catch(() => undefined)
       } catch (e) {
+        // Its runs may have been deleted; then it must not be opened again every time this page is shown.
+        if (e instanceof ApiError && e.status === 404 && lastOpened?.id === id) lastOpened = null
         if (generationRef.current === generation) setError((e as Error).message)
       }
     },
@@ -355,6 +391,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   }
 
   useEffect(() => {
+    mountedRef.current = true
     loadConversations().catch((e) => setError(e.message))
     api<{ default: string; models: { id: string; name: string }[] }>('/api/models')
       .then((d) => {
@@ -362,7 +399,10 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
         setModel(d.default)
       })
       .catch(() => undefined)
-    return () => sourceRef.current?.close()
+    return () => {
+      mountedRef.current = false
+      sourceRef.current?.close()
+    }
   }, [loadConversations])
 
   useEffect(() => {
@@ -440,6 +480,27 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   }, [params, setParams, openThread])
 
   useEffect(() => {
+    // 別のタブから戻ったときは、移動する前に開いていた会話をもう一度開く。
+    if (restoredSessionRef.current) return
+    // The guard is set before the deep link is checked: once that link is handled it is removed from the URL, and
+    // this effect must not open the previous conversation over it afterwards.
+    restoredSessionRef.current = true
+    if (params.get('thread')) return
+    const last = lastOpened
+    if (!last) return
+    const open = last.kind === 'chat' ? openConversation : openThread
+    open(last.id)
+  }, [params, openConversation, openThread])
+
+  // A conversation just opened is shown at its end right away (see jumpRef); this runs before the smooth scroll below.
+  useLayoutEffect(() => {
+    if (!jumpRef.current) return
+    jumpRef.current = false
+    const el = messagesRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [items])
+
+  useEffect(() => {
     // A write waiting for approval holds up the answer: it is brought into view even while an earlier answer is read.
     for (const item of items) {
       if (item.kind !== 'approval' || item.status !== 'pending') continue
@@ -458,7 +519,8 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
     lastScrollTopRef.current = el.scrollTop
   }
 
-  useEffect(() => {
+  // An automation conversation is also loaded as a whole, so it is placed before it is shown, not scrolled to.
+  useLayoutEffect(() => {
     const target = scrollTargetRef.current
     if (!thread || !target) return
     scrollTargetRef.current = null
@@ -886,7 +948,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
                         aria-label={`添付 ${m.attachments.length} 件`}
                         title={m.attachments.map((a) => a.name).join('\n')}
                       >
-                        📎 {m.attachments.length}
+                        <ClipIcon size={14} /> {m.attachments.length}
                       </span>
                     )}
                     {/* After 中断 the waiting messages come back to the composer instead. */}
@@ -941,7 +1003,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
             <div className="composer-actions">
               <div className="composer-tools">
                 <label className="button icon" title="画像・テキスト・CSV・JSON・PDF を添付（5 件・合計 10 MB まで）">
-                  <span aria-hidden="true">📎</span>
+                  <ClipIcon />
                   <span className="visually-hidden">添付</span>
                   <input
                     type="file"

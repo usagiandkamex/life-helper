@@ -149,7 +149,9 @@ class AutomationRunner:
             "id": run_id,
             "automation_id": automation.id,
             "name": automation.name,
-            "started_at": now.isoformat(),
+            # Due automations run one after another with the same scheduled ``now``, so the record keeps the time this
+            # run really started; the history shows how long it took (finished_at - started_at).
+            "started_at": datetime.now(UTC).isoformat(),
             "read": False,
             "notified": False,
             # Records carrying these fields are replayed as a conversation in the chat (older ones are not).
