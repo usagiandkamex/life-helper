@@ -87,6 +87,40 @@ class FakeSession:
         self.pending.clear()
 
 
+class SubAgentSession(FakeSession):
+    """Works like a session that ran a research sub-agent (``task``): the sub-agent's own events share this stream
+    and carry an agent_id, which the session's own events never have."""
+
+    def _fire_sub(self, data):
+        for h in list(self.handlers):
+            h(SimpleNamespace(data=data, agent_id="a1"))
+
+    def _sub_events(self) -> None:
+        self._fire_sub(UserMessageData(content="サブへの依頼", message_id="s1"))
+        self._fire_sub(ToolExecutionStartData(tool_call_id="s1", tool_name="web_fetch", arguments={"url": "x"}))
+        self._fire_sub(AssistantMessageDeltaData(delta_content="サブの途中", message_id="sm1"))
+        self._fire_sub(AssistantMessageData(content="サブの報告", message_id="sm1"))
+        self._fire_sub(SessionErrorData(error_type="error", message="サブの失敗"))
+        self._fire_sub(SessionIdleData())
+
+    async def answer(self, prompt: str) -> None:
+        self._fire(ToolExecutionStartData(tool_call_id="t0", tool_name="task", arguments={"agent_type": "x"}))
+        self._sub_events()
+        await super().answer(prompt)
+
+    async def get_events(self):
+        return [
+            SimpleNamespace(data=UserMessageData(content="質問")),
+            SimpleNamespace(data=ToolExecutionStartData(tool_call_id="t0", tool_name="task", arguments={})),
+            SimpleNamespace(data=UserMessageData(content="サブへの依頼"), agent_id="a1"),
+            SimpleNamespace(
+                data=ToolExecutionStartData(tool_call_id="s1", tool_name="web_fetch", arguments={}), agent_id="a1"
+            ),
+            SimpleNamespace(data=AssistantMessageData(content="サブの報告", message_id="sm1"), agent_id="a1"),
+            SimpleNamespace(data=AssistantMessageData(content="回答", message_id="m1")),
+        ]
+
+
 class FakeManager:
     def __init__(self, session: FakeSession) -> None:
         self.session = session
@@ -186,7 +220,32 @@ def test_chat_flow_with_sse_replay(client, ctx):
     assert fake.deleted == [conv["id"]]
 
 
-def test_turn_rejects_sensitive_prompt_without_confirmation(client, ctx):
+def test_sub_agent_events_do_not_end_or_answer_the_turn(client, ctx):
+    csrf = sign_in(client, ctx)
+    h = {"x-csrf-token": csrf}
+    install_fake(ctx, SubAgentSession(reply="やあ"))
+    conv = client.post("/api/conversations", json={}, headers=h).json()
+
+    turn = client.post(f"/api/conversations/{conv['id']}/turns", json={"prompt": "3 件まとめて"}, headers=h).json()
+    wait_turn_done(ctx, turn["turn_id"])
+    events = [e for _, e in parse_sse(client.get(f"/api/turns/{turn['turn_id']}/events").text)]
+    types = [e["type"] for e in events]
+    # The sub-agent's idle and error neither finished the turn early nor failed it.
+    assert "error" not in types and types[-2:] == ["done", "end"]
+    assert "".join(e["text"] for e in events if e["type"] == "delta") == "やあ"
+    # Its answer is not the answer, but its look-ups are shown (marked as the sub-agent's).
+    assert all("サブ" not in json.dumps(e, ensure_ascii=False) for e in events)
+    tools = [e for e in events if e["type"] == "tool_start"]
+    assert [(e["name"], e.get("subagent")) for e in tools] == [
+        ("task", None),
+        ("web_fetch", True),
+        ("grep", None),
+    ]
+
+    history = client.get(f"/api/conversations/{conv['id']}/messages").json()["messages"]
+    assert [m["role"] for m in history] == ["user", "tool", "tool", "assistant"]
+    assert [m["content"] for m in history if m["role"] != "tool"] == ["質問", "回答"]
+
     csrf = sign_in(client, ctx)
     h = {"x-csrf-token": csrf}
     install_fake(ctx, FakeSession())

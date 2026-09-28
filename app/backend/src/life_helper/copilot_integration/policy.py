@@ -23,12 +23,20 @@ from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecis
 
 from ..netguard import outbound_rejection, url_rejection
 from ..security import SecretMasker
+from .agents import MAX_TASKS_PER_TURN, RESEARCH_AGENT
 
 logger = logging.getLogger(__name__)
 
 # The runtime names some tools per model: GPT-family models search with ``rg`` (paths only) instead of ``grep``.
-ALLOWED_BUILTINS = ("view", "grep", "rg", "glob", "web_fetch", "skill")
+ALLOWED_BUILTINS = ("view", "grep", "rg", "glob", "web_fetch", "skill", "task")
 READ_TOOLS = ("view", "grep", "rg", "glob")
+# ``task`` runs one sub-agent; the runtime names its arguments differently per model family.
+TASK_TOOL = "task"
+AGENT_TYPE_KEYS = ("agent_type", "agentType", "subagent_type", "subagentType")
+# Only the foreground mode is allowed: a background sub-agent would outlive the answer (中断 and timeouts included).
+SYNC_MODE = "sync"
+# Dropped from a task call: the sub-agent follows the session's model, so one answer cannot run up the cost.
+TASK_OVERRIDE_KEYS = ("model", "reasoning_effort", "reasoningEffort", "context_tier", "contextTier")
 COPILOT_WRITABLE_DIRS = ("memories", "notes", "plans")
 COPILOT_WRITABLE_FILES = ("INDEX.md",)
 WRITABLE_SUFFIXES = (".md", ".txt")
@@ -85,14 +93,21 @@ class ToolPolicy:
     allow_write: bool = True
     # Chat: every knowledge-base write waits for the user's approval, and is refused without an approver.
     require_approval: bool = False
+    # Chat only: the answer may run look-ups in parallel with the read-only research sub-agent (``task``).
+    allow_subagents: bool = False
     write_scope: WriteScope | None = None
     on_tool_result: Callable[[str, Any], None] | None = None
     write_lock_path: Path | None = None
     denials: list[str] = field(default_factory=list)
+    tasks_started: int = 0
 
     def __post_init__(self) -> None:
         self.knowledge_root = self.knowledge_root.resolve()
         self.skills_root = self.skills_root.resolve()
+
+    def begin_turn(self) -> None:
+        """A chat turn starts: it may start sub-agents again (the cap is per answer, not per session)."""
+        self.tasks_started = 0
 
     # -- path helpers ------------------------------------------------------------------------------------
 
@@ -189,9 +204,42 @@ class ToolPolicy:
         if tool == "web_fetch":
             reason = await outbound_rejection(str(args.get("url", "")), self.masker)
             return self._hook_deny(reason) if reason else None
+        if tool == TASK_TOOL:
+            return self._check_task_args(args)
         if tool in READ_TOOLS:
             return self._check_read_args(tool, args)
         return None
+
+    def _check_task_args(self, args: dict) -> dict | None:
+        """Sub-agents may only be the app's read-only research agent, in the foreground, on the session's model.
+
+        The runtime would also offer its own agents (and a background mode that outlives the answer), so the call is
+        checked here like a path: what is not the research agent is refused, and cost overrides are dropped.
+        """
+        if not self.allow_subagents:
+            return self._hook_deny("この会話では task ツール（サブエージェント）は使えません。自分で調べてください")
+        # The runtime names this argument differently per model family: all of the names given must agree, so that
+        # the checked value is the one the runtime reads.
+        agents = {str(args[key]) for key in AGENT_TYPE_KEYS if args.get(key) is not None}
+        if len(agents) > 1:
+            return self._hook_deny("task のエージェント指定が食い違っています。agent_type だけを指定してください")
+        agent = next(iter(agents), "")
+        if agent != RESEARCH_AGENT:
+            return self._hook_deny(f"task で使えるのは {RESEARCH_AGENT} だけです（指定: {agent or 'なし'}）")
+        if str(args.get("mode") or SYNC_MODE).lower() != SYNC_MODE:
+            return self._hook_deny(
+                "task は mode を指定せずに呼んでください。並行して調べるときは 1 回の回答で複数の task を呼びます"
+            )
+        if self.tasks_started >= MAX_TASKS_PER_TURN:
+            return self._hook_deny(
+                f"1 回の回答で任せられる調査は {MAX_TASKS_PER_TURN} 件までです。残りは自分で調べてください"
+            )
+        self.tasks_started += 1
+        # The sub-agent follows the session's model and effort: overrides here are dropped, not refused.
+        dropped = [key for key in TASK_OVERRIDE_KEYS if key in args]
+        for key in dropped:
+            args.pop(key)
+        return {"modifiedArgs": args} if dropped else None
 
     def _check_read_args(self, tool: str, args: dict) -> dict | None:
         deny = f"読み取りは {self.knowledge_root.as_posix()} の中だけ許可されています"

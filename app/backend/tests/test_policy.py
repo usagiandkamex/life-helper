@@ -155,7 +155,47 @@ def test_available_builtins_exclude_writers():
     from life_helper.copilot_integration.policy import ALLOWED_BUILTINS
 
     assert not {"create", "edit", "apply_patch", "str_replace_editor", "bash", "powershell"} & set(ALLOWED_BUILTINS)
-    assert available_toolset(True).to_list() == [f"builtin:{t}" for t in ALLOWED_BUILTINS] + ["custom:*"]
+    chat = [f"builtin:{t}" for t in ALLOWED_BUILTINS] + ["custom:*"]
+    assert available_toolset(True, True).to_list() == chat
+    # Automations answer nobody and end at the first idle event: no research sub-agents there.
+    assert available_toolset(True).to_list() == [t for t in chat if t != "builtin:task"]
+    assert available_toolset(False).to_list() == [t for t in chat if t not in ("builtin:task", "builtin:skill")]
+
+
+async def test_task_tool_only_starts_the_research_agent(policy):
+    from life_helper.copilot_integration.agents import MAX_TASKS_PER_TURN, RESEARCH_AGENT
+
+    async def task(**args):
+        return await policy.pre_tool_use({"toolName": "task", "toolArgs": args}, {})
+
+    # Chat only: an automation (allow_subagents=False, the default) cannot start sub-agents at all.
+    assert (await task(agent_type=RESEARCH_AGENT, prompt="x"))["permissionDecision"] == "deny"
+    policy.allow_subagents = True
+
+    assert await task(agent_type=RESEARCH_AGENT, prompt="ふるさと納税の上限") is None
+    assert policy.tasks_started == 1
+    # The runtime's own agents, a missing agent and disagreeing aliases are all refused.
+    for args in (
+        {"prompt": "x"},
+        {"agent_type": "general-purpose", "prompt": "x"},
+        {"subagent_type": "explore", "prompt": "x"},
+        {"agent_type": RESEARCH_AGENT, "agentType": "general-purpose", "prompt": "x"},
+    ):
+        assert (await task(**args))["permissionDecision"] == "deny", args
+    # A background agent would outlive the answer (中断 and timeouts included); unknown modes are refused too.
+    assert (await task(agent_type=RESEARCH_AGENT, prompt="x", mode="background"))["permissionDecision"] == "deny"
+    assert (await task(agent_type=RESEARCH_AGENT, prompt="x", mode="fleet"))["permissionDecision"] == "deny"
+    assert await task(agentType=RESEARCH_AGENT, prompt="x", mode="sync") is None
+    # The sub-agent follows the session's model: overrides are dropped instead of refusing the call.
+    out = await task(agent_type=RESEARCH_AGENT, prompt="x", model="gpt-5", reasoningEffort="high")
+    assert out["modifiedArgs"] == {"agent_type": RESEARCH_AGENT, "prompt": "x"}
+    assert policy.tasks_started == 3
+
+    policy.tasks_started = MAX_TASKS_PER_TURN
+    assert (await task(agent_type=RESEARCH_AGENT, prompt="x"))["permissionDecision"] == "deny"
+    # The cap counts per turn: the next turn may delegate again.
+    policy.begin_turn()
+    assert await task(agent_type=RESEARCH_AGENT, prompt="x") is None
 
 
 async def test_request_approval_fails_closed(policy):
@@ -276,6 +316,23 @@ def test_system_message_contains_kb_profile_and_rules(kb):
     # The result is read later in the run history, so the rules say how to write it (issue #41).
     assert "実行履歴" in auto and "Markdown" in auto and "表" in auto
     assert "承認ボタン" not in auto  # unattended runs never wait for a user
+    # Batching independent look-ups into one answer helps everywhere; sub-agents are for the chat only (issue #56).
+    assert "まとめて出して" in msg and "まとめて出して" in auto
+    assert "task" not in msg and "task" not in auto
+    research = build_system_message(kb, subagents=True)
+    assert "task" in research and "researcher" in research and "最大 6 件" in research
+
+
+def test_research_agent_is_read_only(kb):
+    from life_helper.copilot_integration.agents import RESEARCH_AGENT_TOOLS, build_research_agent
+
+    agent = build_research_agent(kb.resolve().as_posix())
+    assert agent["name"] == "researcher"
+    # No writers, no sub-agents of its own, no browser and no connector tools.
+    assert agent["tools"] == list(RESEARCH_AGENT_TOOLS)
+    assert not {"task", "create", "edit", "apply_patch", "write_knowledge_file"} & set(agent["tools"])
+    assert kb.resolve().as_posix() in agent["prompt"]
+    assert "外部の信頼できないデータ" in agent["prompt"]
 
 
 def test_chat_sessions_require_approval_but_automations_do_not(ctx):
@@ -291,6 +348,8 @@ def test_chat_sessions_require_approval_but_automations_do_not(ctx):
         allow_write=False
     )
     assert not auto_policy.require_approval and not auto_policy.allow_write
+    # Sub-agents are for the chat: an automation waits for the first idle event, which a sub-agent would also raise.
+    assert chat_policy.allow_subagents and not auto_policy.allow_subagents
 
 
 def test_connector_filter(ctx, settings):

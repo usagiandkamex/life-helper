@@ -37,6 +37,7 @@ export type Item =
       args: string
       success?: boolean
       error?: string
+      subagent?: boolean
       chart?: ChartData
       screenshot?: Screenshot
     }
@@ -72,7 +73,7 @@ export function applyEvent(
       return next
     case 'tool_start':
       closeStreaming()
-      next.push({ kind: 'tool', id: ev.id, name: ev.name, args: ev.args })
+      next.push({ kind: 'tool', id: ev.id, name: ev.name, args: ev.args, subagent: ev.subagent })
       return next
     case 'tool_end': {
       const idx = next.findIndex((i) => i.kind === 'tool' && i.id === ev.id)
@@ -177,6 +178,7 @@ export const TOOL_LABELS: Record<string, string> = {
   edit_knowledge_file: 'ファイルを編集',
   web_fetch: 'Web ページを参照',
   skill: 'スキルを使用',
+  task: '調査を任せる',
   browser_open: 'ブラウザで開く',
   browser_read: 'ページを読む',
   browser_click: 'ページをクリック',
