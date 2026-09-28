@@ -62,6 +62,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
   const detailRef = useRef<HTMLDivElement>(null)
+  const selectedRunIdRef = useRef<string | null>(null)
   const interruptedWatchRef = useRef<{ runId: string; since: number } | null>(null)
 
   const load = useCallback(async () => {
@@ -72,8 +73,15 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   }, [onUnreadChange])
 
   const openRun = useCallback(
-    async (automationId: string, runId: string) => {
+    async (automationId: string, runId: string, select = true) => {
+      if (select) {
+        if (selectedRunIdRef.current !== runId) interruptedWatchRef.current = null
+        selectedRunIdRef.current = runId
+      } else if (selectedRunIdRef.current !== runId) {
+        return
+      }
       const record = await api<RunRecord>(`/api/automations/${automationId}/runs/${runId}`)
+      if (selectedRunIdRef.current !== runId) return
       if (record.status === 'interrupted') {
         if (interruptedWatchRef.current?.runId !== record.id) {
           interruptedWatchRef.current = { runId: record.id, since: Date.now() }
@@ -124,7 +132,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
       // 読み込んでいる間にほかの実行を選ぶこともあるので、選び直されていたら開き直さない。
       if (cancelled) return
       if (run && !hasResult(run) && !interruptedWatchExpired)
-        await openRun(run.automation_id, run.id).catch(() => undefined)
+        await openRun(run.automation_id, run.id, false).catch(() => undefined)
       if (!cancelled) setTick((n) => n + 1)
     }, 10_000)
     return () => {
@@ -180,6 +188,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   }
 
   const runNow = async (a: Automation) => {
+    const selectedRunId = selectedRunIdRef.current
     const startedRun = await api<{ started: boolean; run_id: string }>(`/api/automations/${a.id}/run`, {
       method: 'POST',
     })
@@ -190,7 +199,9 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
       const record = await api<RunRecord>(`/api/automations/${a.id}/runs/${startedRun.run_id}`).catch(() => null)
       if (record) {
         await load()
-        openRun(a.id, startedRun.run_id).catch(() => undefined)
+        if (selectedRunIdRef.current === selectedRunId) {
+          openRun(a.id, startedRun.run_id).catch(() => undefined)
+        }
       } else if (Date.now() - started < 60_000) {
         window.setTimeout(poll, 3_000)
       } else {
