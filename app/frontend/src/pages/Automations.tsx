@@ -1,11 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api, ApiError, formatDate, json } from '../api'
-import { runAnswer, STATUS_LABELS } from '../automationRuns'
+import { runAnswer, runStatusText, STATUS_LABELS } from '../automationRuns'
 import { Markdown } from '../components/Markdown'
 import type { Automation, AutomationList, NotifySettings, RunRecord, Schedule } from '../types'
 
 const WEEKDAYS = ['月', '火', '水', '木', '金', '土', '日']
+
+// 表の中の「今すぐ実行」。文字の代わりに再生の形を出す（名前は .visually-hidden で読み上げに残す）。
+function PlayIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M8 5v14l11-7z" fill="currentColor" />
+    </svg>
+  )
+}
 
 type Draft = Omit<Automation, 'id' | 'state' | 'estimated_runs_per_month' | 'cron'> & { id?: string }
 
@@ -156,6 +165,9 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
           <table>
             <thead>
               <tr>
+                <th className="run-now">
+                  <span className="visually-hidden">今すぐ実行</span>
+                </th>
                 <th>名前</th>
                 <th>周期</th>
                 <th>次回</th>
@@ -167,6 +179,12 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
             <tbody>
               {list.automations.map((a) => (
                 <tr key={a.id} className={a.enabled ? '' : 'muted'}>
+                  <td className="run-now">
+                    <button className="button icon" onClick={() => runNow(a)} title="今すぐ実行">
+                      <PlayIcon />
+                      <span className="visually-hidden">「{a.name}」を今すぐ実行</span>
+                    </button>
+                  </td>
                   <td>{a.name}</td>
                   <td>{describe(a.schedule)}</td>
                   <td>{a.enabled ? formatDate(a.state.next_run_at) : '停止中'}</td>
@@ -175,9 +193,6 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
                   <td className="actions">
                     <button className="link" onClick={() => setDraft({ ...a })}>
                       編集
-                    </button>
-                    <button className="link" onClick={() => runNow(a)}>
-                      今すぐ実行
                     </button>
                     <button className="link danger" onClick={() => remove(a)}>
                       削除
@@ -217,7 +232,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
                 <button className="link" aria-current={run?.id === r.id ? 'true' : undefined} onClick={() => openRun(r.automation_id, r.id)}>
                   <span className="run-name">{r.name}</span>
                   <small>
-                    {formatDate(r.started_at)}・{STATUS_LABELS[r.status] ?? r.status}
+                    {formatDate(r.started_at)}・{runStatusText(r)}
                     {r.notified && ' 📣'}
                   </small>
                 </button>
@@ -233,7 +248,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
           {run && (
             <div className="run-detail" ref={detailRef}>
               <h3>
-                {run.name}（{formatDate(run.started_at)}・{STATUS_LABELS[run.status] ?? run.status}）
+                {run.name}（{formatDate(run.started_at)}・{runStatusText(run)}）
               </h3>
               {run.chat_thread_id && (
                 <p>
@@ -307,7 +322,7 @@ function Editor({
       </label>
       <label>
         実行する指示（{'{{today}} {{year}} {{month}} {{weekday}}'} が使えます）
-        <textarea rows={4} value={draft.prompt} onChange={(e) => set('prompt', e.target.value)} />
+        <textarea rows={10} value={draft.prompt} onChange={(e) => set('prompt', e.target.value)} />
       </label>
       <div className="row wrap">
         <label>

@@ -17,6 +17,21 @@ const QUOTE_RESULT_LIMIT = 8000
 
 export const statusLabel = (status: string) => STATUS_LABELS[status] ?? status
 
+// How long a run took. Runs recorded before a crash (and older records) have no finished_at, so it can be empty.
+export function runDuration(run: RunRecord): string {
+  const started = Date.parse(run.started_at ?? '')
+  const finished = Date.parse(run.finished_at ?? '')
+  if (Number.isNaN(started) || Number.isNaN(finished) || finished < started) return ''
+  const seconds = Math.floor((finished - started) / 1000)
+  if (seconds < 60) return `${seconds}秒`
+  const minutes = Math.floor(seconds / 60)
+  const rest = seconds % 60
+  return rest ? `${minutes}分${rest}秒` : `${minutes}分`
+}
+
+// The status of a run with the time it took, as shown in the run history ("成功 10分").
+export const runStatusText = (run: RunRecord) => [statusLabel(run.status), runDuration(run)].filter(Boolean).join(' ')
+
 export function runItems(run: RunRecord): Item[] {
   const items = (run.events ?? []).reduce<Item[]>((acc, ev) => applyEvent(acc, ev), [])
   // report_result is shown as the report card instead of a tool call.
