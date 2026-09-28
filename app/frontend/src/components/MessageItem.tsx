@@ -32,7 +32,7 @@ export function MessageItem({ item, onSchedule }: { item: Item; onSchedule?: (te
           <details>
             <summary>
               {item.success === false ? '⚠️' : item.success ? '✔' : '…'}{' '}
-              {/* A look-up a research sub-agent ran in parallel, not the assistant itself. */}
+              {/* A look-up a research sub-agent ran on a delegated theme, not the assistant itself. */}
               {item.subagent ? '調査 › ' : ''}
               {TOOL_LABELS[item.name] ?? item.name}
             </summary>

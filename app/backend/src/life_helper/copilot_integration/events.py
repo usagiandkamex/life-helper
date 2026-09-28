@@ -120,7 +120,7 @@ def map_event(event: Any, masker: SecretMasker) -> dict | None:
         case AssistantMessageData() if not sub and not data.parent_tool_call_id:
             return {"type": "message", "content": masker.mask_text(data.content or "")}
         case ToolExecutionStartData():
-            # A sub-agent's look-ups are shown like the session's own: that is what makes the parallel work visible.
+            # A sub-agent's look-ups are shown like the session's own, so its delegated work stays visible in the chat.
             started = {
                 "type": "tool_start",
                 "id": data.tool_call_id,

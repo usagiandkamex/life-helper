@@ -1,9 +1,11 @@
-"""The sub-agent the chat may run in parallel (Copilot's ``task`` tool).
+"""The read-only sub-agent the chat may delegate a research theme to (Copilot's ``task`` tool).
 
-Several look-ups for one goal (keywords, candidates, sites) are faster when they run at the same time, so the chat
-can hand each of them to a copy of this agent. It is deliberately read-only: it sees the same knowledge base and the
-same ``web_fetch`` checks as the main answer, but it cannot write, use the browser or the connectors, and it cannot
-start further sub-agents. Everything else (the decision, the answer, any write) stays with the main agent.
+A self-contained look-up for one goal (a keyword, a candidate, a site) can be handed to a copy of this agent so the
+main answer does not have to carry it. The delegation is synchronous: the sub-agent runs in the foreground and several
+``task`` calls are served one after another, not concurrently (background/Fleet execution is refused, see ``policy``).
+It is deliberately read-only: it sees the same knowledge base and the same ``web_fetch`` checks as the main answer, but
+it cannot write, use the browser or the connectors, and it cannot start further sub-agents. Everything else (the
+decision, the answer, any write) stays with the main agent.
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ MAX_TASKS_PER_ANSWER = 6
 RESEARCH_AGENT_TOOLS = ("view", "grep", "rg", "glob", "web_fetch")
 RESEARCH_AGENT_DESCRIPTION = (
     "指定された 1 つのテーマだけを、知識ベースの読み取りと web_fetch で調べて報告する（読み取り専用）。"
-    "複数のキーワード・候補・サイトを並行して調べるときに、1 つずつ任せる。"
+    "独立した調べもの（キーワード・候補・サイトなど）を 1 つずつ切り出して任せる。"
 )
 RESEARCH_AGENT_PROMPT = """\
 あなたは、利用者専用の生活サポートアシスタントの調査担当です。頼まれた 1 つのテーマだけを調べ、結果を報告します。

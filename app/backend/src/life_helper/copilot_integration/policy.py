@@ -96,8 +96,10 @@ class ToolPolicy:
     allow_write: bool = True
     # Chat: every knowledge-base write waits for the user's approval, and is refused without an approver.
     require_approval: bool = False
-    # The answer may run look-ups in parallel with the read-only research sub-agent (``task``); chat and automation
-    # alike. The automation runner waits for its own agent's idle so a sub-agent's idle does not end the run early.
+    # The answer may hand a self-contained research theme to the read-only sub-agent (``task``); chat and automation
+    # alike. The sub-agent runs in the foreground (``sync``), so several ``task`` calls are served one after another,
+    # not concurrently. The automation runner waits for its own agent's idle so a sub-agent's idle does not end the
+    # run early.
     allow_subagents: bool = False
     write_scope: WriteScope | None = None
     on_tool_result: Callable[[str, Any], None] | None = None
@@ -249,13 +251,14 @@ class ToolPolicy:
         # Fail closed: every mode-like key (``mode``/``agentMode``/…) must be the foreground ``sync`` mode. Any other
         # value (a different mode name such as "fleet", or an empty/non-string value) is treated as background, so a
         # name we do not know cannot slip a non-sync mode past this check. Only ``*mode`` keys are inspected, so a
-        # prompt that merely says "background" is not mistaken for a mode.
+        # prompt that merely says "background" is not mistaken for a mode. The sub-agent therefore runs in the
+        # foreground and delegated tasks are served sequentially, never as background/Fleet parallel workers.
         mode_values = [v for k, v in args.items() if k.lower().endswith("mode") and v is not None]
         background = any(not isinstance(v, str) or v.strip().lower() != SYNC_MODE for v in mode_values)
         background = background or any(args.get(key) for key in BACKGROUND_KEYS)
         if background:
             return self._hook_deny(
-                "task は前面（sync）でだけ使えます。並行して調べるときは 1 回の回答で複数の task を呼びます"
+                "task は前面（sync）でだけ使えます。背景での実行はできません（調査は 1 件ずつ順番に進みます）"
             )
         if self.tasks_started >= MAX_TASKS_PER_ANSWER:
             return self._hook_deny(

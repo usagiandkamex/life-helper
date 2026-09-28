@@ -149,9 +149,9 @@ class CopilotManager:
             allow_write=allow_write,
             # Unattended automations cannot answer an approval card; they follow their own allow_write setting.
             require_approval=not self.automation,
-            # Chat and automation alike may run look-ups in parallel with the read-only research sub-agent (``task``).
-            # The automation runner waits for its own agent's idle (send_and_wait_own), so a sub-agent's idle does not
-            # cut the run short.
+            # Chat and automation alike may delegate a self-contained look-up to the read-only research sub-agent
+            # (``task``); it runs in the foreground, so delegated tasks are served one at a time. The automation runner
+            # waits for its own agent's idle (send_and_wait_own), so a sub-agent's idle does not cut the run short.
             allow_subagents=True,
             write_lock_path=knowledge_write_lock_path(s),
         )
