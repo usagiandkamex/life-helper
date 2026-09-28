@@ -19,6 +19,10 @@ logger = logging.getLogger(__name__)
 
 _ID_RE = re.compile(r"^[0-9a-f]{6,32}$")
 
+# A run is recorded as running when it starts and the same record is replaced with the result when it finishes, so
+# the history can show a run that is still in progress (its result and transcript are only there once it is done).
+RUNNING_STATUS = "running"
+
 # Everything the run history and the chat view need before opening a record (which also holds the transcript).
 RUN_META_FIELDS = (
     "name",
@@ -244,13 +248,16 @@ class AutomationStore:
         records = []
         for run_id in dict.fromkeys(run_ids):
             record = self.get_run(automation_id, run_id)
-            if record and not record.get("read"):
+            # A run in progress has nothing to read, and writing it back would replace the result the runner is
+            # about to save with this (older) copy of the same record.
+            if record and not record.get("read") and record.get("status") != RUNNING_STATUS:
                 record["read"] = True
                 records.append(record)
         self._save_runs(records)
 
     def unread_count(self) -> int:
-        return sum(1 for r in self.list_run_meta() if not r.get("read"))
+        # A run that is still in progress has nothing to read yet.
+        return sum(1 for r in self.list_run_meta() if not r.get("read") and r.get("status") != RUNNING_STATUS)
 
     # -- chat view state ---------------------------------------------------------------------------------
     # Kept apart from the run records so hiding a conversation never rewrites a result (or races with "read").

@@ -16,9 +16,13 @@ from ..security import SENSITIVE_LABELS, detect_sensitive
 from . import chat
 from .models import Automation, AutomationState, NotifySettings, Schedule, normalize_connectors
 from .runner import AutomationRunner, build_notifier
-from .store import AutomationStore
+from .store import RUNNING_STATUS, AutomationStore
 
 router = APIRouter(prefix="/api/automations")
+
+# A run that is still recorded as running after its lock could have expired was left behind by an app or job that
+# stopped, so the history shows it as interrupted instead of running for ever.
+INTERRUPTED_STATUS = "interrupted"
 
 
 class AutomationBody(BaseModel):
@@ -86,6 +90,20 @@ def _view(ctx: AppContext, automation: Automation) -> dict:
         "estimated_runs_per_month": automation.schedule.occurrences_within(now, 30) if automation.enabled else 0,
         "cron": automation.schedule.cron_expression(),
     }
+
+
+def _run_view(ctx: AppContext, record: dict) -> dict:
+    """The run as the history shows it. The stored record is left alone (the run may still be finishing in the
+    job process), so both the list and the detail decide the same way, from the same clock."""
+    if record.get("status") != RUNNING_STATUS:
+        return record
+    try:
+        age = datetime.now(UTC) - datetime.fromisoformat(record.get("started_at") or "")
+    except (TypeError, ValueError):
+        return record
+    if age.total_seconds() > ctx.settings.automation_lock_ttl_seconds:
+        return record | {"status": INTERRUPTED_STATUS}
+    return record
 
 
 @router.get("")
@@ -206,7 +224,7 @@ def list_runs(
         runs = _store(ctx).list_runs(automation_id)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
-    return [{k: v for k, v in r.items() if k != "events"} for r in runs]
+    return [_run_view(ctx, {k: v for k, v in r.items() if k != "events"}) for r in runs]
 
 
 @router.get("/{automation_id}/runs/{run_id}")
@@ -219,7 +237,7 @@ def get_run(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
     if record is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "run not found")
-    return record | {"chat_thread_id": chat.thread_id_for(record)}
+    return _run_view(ctx, record) | {"chat_thread_id": chat.thread_id_for(record)}
 
 
 @router.post("/{automation_id}/runs/{run_id}/read")

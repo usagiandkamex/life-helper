@@ -1039,3 +1039,80 @@ def test_chat_api(client, ctx):
     assert run["chat_thread_id"] == "r-bbbbbb000001-b000000000000001"
     store.save_run({"id": "0dd0000000000001", "automation_id": "bbbbbb000001", "started_at": "2026-09-01"})
     assert client.get("/api/automations/bbbbbb000001/runs/0dd0000000000001").json()["chat_thread_id"] is None
+
+
+# -- runs in progress (issue #61) ---------------------------------------------------------------------------
+
+
+def _running_record(automation_id: str, run_id: str, *, started: datetime | None = None) -> dict:
+    """A record as the runner writes it when a run starts: no result and no transcript yet."""
+    return {
+        "id": run_id,
+        "automation_id": automation_id,
+        "name": "定期チェック",
+        "started_at": (started or datetime(2026, 9, 25, 0, 0, tzinfo=UTC)).isoformat(),
+        "status": "running",
+        "read": False,
+        "transcript_version": 1,
+        "conversation_mode": "new",
+        "prompt": "確認して",
+        "events": [],
+    }
+
+
+async def test_a_run_is_in_the_history_while_it_runs(auto_env, monkeypatch):
+    ctx, runner, manager = auto_env
+    a = ctx.automations.upsert(Automation(name="毎朝", prompt="予定"))
+    during: dict = {}
+    session = runner._run_session
+
+    async def spy(*args, **kwargs):
+        during["runs"] = ctx.automations.list_runs(a.id)
+        during["unread"] = ctx.automations.unread_count()
+        during["threads"] = chat.list_threads(ctx.automations)
+        await session(*args, **kwargs)
+
+    monkeypatch.setattr(runner, "_run_session", spy)
+    record = await runner.run(a.id)
+
+    # While it runs the history shows the run without a result, and there is nothing to read or to replay yet.
+    assert [(r["id"], r["status"]) for r in during["runs"]] == [(record["id"], "running")]
+    assert "summary" not in during["runs"][0] and during["runs"][0]["events"] == []
+    assert during["unread"] == 0 and during["threads"] == []
+    # The same record is replaced by the result, so a run never appears twice.
+    assert [(r["id"], r["status"]) for r in ctx.automations.list_runs(a.id)] == [(record["id"], "success")]
+    assert ctx.automations.unread_count() == 1
+    assert [t["id"] for t in chat.list_threads(ctx.automations)] == [f"r-{a.id}-{record['id']}"]
+
+
+def test_marking_a_run_in_progress_read_does_not_replace_the_result(tmp_path):
+    store = AutomationStore(tmp_path)
+    aid, rid = "aaaaaa000001", "a000000000000001"
+    store.save_run(_running_record(aid, rid))
+    store.mark_read(aid, rid)
+    assert store.get_run(aid, rid)["read"] is False  # the record the runner is about to replace is left alone
+    store.save_run(_chat_record(aid, rid))  # the run finishes
+    store.mark_read(aid, rid)
+    saved = store.get_run(aid, rid)
+    assert saved["read"] is True and saved["summary"] == "要約"
+
+
+def test_runs_api_shows_a_run_in_progress_and_an_abandoned_one(client, ctx, settings):
+    csrf = sign_in(client, ctx)
+    store = ctx.automations
+    now = datetime.now(UTC)
+    store.save_run(_running_record("aaaaaa000001", "a000000000000001", started=now))
+    left_behind = now - timedelta(seconds=settings.automation_lock_ttl_seconds + 60)
+    store.save_run(_running_record("aaaaaa000001", "a000000000000002", started=left_behind))
+
+    runs = {r["id"]: r for r in client.get("/api/automations/runs").json()}
+    assert runs["a000000000000001"]["status"] == "running"
+    # A run that is still recorded as running long after it could be is shown as interrupted, not as running.
+    assert runs["a000000000000002"]["status"] == "interrupted"
+    detail = client.get("/api/automations/aaaaaa000001/runs/a000000000000002").json()
+    assert detail["status"] == "interrupted" and detail["chat_thread_id"] is None
+    assert store.get_run("aaaaaa000001", "a000000000000002")["status"] == "running"  # the record is left alone
+
+    assert client.get("/api/automations").json()["unread"] == 0  # a run without a result is not unread
+    read = client.post("/api/automations/aaaaaa000001/runs/a000000000000001/read", headers={"x-csrf-token": csrf})
+    assert read.status_code == 200 and store.get_run("aaaaaa000001", "a000000000000001")["read"] is False

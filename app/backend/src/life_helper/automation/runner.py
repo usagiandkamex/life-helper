@@ -23,7 +23,7 @@ from ..tools.registry import ToolSpec
 from .locks import FileLock
 from .models import Automation, expand_prompt
 from .notify import GitHubNotifier, NotifyError
-from .store import AutomationStore
+from .store import RUNNING_STATUS, AutomationStore
 
 if TYPE_CHECKING:
     from ..context import AppContext
@@ -152,6 +152,9 @@ class AutomationRunner:
             # Due automations run one after another with the same scheduled ``now``, so the record keeps the time this
             # run really started; the history shows how long it took (finished_at - started_at).
             "started_at": datetime.now(UTC).isoformat(),
+            # Recorded as running before any work starts, so the run history shows that the run is in progress
+            # (scheduled runs happen in the job process, so the shared volume is the only place the app can see it).
+            "status": RUNNING_STATUS,
             "read": False,
             "notified": False,
             # Records carrying these fields are replayed as a conversation in the chat (older ones are not).
@@ -168,6 +171,8 @@ class AutomationRunner:
             "attempts": 0,
             "requests": 0,
         }
+        # Every later write replaces this record, so the result never appears twice in the history.
+        self.store.save_run(record)
         missing = [
             c
             for c in automation.connectors
