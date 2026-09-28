@@ -56,7 +56,7 @@ function RunTranscript({ run, onAsk }: { run: RunRecord; onAsk: (run: RunRecord)
           </a>
         )}
       </header>
-      {run.prompt && <MessageItem item={{ kind: 'user', text: run.prompt }} />}
+      {run.prompt && <MessageItem item={{ kind: 'user', text: run.prompt, at: run.started_at }} />}
       {!!run.events_omitted && <p className="hint">記録が長いため、途中経過のうち最初の {run.events_omitted} 件を省略しています。</p>}
       {items.map((item, i) => (
         <MessageItem key={i} item={item} />

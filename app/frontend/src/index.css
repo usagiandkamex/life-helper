@@ -287,6 +287,8 @@ details.collapse > summary:focus-visible { outline: 2px solid var(--md-primary);
 .msg.user { align-self: flex-end; max-width: 80%; text-align: right; }
 .msg.user .bubble { background: var(--md-primary-container); color: var(--md-on-primary-container); padding: 0.75rem 1rem; border-radius: var(--md-shape-l) var(--md-shape-xs) var(--md-shape-l) var(--md-shape-l); white-space: pre-wrap; text-align: left; }
 .msg.assistant { max-width: 100%; }
+/* 投稿時刻（JST）：吹き出しの下に小さく出す。ユーザーの投稿は右寄せ（.msg.user の text-align: right に従う） */
+.msg-time { display: block; color: var(--muted); font-size: 0.75rem; line-height: 1rem; margin-top: 0.25rem; }
 .msg.tool, .msg.file-write { font-size: 0.8rem; color: var(--muted); }
 .msg.file-write summary { color: var(--ok); }
 .msg.approval { font-size: 0.85rem; }

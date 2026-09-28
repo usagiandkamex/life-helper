@@ -26,7 +26,8 @@ export type UnsentMessage = { id: string; text: string; attachments?: SentAttach
 
 export type TurnEvent =
   | { type: 'delta'; text: string }
-  | { type: 'message'; content: string }
+  // at: when the answer was finished, as the chat and the reloaded history show it (the deltas carry no time).
+  | { type: 'message'; content: string; at?: string }
   // subagent: a look-up a research sub-agent ran on a delegated theme, not the assistant itself.
   | { type: 'tool_start'; id: string; name: string; args: string; subagent?: boolean }
   | { type: 'tool_end'; id: string; success: boolean; error: string; result: string; chart?: ChartData; screenshot?: Screenshot }
@@ -38,8 +39,8 @@ export type TurnEvent =
   | { type: 'follow_up' }
   // A message sent while the chat answers, waiting until Copilot takes it ('now') or the answer is finished ('later').
   | { type: 'queued'; id: string; text: string; mode: FollowUpMode; attachments?: SentAttachment[] }
-  // Copilot took a waiting message: it is shown in the conversation from here on.
-  | { type: 'user'; id: string; text: string; mode: FollowUpMode; attachments?: SentAttachment[] }
+  // Copilot took a waiting message: it is shown in the conversation from here on, with the time it was taken.
+  | { type: 'user'; id: string; text: string; mode: FollowUpMode; attachments?: SentAttachment[]; at?: string }
   // A 'later' message the user cancelled (取り消す).
   | { type: 'unqueued'; id: string }
   | { type: 'done' }
@@ -52,9 +53,10 @@ export type AttachmentInfo = { name: string; kind: 'image' | 'file'; truncated?:
 // An attachment of a message just sent. index: its place among the files sent, which the server lists images first.
 export type SentAttachment = AttachmentInfo & { index: number }
 
+// at: when the message was posted (ISO 8601); missing on the messages of conversations from before it was recorded.
 export type HistoryMessage =
-  | { role: 'user'; content: string; attachments?: AttachmentInfo[] }
-  | { role: 'assistant'; content: string }
+  | { role: 'user'; content: string; attachments?: AttachmentInfo[]; at?: string }
+  | { role: 'assistant'; content: string; at?: string }
   | { role: 'tool'; name: string; args: string; subagent?: boolean }
 
 export type FileEntry = { path: string; size: number; modified: string; writable: boolean }

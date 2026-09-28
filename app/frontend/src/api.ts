@@ -61,3 +61,16 @@ export function formatDate(iso: string | null | undefined): string {
   if (!iso) return '—'
   return new Date(iso).toLocaleString('ja-JP', { dateStyle: 'short', timeStyle: 'short' })
 }
+
+const TOKYO = 'Asia/Tokyo'
+
+// チャットの投稿時刻は、端末のタイムゾーンによらず JST で表示する。今日でない投稿は日付も添えて、
+// 何日も続いている会話でも時刻だけが並ばないようにする。
+export function formatTime(iso: string | null | undefined): string {
+  if (!iso) return ''
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return ''
+  const time = date.toLocaleTimeString('ja-JP', { timeZone: TOKYO, hour: '2-digit', minute: '2-digit' })
+  const day = (d: Date) => d.toLocaleDateString('ja-JP', { timeZone: TOKYO })
+  return day(date) === day(new Date()) ? time : `${day(date)} ${time}`
+}
