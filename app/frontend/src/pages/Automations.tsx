@@ -97,7 +97,8 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
 
   // 実行中の記録にはまだ結果がないので、終わるまで読み直して、開いたままでも結果に変わるようにする。
   // tick は毎回進めるので、途中の読み込みが失敗しても見張りは続く。
-  const watching = runs.some((r) => r.status === 'running') || run?.status === 'running'
+  const watching =
+    runs.some((r) => r.status === 'running') || run?.status === 'running' || (list?.running_automation_ids.length ?? 0) > 0
   useEffect(() => {
     if (!watching) return
     let cancelled = false
@@ -189,7 +190,8 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   if (!list) return <div className="panel">{error || '読み込み中…'}</div>
   const usage = list.usage
   // 同じオートメーションは同時に実行できないので、実行中の記録がある間は「今すぐ実行」を押せないようにする。
-  const running = new Set(runs.filter((r) => r.status === 'running').map((r) => r.automation_id))
+  // 実行履歴は新しい 50 件までなので、上限のない一覧側の実行中のオートメーションで決める。
+  const running = new Set(list.running_automation_ids)
   return (
     <div className="stack">
       {message && <div className="banner ok">{message}</div>}

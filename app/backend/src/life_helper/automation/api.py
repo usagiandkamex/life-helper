@@ -110,8 +110,13 @@ def _run_view(ctx: AppContext, record: dict) -> dict:
 def list_automations(user: CurrentUser = Depends(require_user), ctx: AppContext = Depends(get_ctx)) -> dict:
     store = _store(ctx)
     items = [_view(ctx, a) for a in store.list()]
+    # Taken from every run record (the history is capped), so an automation stays marked as running however many
+    # newer runs there are; it cannot be started again until then.
+    running = {m["automation_id"] for m in store.list_run_meta() if _run_view(ctx, m).get("status") == RUNNING_STATUS}
+    running &= {a["id"] for a in items}  # the history of a deleted automation is kept
     return {
         "automations": items,
+        "running_automation_ids": sorted(running),
         "usage": {
             "runs_this_month": store.runs_this_month(),
             "monthly_limit": ctx.settings.automation_monthly_run_limit,

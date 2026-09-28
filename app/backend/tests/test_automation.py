@@ -1125,3 +1125,22 @@ def test_a_run_in_progress_without_a_usable_start_time_stays_running(client, ctx
     record["started_at"] = "2026-09-25 00:00:00"  # a start time without a timezone cannot be compared
     ctx.automations.save_run(record)
     assert client.get("/api/automations/runs").json()[0]["status"] == "running"
+
+
+def test_automation_list_reports_runs_in_progress_beyond_the_history(client, ctx, settings):
+    sign_in(client, ctx)
+    store = ctx.automations
+    store.upsert(Automation(id="aaaaaa000001", name="定期チェック", prompt="確認して", schedule=Schedule(kind="daily")))
+    store.upsert(Automation(id="aaaaaa000002", name="定期チェック", prompt="確認して", schedule=Schedule(kind="daily")))
+    now = datetime.now(UTC)
+    store.save_run(_running_record("aaaaaa000001", "a000000000000001", started=now - timedelta(minutes=5)))
+    left_behind = now - timedelta(seconds=settings.automation_lock_ttl_seconds + 60)
+    store.save_run(_running_record("aaaaaa000002", "a000000000000002", started=left_behind))
+    store.save_run(_running_record("aaaaaa000009", "a000000000000009", started=now))  # a deleted automation
+    for i in range(50):  # newer runs push the one in progress out of the (capped) history
+        record = _running_record("aaaaaa000003", f"b{i:015d}", started=now - timedelta(seconds=i))
+        store.save_run(record | {"status": "success", "summary": "要約"})
+
+    assert "a000000000000001" not in {r["id"] for r in client.get("/api/automations/runs").json()}
+    # The interrupted run is not reported as running, so its automation can be started again.
+    assert client.get("/api/automations").json()["running_automation_ids"] == ["aaaaaa000001"]
