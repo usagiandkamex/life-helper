@@ -389,6 +389,8 @@ class TurnManager:
         if turn.stopping:
             # 中断 came while the session was opening: send nothing.
             return
+        # Each answer (the first one and every 「あとで送信」 after it) gets its own budget of research sub-agents.
+        turn.active.policy.begin_answer()
         session = turn.active.session
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.timeout_seconds

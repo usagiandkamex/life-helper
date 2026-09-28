@@ -226,8 +226,6 @@ class CopilotManager:
             if cached is not None:
                 if write_scope is not KEEP:
                     cached.policy.write_scope = write_scope  # type: ignore[assignment]
-                    # The write scope marks the start of a turn, and the research sub-agents are capped per turn.
-                    cached.policy.begin_turn()
                 if cached.model != model:
                     await cached.session.set_model(model)
                     cached.model = model

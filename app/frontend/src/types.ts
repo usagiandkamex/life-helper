@@ -55,7 +55,7 @@ export type SentAttachment = AttachmentInfo & { index: number }
 export type HistoryMessage =
   | { role: 'user'; content: string; attachments?: AttachmentInfo[] }
   | { role: 'assistant'; content: string }
-  | { role: 'tool'; name: string; args: string }
+  | { role: 'tool'; name: string; args: string; subagent?: boolean }
 
 export type FileEntry = { path: string; size: number; modified: string; writable: boolean }
 

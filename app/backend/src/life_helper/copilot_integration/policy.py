@@ -23,7 +23,7 @@ from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecis
 
 from ..netguard import outbound_rejection, url_rejection
 from ..security import SecretMasker
-from .agents import MAX_TASKS_PER_TURN, RESEARCH_AGENT, RESEARCH_AGENT_TOOLS
+from .agents import MAX_TASKS_PER_ANSWER, RESEARCH_AGENT, RESEARCH_AGENT_TOOLS
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,8 @@ AGENT_TYPE_KEYS = ("agent_type", "agentType", "subagent_type", "subagentType")
 AGENT_ID_KEYS = ("agentId", "agent_id")
 # Only the foreground mode is allowed: a background sub-agent would outlive the answer (中断 and timeouts included).
 SYNC_MODE = "sync"
+BACKGROUND = "background"
+BACKGROUND_KEYS = ("background", "detach", "detached", "run_in_background", "runInBackground")
 # Dropped from a task call: the sub-agent follows the session's model, so one answer cannot run up the cost.
 TASK_OVERRIDE_KEYS = ("model", "reasoning_effort", "reasoningEffort", "context_tier", "contextTier")
 COPILOT_WRITABLE_DIRS = ("memories", "notes", "plans")
@@ -107,8 +109,8 @@ class ToolPolicy:
         self.knowledge_root = self.knowledge_root.resolve()
         self.skills_root = self.skills_root.resolve()
 
-    def begin_turn(self) -> None:
-        """A chat turn starts: it may start sub-agents again (the cap is per answer, not per session)."""
+    def begin_answer(self) -> None:
+        """An answer starts: the cap on research sub-agents counts per answer, not per session."""
         self.tasks_started = 0
 
     # -- path helpers ------------------------------------------------------------------------------------
@@ -189,11 +191,11 @@ class ToolPolicy:
 
     # -- hooks -------------------------------------------------------------------------------------------
 
-    async def pre_tool_use(self, hook_input: dict, _ctx: dict) -> dict | None:
+    async def pre_tool_use(self, hook_input: dict, ctx: dict) -> dict | None:
         tool = hook_input.get("toolName", "")
-        # The research sub-agent is read-only: when the runtime says which agent is calling, hold it to its tools
-        # here too, so a sub-agent can never reach the browser, the connectors or a knowledge-base write.
-        if any(hook_input.get(key) for key in AGENT_ID_KEYS) and tool not in RESEARCH_AGENT_TOOLS:
+        # The research sub-agent is read-only: where the runtime tells us a call comes from a sub-agent, hold it to
+        # its tools here too, so it can never reach the browser, the connectors or a knowledge-base write.
+        if self._subagent_call(hook_input, ctx) and tool not in RESEARCH_AGENT_TOOLS:
             return self._hook_deny(f"調査エージェントはこのツールを使えません: {tool}")
         if tool in self.custom_tools:
             if tool in self.write_custom_tools and not self.allow_write:
@@ -216,6 +218,18 @@ class ToolPolicy:
             return self._check_read_args(tool, args)
         return None
 
+    def _subagent_call(self, hook_input: dict, ctx: dict) -> bool:
+        """Whether this tool call was made by a sub-agent rather than by the session's own agent.
+
+        The runtime marks such a call with the sub-agent's id, or with its own session id (the hook itself is
+        delivered to this session either way). Both are read here because neither is guaranteed: the sub-agent's
+        tools are limited by its definition as well.
+        """
+        if any(hook_input.get(key) for key in AGENT_ID_KEYS):
+            return True
+        session_id, hook_session = ctx.get("session_id"), hook_input.get("sessionId")
+        return bool(session_id and hook_session and hook_session != session_id)
+
     def _check_task_args(self, args: dict) -> dict | None:
         """Sub-agents may only be the app's read-only research agent, in the foreground, on the session's model.
 
@@ -232,13 +246,18 @@ class ToolPolicy:
         agent = next(iter(agents), "")
         if agent != RESEARCH_AGENT:
             return self._hook_deny(f"task で使えるのは {RESEARCH_AGENT} だけです（指定: {agent or 'なし'}）")
-        if str(args.get("mode") or SYNC_MODE).lower() != SYNC_MODE:
+        mode = args.get("mode")
+        # Fail closed: only the foreground mode, under whichever argument the runtime would read it.
+        background = mode is not None and (not isinstance(mode, str) or mode.strip().lower() != SYNC_MODE)
+        background = background or any(isinstance(v, str) and v.strip().lower() == BACKGROUND for v in args.values())
+        background = background or any(args.get(key) for key in BACKGROUND_KEYS)
+        if background:
             return self._hook_deny(
-                "task は mode を指定せずに呼んでください。並行して調べるときは 1 回の回答で複数の task を呼びます"
+                "task は前面（sync）でだけ使えます。並行して調べるときは 1 回の回答で複数の task を呼びます"
             )
-        if self.tasks_started >= MAX_TASKS_PER_TURN:
+        if self.tasks_started >= MAX_TASKS_PER_ANSWER:
             return self._hook_deny(
-                f"1 回の回答で任せられる調査は {MAX_TASKS_PER_TURN} 件までです。残りは自分で調べてください"
+                f"1 回の回答で任せられる調査は {MAX_TASKS_PER_ANSWER} 件までです。残りは自分で調べてください"
             )
         self.tasks_started += 1
         # The sub-agent follows the session's model and effort: overrides here are dropped, not refused.

@@ -12,7 +12,7 @@ from typing import Any
 
 RESEARCH_AGENT = "researcher"
 # How many sub-agents one answer may start: enough for a handful of keywords, far from a runaway fan-out.
-MAX_TASKS_PER_TURN = 6
+MAX_TASKS_PER_ANSWER = 6
 # Read-only built-ins only: no task (no recursion), no browser_*, no connector tools, no knowledge-base writers.
 # ``grep`` and ``rg`` are the same search tool under the names the different model families use.
 RESEARCH_AGENT_TOOLS = ("view", "grep", "rg", "glob", "web_fetch")
@@ -39,9 +39,10 @@ RESEARCH_AGENT_PROMPT = """\
 def build_research_agent(knowledge_root_posix: str) -> dict[str, Any]:
     """The ``custom_agents`` entry for the chat session.
 
-    ``infer`` is left at the runtime's default: the CLI is replacing it, and turning it off could also stop the
-    model from starting the agent with ``task``, which is the whole point here. The agent is read-only, so being
-    picked for part of an answer costs nothing more than the tools it is given.
+    ``infer`` is left at the runtime's default (true): the SDK documents it as "whether agent is available for model
+    inference", so turning it off would likely stop the model from starting the agent with ``task``, which is the
+    whole point here. What a started agent may do is checked again in ``pre_tool_use``, and how many may run is
+    capped per answer.
     """
     return {
         "name": RESEARCH_AGENT,

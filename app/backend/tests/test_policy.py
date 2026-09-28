@@ -163,7 +163,7 @@ def test_available_builtins_exclude_writers():
 
 
 async def test_task_tool_only_starts_the_research_agent(policy):
-    from life_helper.copilot_integration.agents import MAX_TASKS_PER_TURN, RESEARCH_AGENT
+    from life_helper.copilot_integration.agents import MAX_TASKS_PER_ANSWER, RESEARCH_AGENT
 
     async def task(**args):
         return await policy.pre_tool_use({"toolName": "task", "toolArgs": args}, {})
@@ -182,42 +182,57 @@ async def test_task_tool_only_starts_the_research_agent(policy):
         {"agent_type": RESEARCH_AGENT, "agentType": "general-purpose", "prompt": "x"},
     ):
         assert (await task(**args))["permissionDecision"] == "deny", args
-    # A background agent would outlive the answer (中断 and timeouts included); unknown modes are refused too.
-    assert (await task(agent_type=RESEARCH_AGENT, prompt="x", mode="background"))["permissionDecision"] == "deny"
-    assert (await task(agent_type=RESEARCH_AGENT, prompt="x", mode="fleet"))["permissionDecision"] == "deny"
+    # A background agent would outlive the answer (中断 and timeouts included); anything but sync is refused.
+    for args in (
+        {"mode": "background"},
+        {"mode": "fleet"},
+        {"mode": 0},  # not a string: the runtime would read something we did not check
+        {"mode": ""},
+        {"background": True},
+        {"detach": True},
+        {"run_in_background": True},
+        {"agentMode": "background"},  # a mode under a name we do not know
+    ):
+        out = await task(agent_type=RESEARCH_AGENT, prompt="x", **args)
+        assert out["permissionDecision"] == "deny", args
     assert await task(agentType=RESEARCH_AGENT, prompt="x", mode="sync") is None
     # The sub-agent follows the session's model: overrides are dropped instead of refusing the call.
     out = await task(agent_type=RESEARCH_AGENT, prompt="x", model="gpt-5", reasoningEffort="high")
     assert out["modifiedArgs"] == {"agent_type": RESEARCH_AGENT, "prompt": "x"}
     assert policy.tasks_started == 3
 
-    policy.tasks_started = MAX_TASKS_PER_TURN
+    policy.tasks_started = MAX_TASKS_PER_ANSWER
     assert (await task(agent_type=RESEARCH_AGENT, prompt="x"))["permissionDecision"] == "deny"
-    # The cap counts per turn: the next turn may delegate again.
-    policy.begin_turn()
+    # The cap counts per answer: the next answer may delegate again.
+    policy.begin_answer()
     assert await task(agent_type=RESEARCH_AGENT, prompt="x") is None
 
 
 async def test_sub_agent_calls_are_held_to_the_research_tools(policy, kb):
-    """When the runtime tells the hook which agent is calling, the sub-agent keeps only its read-only tools."""
+    """When the runtime tells the hook that a sub-agent is calling, it keeps only its read-only tools."""
     from life_helper.copilot_integration.agents import RESEARCH_AGENT_TOOLS
 
     policy.allow_subagents = True
-    sub = {"agentId": "a1"}
-    for tool, args in (
+    ctx = {"session_id": "s1"}
+    calls = [
         ("task", {"agent_type": "researcher", "prompt": "x"}),  # no sub-agents of its own
         ("update_holding", {}),  # no custom tools, writing ones least of all
         ("calculate", {}),
         ("browser_open", {"url": "https://example.com/"}),
         ("write_knowledge_file", {"path": "memories/a.md"}),
-    ):
-        out = await policy.pre_tool_use(sub | {"toolName": tool, "toolArgs": args}, {})
-        assert out["permissionDecision"] == "deny", tool
+    ]
+    # The runtime marks such a call with the sub-agent's id, or delivers it under the sub-agent's own session id.
+    for sub in ({"agentId": "a1"}, {"sessionId": "s1.sub"}):
+        for tool, args in calls:
+            out = await policy.pre_tool_use(sub | {"toolName": tool, "toolArgs": args}, ctx)
+            assert out["permissionDecision"] == "deny", (sub, tool)
     assert "browser_open" in policy.denials[-2]
     # Its own tools are still checked as usual: reads stay inside the knowledge base.
-    out = await policy.pre_tool_use(sub | {"toolName": "view", "toolArgs": {"path": "INDEX.md"}}, {})
+    out = await policy.pre_tool_use({"agentId": "a1", "toolName": "view", "toolArgs": {"path": "INDEX.md"}}, ctx)
     assert out["modifiedArgs"]["path"] == str((kb / "INDEX.md").resolve())
     assert set(RESEARCH_AGENT_TOOLS) == {"view", "grep", "rg", "glob", "web_fetch"}
+    # The session's own calls are not mistaken for a sub-agent's: same session id, no agent id.
+    assert await policy.pre_tool_use({"sessionId": "s1", "toolName": "calculate", "toolArgs": {}}, ctx) is None
 
 
 async def test_request_approval_fails_closed(policy):
@@ -372,6 +387,24 @@ def test_chat_sessions_require_approval_but_automations_do_not(ctx):
     assert not auto_policy.require_approval and not auto_policy.allow_write
     # Sub-agents are for the chat: an automation waits for the first idle event, which a sub-agent would also raise.
     assert chat_policy.allow_subagents and not auto_policy.allow_subagents
+
+
+def test_only_chat_sessions_get_the_research_agent(ctx):
+    from life_helper.copilot_integration.manager import CopilotManager
+
+    def options(manager, allow_write):
+        specs, policy = manager.build_session_tools(allow_write=allow_write)
+        return manager.session_options(model="auto", policy=policy, specs=specs, allow_write=allow_write)
+
+    chat = options(CopilotManager(ctx, ctx.settings.copilot_chat_dir), True)
+    assert [a["name"] for a in chat["custom_agents"]] == ["researcher"]
+    # The sub-agents' own tokens stay out of the answer; their tool calls still arrive.
+    assert chat["include_sub_agent_streaming_events"] is False
+    assert "builtin:task" in chat["available_tools"].to_list()
+
+    auto = options(CopilotManager(ctx, ctx.settings.copilot_automation_dir, automation=True), False)
+    assert "custom_agents" not in auto and "include_sub_agent_streaming_events" not in auto
+    assert "builtin:task" not in auto["available_tools"].to_list()
 
 
 def test_connector_filter(ctx, settings):

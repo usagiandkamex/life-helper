@@ -139,7 +139,7 @@ export function applyEvent(
 export function fromHistory(messages: HistoryMessage[]): Item[] {
   return messages.map((m) =>
     m.role === 'tool'
-      ? { kind: 'tool', name: m.name, args: m.args, success: true }
+      ? { kind: 'tool', name: m.name, args: m.args, success: true, subagent: m.subagent }
       : m.role === 'user'
         ? { kind: 'user', text: m.content, attachments: m.attachments }
         : { kind: 'assistant', text: m.content },

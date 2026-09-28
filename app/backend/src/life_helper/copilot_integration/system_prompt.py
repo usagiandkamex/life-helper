@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from .agents import MAX_TASKS_PER_TURN
+from .agents import MAX_TASKS_PER_ANSWER
 
 JST = ZoneInfo("Asia/Tokyo")
 PROFILE_LIMIT = 6000
@@ -79,7 +79,7 @@ BROWSER_RULES = """\
 
 PARALLEL_RULES = """\
 # 並行して進める
-- 1 つの目的のためにいくつものことを調べるとき（別々のキーワード、別々のページ、別々の自治体や銘柄など）は、1 つずつ順番に呼ばず、1 回の回答で必要なツール呼び出しをまとめて出してください。まとめて出したものは同時に実行されるので、待ち時間が短くなります。
+- 1 つの目的のためにいくつものことを調べるとき（別々のキーワード、別々のページ、別々の自治体や銘柄など）は、1 つずつ順番に呼ばず、1 回の回答で必要なツール呼び出しをまとめて出してください。まとめて出したものは前の結果を待たずに進むので、待ち時間が短くなります。
 - まとめてよいのは、互いの結果を必要としない調べものだけです。前の結果を見てから決めることは、これまでどおり順番に行ってください。
 - 知識ベースへの書き込み（`write_knowledge_file` / `edit_knowledge_file`）は 1 回に 1 つずつにしてください。
 - 同じ調べものを何度も繰り返さないでください。"""
@@ -130,7 +130,7 @@ def build_system_message(
         parts.append(BROWSER_RULES)
     parts.append(PARALLEL_RULES)
     if subagents:
-        parts.append(SUBAGENT_RULES.format(max_tasks=MAX_TASKS_PER_TURN))
+        parts.append(SUBAGENT_RULES.format(max_tasks=MAX_TASKS_PER_ANSWER))
     if automation:
         readonly = (
             ""

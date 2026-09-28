@@ -129,6 +129,7 @@ class FakeManager:
         self.no_token = False
         self.approver = None
         self.scope = None
+        self.answers: list = []
 
     async def open_session(self, session_id, *, model, resume, allow_write=True, extra_tools=None, write_scope=None):
         if self.no_token:
@@ -138,7 +139,9 @@ class FakeManager:
         self.scope = write_scope
         if write_scope and write_scope.on_write:
             write_scope.on_write("memories/a.md", "+ fact", None)
-        return ActiveSession(session=self.session, policy=None, model=model)  # type: ignore[arg-type]
+        # The turn only asks the policy for the write scope and for the per-answer sub-agent budget.
+        policy = SimpleNamespace(write_scope=write_scope, begin_answer=lambda: self.answers.append(session_id))
+        return ActiveSession(session=self.session, policy=policy, model=model)  # type: ignore[arg-type]
 
     async def delete_session(self, session_id):
         self.deleted.append(session_id)
@@ -1078,6 +1081,8 @@ def test_later_messages_wait_for_the_answer_and_can_be_cancelled(client, ctx, mo
     ctx.turns._loop.call_soon_threadsafe(session.gate.set)
     wait_turn_done(ctx, turn_id)
     assert session.prompts == ["最初の質問", "次の質問"] and session.modes == [None, None]
+    # Every answer starts with its own budget of research sub-agents, the 「あとで送信」 one included.
+    assert len(ctx.turns.manager.answers) == 2
     assert client.delete(f"{queue}/{first['message_id']}", headers=h).json() == {"removed": False}
 
     events = [e for _, e in parse_sse(client.get(f"/api/turns/{turn_id}/events").text)]

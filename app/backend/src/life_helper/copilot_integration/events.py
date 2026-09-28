@@ -142,11 +142,12 @@ def history_from_events(events: list[Any], masker: SecretMasker) -> list[dict]:
             case AssistantMessageData() if not sub and not data.parent_tool_call_id and data.content:
                 messages.append({"role": "assistant", "content": masker.mask_text(data.content)})
             case ToolExecutionStartData():
-                messages.append(
-                    {
-                        "role": "tool",
-                        "name": data.tool_name,
-                        "args": _preview(data.arguments, ARG_PREVIEW_LIMIT, masker),
-                    }
-                )
+                call = {
+                    "role": "tool",
+                    "name": data.tool_name,
+                    "args": _preview(data.arguments, ARG_PREVIEW_LIMIT, masker),
+                }
+                if sub:
+                    call["subagent"] = True
+                messages.append(call)
     return messages
