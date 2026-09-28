@@ -63,6 +63,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   const [message, setMessage] = useState('')
   const detailRef = useRef<HTMLDivElement>(null)
   const selectedRunIdRef = useRef<string | null>(null)
+  const selectionGenerationRef = useRef(0)
   const openRunRequestRef = useRef(0)
   const interruptedWatchRef = useRef<{ runId: string; since: number } | null>(null)
 
@@ -76,6 +77,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   const openRun = useCallback(
     async (automationId: string, runId: string, select = true) => {
       if (select) {
+        selectionGenerationRef.current += 1
         if (selectedRunIdRef.current !== runId) interruptedWatchRef.current = null
         selectedRunIdRef.current = runId
       } else if (selectedRunIdRef.current !== runId) {
@@ -190,7 +192,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   }
 
   const runNow = async (a: Automation) => {
-    const selectedRunId = selectedRunIdRef.current
+    const selectionGeneration = selectionGenerationRef.current
     const startedRun = await api<{ started: boolean; run_id: string }>(`/api/automations/${a.id}/run`, {
       method: 'POST',
     })
@@ -201,7 +203,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
       const record = await api<RunRecord>(`/api/automations/${a.id}/runs/${startedRun.run_id}`).catch(() => null)
       if (record) {
         await load()
-        if (selectedRunIdRef.current === selectedRunId) {
+        if (selectionGenerationRef.current === selectionGeneration) {
           openRun(a.id, startedRun.run_id).catch(() => undefined)
         }
       } else if (Date.now() - started < 60_000) {
