@@ -23,7 +23,7 @@ from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecis
 
 from ..netguard import outbound_rejection, url_rejection
 from ..security import SecretMasker
-from .agents import MAX_TASKS_PER_TURN, RESEARCH_AGENT
+from .agents import MAX_TASKS_PER_TURN, RESEARCH_AGENT, RESEARCH_AGENT_TOOLS
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,8 @@ READ_TOOLS = ("view", "grep", "rg", "glob")
 # ``task`` runs one sub-agent; the runtime names its arguments differently per model family.
 TASK_TOOL = "task"
 AGENT_TYPE_KEYS = ("agent_type", "agentType", "subagent_type", "subagentType")
+# Set by the runtime on a hook call made by a sub-agent; the session's own calls have none.
+AGENT_ID_KEYS = ("agentId", "agent_id")
 # Only the foreground mode is allowed: a background sub-agent would outlive the answer (中断 and timeouts included).
 SYNC_MODE = "sync"
 # Dropped from a task call: the sub-agent follows the session's model, so one answer cannot run up the cost.
@@ -189,6 +191,10 @@ class ToolPolicy:
 
     async def pre_tool_use(self, hook_input: dict, _ctx: dict) -> dict | None:
         tool = hook_input.get("toolName", "")
+        # The research sub-agent is read-only: when the runtime says which agent is calling, hold it to its tools
+        # here too, so a sub-agent can never reach the browser, the connectors or a knowledge-base write.
+        if any(hook_input.get(key) for key in AGENT_ID_KEYS) and tool not in RESEARCH_AGENT_TOOLS:
+            return self._hook_deny(f"調査エージェントはこのツールを使えません: {tool}")
         if tool in self.custom_tools:
             if tool in self.write_custom_tools and not self.allow_write:
                 return self._hook_deny(f"このオートメーションでは書き込み系ツールは使えません: {tool}")

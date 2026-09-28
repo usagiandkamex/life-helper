@@ -198,6 +198,28 @@ async def test_task_tool_only_starts_the_research_agent(policy):
     assert await task(agent_type=RESEARCH_AGENT, prompt="x") is None
 
 
+async def test_sub_agent_calls_are_held_to_the_research_tools(policy, kb):
+    """When the runtime tells the hook which agent is calling, the sub-agent keeps only its read-only tools."""
+    from life_helper.copilot_integration.agents import RESEARCH_AGENT_TOOLS
+
+    policy.allow_subagents = True
+    sub = {"agentId": "a1"}
+    for tool, args in (
+        ("task", {"agent_type": "researcher", "prompt": "x"}),  # no sub-agents of its own
+        ("update_holding", {}),  # no custom tools, writing ones least of all
+        ("calculate", {}),
+        ("browser_open", {"url": "https://example.com/"}),
+        ("write_knowledge_file", {"path": "memories/a.md"}),
+    ):
+        out = await policy.pre_tool_use(sub | {"toolName": tool, "toolArgs": args}, {})
+        assert out["permissionDecision"] == "deny", tool
+    assert "browser_open" in policy.denials[-2]
+    # Its own tools are still checked as usual: reads stay inside the knowledge base.
+    out = await policy.pre_tool_use(sub | {"toolName": "view", "toolArgs": {"path": "INDEX.md"}}, {})
+    assert out["modifiedArgs"]["path"] == str((kb / "INDEX.md").resolve())
+    assert set(RESEARCH_AGENT_TOOLS) == {"view", "grep", "rg", "glob", "web_fetch"}
+
+
 async def test_request_approval_fails_closed(policy):
     from life_helper.copilot_integration.policy import Approval, WriteScope
 
