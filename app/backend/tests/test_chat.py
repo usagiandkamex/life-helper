@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -192,10 +192,14 @@ def wait_turn_done(ctx, turn_id: str) -> None:
 
 
 def without_time(entry: dict) -> dict:
-    """The message (or event) without the time the chat shows on it, after checking it is one the browser can read."""
+    """The message (or event) without the time the chat shows on it, after checking it is one the browser can read:
+    a time zone is needed to show it in JST, and a fresh time to tell it apart from a leftover one."""
     rest = dict(entry)
     at = rest.pop("at", None)
-    assert isinstance(at, str) and datetime.fromisoformat(at).tzinfo is not None, f"no usable time: {at!r}"
+    assert isinstance(at, str), f"no time: {at!r}"
+    posted = datetime.fromisoformat(at)
+    assert posted.tzinfo is not None, f"time without a zone: {at!r}"
+    assert abs(datetime.now(UTC) - posted) < timedelta(minutes=5), f"time is not the one just made: {at!r}"
     return rest
 
 
