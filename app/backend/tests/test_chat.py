@@ -247,6 +247,11 @@ def test_sub_agent_events_do_not_end_or_answer_the_turn(client, ctx):
 
     history = client.get(f"/api/conversations/{conv['id']}/messages").json()["messages"]
     assert [m["role"] for m in history] == ["user", "tool", "tool", "assistant"]
+    # The replayed tool calls keep their sub-agent marker, so the 「調査 ›」 label survives a reopen.
+    assert [(m["name"], m.get("subagent")) for m in history if m["role"] == "tool"] == [
+        ("task", None),
+        ("web_fetch", True),
+    ]
     assert [m["content"] for m in history if m["role"] != "tool"] == ["質問", "回答"]
 
     csrf = sign_in(client, ctx)

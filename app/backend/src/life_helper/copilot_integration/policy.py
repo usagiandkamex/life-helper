@@ -247,9 +247,15 @@ class ToolPolicy:
         if agent != RESEARCH_AGENT:
             return self._hook_deny(f"task で使えるのは {RESEARCH_AGENT} だけです（指定: {agent or 'なし'}）")
         mode = args.get("mode")
-        # Fail closed: only the foreground mode, under whichever argument the runtime would read it.
+        # Fail closed: only the foreground mode, under whichever argument the runtime would read it. The background
+        # string is looked for only under mode-like keys (``mode``/``agentMode``/…), so a prompt that merely says
+        # "background" is not mistaken for a mode.
         background = mode is not None and (not isinstance(mode, str) or mode.strip().lower() != SYNC_MODE)
-        background = background or any(isinstance(v, str) and v.strip().lower() == BACKGROUND for v in args.values())
+        background = background or any(
+            isinstance(v, str) and v.strip().lower() == BACKGROUND
+            for k, v in args.items()
+            if k.lower().endswith("mode")
+        )
         background = background or any(args.get(key) for key in BACKGROUND_KEYS)
         if background:
             return self._hook_deny(
