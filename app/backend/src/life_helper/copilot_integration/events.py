@@ -73,7 +73,7 @@ def subagent_event(event: Any) -> bool:
     Sub-agents share the session's event stream and are told apart by ``agent_id`` on the envelope; the session's
     own events do not have one. Their tokens are not the answer and their idle/error do not end the turn.
     """
-    return getattr(event, "agent_id", None) is not None
+    return bool(getattr(event, "agent_id", None))
 
 
 def map_event(event: Any, masker: SecretMasker) -> dict | None:
