@@ -66,15 +66,15 @@ def build_tools(ctx: AppContext) -> list[ToolSpec]:
             "web_fetch で本文が取れないページに使う。開けるのは外部の http / https サイトだけ。"
         ),
     )
-    async def browser_open(params: OpenParams) -> dict:
-        return await session.run(lambda: session.open(params.url, params.wait_for_selector))
+    async def browser_open(params: OpenParams) -> str:
+        return await session.run_json(lambda: session.open(params.url, params.wait_for_selector))
 
     @define_tool(
         name="browser_read",
         description="browser_open で開いているページの本文・リンク・表・入力欄を読み直す。selector で範囲を絞れる。",
     )
-    async def browser_read(params: ReadParams) -> dict:
-        return await session.run(lambda: session.read(params.selector))
+    async def browser_read(params: ReadParams) -> str:
+        return await session.run_json(lambda: session.read(params.selector))
 
     @define_tool(
         name="browser_click",
@@ -83,8 +83,8 @@ def build_tools(ctx: AppContext) -> list[ToolSpec]:
             "selector か text のどちらかを指定する。"
         ),
     )
-    async def browser_click(params: ClickParams) -> dict:
-        return await session.run(lambda: session.click(params.selector, params.text))
+    async def browser_click(params: ClickParams) -> str:
+        return await session.run_json(lambda: session.click(params.selector, params.text))
 
     @define_tool(
         name="browser_fill",
@@ -93,22 +93,22 @@ def build_tools(ctx: AppContext) -> list[ToolSpec]:
             "パスワード・カード情報の欄、ログインや会員登録のフォーム、個人情報や機微情報の入力はできない。"
         ),
     )
-    async def browser_fill(params: FillParams) -> dict:
-        return await session.run(lambda: session.fill(params.selector, params.value, params.submit))
+    async def browser_fill(params: FillParams) -> str:
+        return await session.run_json(lambda: session.fill(params.selector, params.value, params.submit))
 
     @define_tool(
         name="browser_scroll",
         description="開いているページを下へスクロールして続きを読み込み、内容を返す。",
     )
-    async def browser_scroll(params: ScrollParams) -> dict:
-        return await session.run(lambda: session.scroll(params.times, params.wait_for_selector))
+    async def browser_scroll(params: ScrollParams) -> str:
+        return await session.run_json(lambda: session.scroll(params.times, params.wait_for_selector))
 
     @define_tool(
         name="browser_screenshot",
         description="開いているページのスクリーンショットを撮り、利用者のチャット画面に表示する（画像はあなたには渡らない）。",
     )
-    async def browser_screenshot(params: ScreenshotParams) -> dict:
-        return await session.run(lambda: session.screenshot(params.full_page))
+    async def browser_screenshot(params: ScreenshotParams) -> str:
+        return await session.run_json(lambda: session.screenshot(params.full_page))
 
     tools = (browser_open, browser_read, browser_click, browser_fill, browser_scroll, browser_screenshot)
     return [ToolSpec(tool, connector=BROWSER_CONNECTOR, release=session.close) for tool in tools]

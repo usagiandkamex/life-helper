@@ -330,6 +330,9 @@ async def test_pre_tool_use_web_fetch_checks_dns(policy, fake_dns):
 async def test_post_tool_use_masks_secrets(policy):
     out = await policy.post_tool_use({"toolResult": {"text": "key=SUPERSECRETKEY"}}, {})
     assert out == {"modifiedResult": {"text": "key=***"}}
+    # The browser tools answer with JSON text, so a secret in a string result is masked as well.
+    text = await policy.post_tool_use({"toolResult": '{"text": "key=SUPERSECRETKEY"}'}, {})
+    assert text == {"modifiedResult": '{"text": "key=***"}'}
     assert await policy.post_tool_use({"toolResult": "clean"}, {}) is None
 
 

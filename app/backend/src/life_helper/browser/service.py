@@ -42,15 +42,17 @@ VIEWPORT = {"width": 1280, "height": 800}
 MAX_SCREENSHOT_HEIGHT = 4000
 SCREENSHOT_RETENTION_SECONDS = 3 * 24 * 60 * 60
 MAX_SCREENSHOTS = 200
-MAX_RESULT_BYTES = 64 * 1024
+# The result is handed to the model as UTF-8 JSON (``result_json``), so this budget is spent on the characters the
+# page actually shows: a full ``maxText`` Japanese body (about 90 KB) still leaves room for links and tables.
+MAX_RESULT_BYTES = 128 * 1024
 LIMITS = {
-    "maxText": 15_000,
-    "maxLinks": 60,
-    "maxTables": 5,
-    "maxRows": 30,
-    "maxCols": 12,
+    "maxText": 30_000,
+    "maxLinks": 120,
+    "maxTables": 10,
+    "maxRows": 60,
+    "maxCols": 16,
     "maxCell": 200,
-    "maxInputs": 30,
+    "maxInputs": 60,
     "maxUrl": 2048,
     "maxTitle": 500,
     "maxSelector": 1024,
@@ -165,6 +167,19 @@ class BrowserError(RuntimeError):
     """A browser failure with a message that is safe to show to the model and the user."""
 
 
+def result_json(result: dict) -> str:
+    """The exact text a browser tool hands to the model: compact JSON with the page's characters left as they are.
+
+    The SDK JSON-serializes a dict result with ``ensure_ascii`` on, which turns every Japanese character into a
+    six-character ``\\uXXXX`` escape: the model would then receive about a sixth of the page for the same budget.
+    Serializing here instead keeps the text readable (in the chat's tool card too) and is what ``limit_result``
+    measures. A page may hold a lone surrogate, which is not encodable as UTF-8, so it is escaped back into JSON's
+    own ``\\uXXXX`` form and the result is always valid UTF-8.
+    """
+    text = json.dumps(result, ensure_ascii=False)
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
 def limit_result(result: dict) -> dict:
     """Bound known fields first, then trim the serialized result, including JSON escaping and truncation flags."""
     truncated = False
@@ -202,9 +217,9 @@ def limit_result(result: dict) -> dict:
     if truncated:
         output["result_truncated"] = True
 
-    # ASCII-escaped JSON is also an upper bound for UTF-8 JSON (including emoji, controls and lone surrogates).
+    # Measured on the serialization the model is given, including JSON escaping.
     def size() -> int:
-        return len(json.dumps(output).encode("utf-8"))
+        return len(result_json(output).encode("utf-8"))
 
     if size() > MAX_RESULT_BYTES:
         output["result_truncated"] = True
@@ -377,6 +392,10 @@ class BrowserSession:
         except PlaywrightError as exc:
             result = {"error": _describe(exc)}
         return limit_result(result)
+
+    async def run_json(self, action: Callable[[], Awaitable[dict]]) -> str:
+        """``run`` as the text the tools return: the bounded result, serialized as UTF-8 JSON (``result_json``)."""
+        return result_json(await self.run(action))
 
     # -- page lifecycle ----------------------------------------------------------------------------------
 

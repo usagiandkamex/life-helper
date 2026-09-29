@@ -22,6 +22,7 @@ from life_helper.browser.service import (
     BrowserSession,
     limit_result,
     prune_screenshots,
+    result_json,
     save_screenshot,
     screenshot_dir,
 )
@@ -347,7 +348,7 @@ async def test_active_session_release_runs_every_releaser():
 
 @pytest.mark.parametrize("character", ["x", "漢", "😀", '\x00"\\', "\ud800"])
 async def test_browser_results_have_a_serialized_byte_limit(tmp_path, character):
-    value = character * 20_000
+    value = character * (LIMITS["maxText"] * 2)
     raw = {
         "url": "https://example.com/" + value,
         "title": value,
@@ -363,10 +364,11 @@ async def test_browser_results_have_a_serialized_byte_limit(tmp_path, character)
     async def action():
         return raw
 
-    result = await BrowserSession(NoBrowser(), MASKER, tmp_path).run(action)
-    assert len(json.dumps(result).encode()) <= MAX_RESULT_BYTES
-    if character != "\ud800":
-        assert len(json.dumps(result, ensure_ascii=False).encode()) <= MAX_RESULT_BYTES
+    session = BrowserSession(NoBrowser(), MASKER, tmp_path)
+    result = await session.run(action)
+    # The limit applies to the text the tools hand to the model, which is valid UTF-8 even for a lone surrogate.
+    assert len(result_json(result).encode("utf-8")) <= MAX_RESULT_BYTES
+    assert json.loads(await session.run_json(action)) == result
     assert result["result_truncated"] is True
     assert result["text_truncated"] is True
     assert result["status"] == 200 and "unexpected" not in result
@@ -376,6 +378,29 @@ async def test_browser_results_have_a_serialized_byte_limit(tmp_path, character)
     assert all(len(link["url"]) <= LIMITS["maxUrl"] and len(link["text"]) <= 120 for link in result["links"])
     assert len(result["inputs"]) <= LIMITS["maxInputs"]
     assert all(len(item["selector"]) <= LIMITS["maxSelector"] for item in result["inputs"])
+
+
+def test_results_keep_japanese_text_instead_of_ascii_escapes():
+    """The SDK would escape a dict result as ``\\uXXXX`` (six characters per character): the tools serialize it."""
+    page = {"url": "https://example.com/", "title": "ふるさと納税", "text": "上限の目安", "text_truncated": False}
+    payload = result_json(limit_result(page))
+    assert "ふるさと納税" in payload and "\\u" not in payload
+    assert json.loads(payload) == page
+    # A page may hold an unpaired surrogate: it is escaped so the payload stays encodable.
+    assert result_json({"title": "\ud800"}).encode("utf-8") == b'{"title": "\\ud800"}'
+
+
+def test_a_japanese_page_now_fits_without_losing_its_links_and_tables():
+    page = {
+        "url": "https://example.com/",
+        "title": "ふるさと納税",
+        "text": "あ" * LIMITS["maxText"],
+        "text_truncated": False,
+        "links": [{"text": f"リンク{i}", "url": f"https://example.com/{i}"} for i in range(LIMITS["maxLinks"])],
+        "tables": [{"caption": "控除", "rows": [["収入", "控除額"]] * LIMITS["maxRows"]}] * LIMITS["maxTables"],
+        "inputs": [{"selector": "#q", "tag": "input", "type": "search", "label": "検索"}],
+    }
+    assert limit_result(page) == page
 
 
 def test_result_limits_preserve_small_results_and_reject_unexpected_shapes():
@@ -400,7 +425,7 @@ async def test_screenshot_metadata_and_errors_are_also_bounded(tmp_path):
         return {"url": "x" * 100_000, "title": "y" * 100_000, "screenshot": {"id": SHOT_ID}, "summary": "撮影しました"}
 
     shot = await session.run(screenshot)
-    assert len(json.dumps(shot).encode()) <= MAX_RESULT_BYTES
+    assert len(result_json(shot).encode("utf-8")) <= MAX_RESULT_BYTES
     assert shot["screenshot"]["id"] == SHOT_ID and shot["result_truncated"]
 
     async def fail():
@@ -580,7 +605,7 @@ async def test_large_page_attributes_are_bounded_before_leaving_chromium(tmp_pat
         assert data["links"] == [{"text": "next", "url": "https://site.test/next"}]
         assert [item["selector"] for item in data["inputs"]] == ["#q"]
         assert data["result_truncated"] and result["result_truncated"]
-        assert len(json.dumps(result).encode()) <= MAX_RESULT_BYTES
+        assert len(result_json(result).encode("utf-8")) <= MAX_RESULT_BYTES
     finally:
         await session.close()
 
