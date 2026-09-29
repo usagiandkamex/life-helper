@@ -383,6 +383,25 @@ async def test_browser_results_have_a_serialized_byte_limit(tmp_path, character)
     assert all(len(item["selector"]) <= LIMITS["maxSelector"] for item in result["inputs"])
 
 
+async def test_tool_text_masks_secrets_that_json_would_escape(tmp_path):
+    """The hook sees JSON text: a newline or quote in a secret is escaped there, so masking happens before."""
+    key = "-----BEGIN KEY-----\nabcdef\n-----END KEY-----"
+    quoted = 'pass"word"123'
+    masker = SecretMasker([key, quoted])
+
+    async def action():
+        return {"url": "https://example.com/", "title": quoted, "text": "key: " + key, "text_truncated": False}
+
+    payload = await BrowserSession(NoBrowser(), masker, tmp_path).run_json(action)
+    assert json.loads(payload) == {
+        "url": "https://example.com/",
+        "title": "***",
+        "text": "key: ***",
+        "text_truncated": False,
+    }
+    assert "abcdef" not in payload and "word" not in payload
+
+
 def test_results_keep_japanese_text_instead_of_ascii_escapes():
     """The SDK would escape a dict result as ``\\uXXXX`` (six characters per character): the tools serialize it."""
     page = {"url": "https://example.com/", "title": "ふるさと納税", "text": "上限の目安", "text_truncated": False}

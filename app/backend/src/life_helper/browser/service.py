@@ -431,8 +431,13 @@ class BrowserSession:
         return limit_result(result)
 
     async def run_json(self, action: Callable[[], Awaitable[dict]]) -> str:
-        """``run`` as the text the tools return: the bounded result, serialized as UTF-8 JSON (``result_json``)."""
-        return result_json(await self.run(action))
+        """``run`` as the text the tools return: the bounded result, serialized as UTF-8 JSON (``result_json``).
+
+        Secrets are masked before serializing: JSON escapes a multiline key's newlines or a quote, so the serialized
+        text no longer holds the raw value for the post-tool hook to find. Masking only shortens strings, so the
+        result stays within its byte limit.
+        """
+        return result_json(self._masker.mask(await self.run(action)))
 
     # -- page lifecycle ----------------------------------------------------------------------------------
 
