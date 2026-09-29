@@ -42,15 +42,19 @@ VIEWPORT = {"width": 1280, "height": 800}
 MAX_SCREENSHOT_HEIGHT = 4000
 SCREENSHOT_RETENTION_SECONDS = 3 * 24 * 60 * 60
 MAX_SCREENSHOTS = 200
-MAX_RESULT_BYTES = 64 * 1024
+# The result is handed to the model as UTF-8 JSON (``result_json``), so this budget is spent on the characters the
+# page actually shows: a full ``maxText`` Japanese body (about 90 KB) still leaves room for links and tables.
+MAX_RESULT_BYTES = 128 * 1024
 LIMITS = {
-    "maxText": 15_000,
-    "maxLinks": 60,
-    "maxTables": 5,
-    "maxRows": 30,
-    "maxCols": 12,
+    "maxText": 30_000,
+    "maxLinks": 120,
+    "maxTables": 10,
+    "maxRows": 60,
+    "maxCols": 16,
     "maxCell": 200,
-    "maxInputs": 30,
+    "maxInputs": 60,
+    "maxImageLabels": 40,
+    "maxLabel": 200,
     "maxUrl": 2048,
     "maxTitle": 500,
     "maxSelector": 1024,
@@ -64,6 +68,8 @@ RESULT_SCHEMA = {
     "text_truncated": bool,
     "result_truncated": bool,
     "links": (LIMITS["maxLinks"], {"text": 120, "url": LIMITS["maxUrl"]}),
+    # Only the words a page gives its images (alt / aria-label / title): the pictures themselves are never read.
+    "image_labels": (LIMITS["maxImageLabels"], LIMITS["maxLabel"]),
     "tables": (
         LIMITS["maxTables"],
         {"caption": 200, "rows": (LIMITS["maxRows"], (LIMITS["maxCols"], LIMITS["maxCell"]))},
@@ -96,6 +102,22 @@ SNAPSHOT_JS = """
   const root = args.selector ? document.querySelector(args.selector) : document.body;
   if (!root) return null;
   const clean = (s) => (s || '').replace(/\\s+/g, ' ').trim();
+  const pick = (values) => {
+    for (const value of values) { const text = clean(value); if (text) return text; }
+    return '';
+  };
+  // An image is only ever read through the words the page itself gives it, never through its pixels.
+  const IMAGES = 'img, [role="img"]';
+  // aria-label first: ARIA's name overrides the alt text when the page gives both.
+  const labelOf = (el) => pick([el.getAttribute('aria-label'), el.getAttribute('alt'), el.getAttribute('title')]);
+  const shown = (el) => { const box = el.getBoundingClientRect(); return box.width !== 0 || box.height !== 0; };
+  const innerImageLabel = (el) => {
+    for (const child of el.querySelectorAll(IMAGES)) {
+      const text = labelOf(child);
+      if (text && shown(child)) return text;
+    }
+    return '';
+  };
   const full = (root.innerText || '').replace(/[ \\t]+\\n/g, '\\n').replace(/\\n{3,}/g, '\\n\\n').trim();
   const title = document.title || '';
   let truncated = title.length > args.maxTitle;
@@ -105,10 +127,26 @@ SNAPSHOT_JS = """
     if (links.length > args.maxLinks) break;
     const url = a.href;
     if (url.length > args.maxUrl) { truncated = true; continue; }
-    const text = clean(a.innerText || a.getAttribute('aria-label') || a.title).slice(0, 120);
-    if (!/^https?:/i.test(url) || !text || seen.has(url)) continue;
+    if (!/^https?:/i.test(url) || seen.has(url)) continue;
+    // An anchor holding only an image has no text of its own: its image's label is what the page shows.
+    let text = pick([a.innerText, a.getAttribute('aria-label'), a.title]);
+    if (!text) text = innerImageLabel(a);
+    if (!text) continue;
     seen.add(url);
-    links.push({text, url});
+    links.push({text: text.slice(0, 120), url});
+  }
+  const imageLabels = [];
+  const labelled = new Set();
+  for (const el of root.querySelectorAll(IMAGES)) {
+    if (imageLabels.length > args.maxImageLabels) break;
+    const text = labelOf(el);
+    if (!text || !shown(el)) continue;
+    if (text.length > args.maxLabel) truncated = true;
+    // Cut first, then de-duplicate: two long labels may only differ past the cut.
+    const label = text.slice(0, args.maxLabel);
+    if (labelled.has(label)) continue;
+    labelled.add(label);
+    imageLabels.push(label);
   }
   const tables = [];
   for (const t of root.querySelectorAll('table')) {
@@ -141,7 +179,8 @@ SNAPSHOT_JS = """
       label: clean(label).slice(0, 80)});
   }
   return {title: title.slice(0, args.maxTitle), text: full.slice(0, args.maxText),
-    text_truncated: full.length > args.maxText, result_truncated: truncated, links, tables, inputs};
+    text_truncated: full.length > args.maxText, result_truncated: truncated, links, image_labels: imageLabels,
+    tables, inputs};
 }
 """
 
@@ -163,6 +202,19 @@ MAX_CHECKED_ELEMENTS = 50
 
 class BrowserError(RuntimeError):
     """A browser failure with a message that is safe to show to the model and the user."""
+
+
+def result_json(result: dict) -> str:
+    """The exact text a browser tool hands to the model: compact JSON with the page's characters left as they are.
+
+    The SDK JSON-serializes a dict result with ``ensure_ascii`` on, which turns every Japanese character into a
+    six-character ``\\uXXXX`` escape: the model would then receive about a sixth of the page for the same budget.
+    Serializing here instead keeps the text readable (in the chat's tool card too) and is what ``limit_result``
+    measures. A page may hold a lone surrogate, which is not encodable as UTF-8, so it is escaped back into JSON's
+    own ``\\uXXXX`` form and the result is always valid UTF-8.
+    """
+    text = json.dumps(result, ensure_ascii=False)
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
 
 
 def limit_result(result: dict) -> dict:
@@ -202,13 +254,13 @@ def limit_result(result: dict) -> dict:
     if truncated:
         output["result_truncated"] = True
 
-    # ASCII-escaped JSON is also an upper bound for UTF-8 JSON (including emoji, controls and lone surrogates).
+    # Measured on the serialization the model is given, including JSON escaping.
     def size() -> int:
-        return len(json.dumps(output).encode("utf-8"))
+        return len(result_json(output).encode("utf-8"))
 
     if size() > MAX_RESULT_BYTES:
         output["result_truncated"] = True
-        for key in ("tables", "links", "inputs", "text"):
+        for key in ("image_labels", "tables", "links", "inputs", "text"):
             while output.get(key) and size() > MAX_RESULT_BYTES:
                 output[key] = output[key][: len(output[key]) // 2]
                 if key == "text":
@@ -377,6 +429,15 @@ class BrowserSession:
         except PlaywrightError as exc:
             result = {"error": _describe(exc)}
         return limit_result(result)
+
+    async def run_json(self, action: Callable[[], Awaitable[dict]]) -> str:
+        """``run`` as the text the tools return: the bounded result, serialized as UTF-8 JSON (``result_json``).
+
+        Secrets are masked before serializing: JSON escapes a multiline key's newlines or a quote, so the serialized
+        text no longer holds the raw value for the post-tool hook to find. Masking only shortens strings, so the
+        result stays within its byte limit.
+        """
+        return result_json(self._masker.mask(await self.run(action)))
 
     # -- page lifecycle ----------------------------------------------------------------------------------
 

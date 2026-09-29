@@ -330,6 +330,9 @@ async def test_pre_tool_use_web_fetch_checks_dns(policy, fake_dns):
 async def test_post_tool_use_masks_secrets(policy):
     out = await policy.post_tool_use({"toolResult": {"text": "key=SUPERSECRETKEY"}}, {})
     assert out == {"modifiedResult": {"text": "key=***"}}
+    # The browser tools answer with JSON text, so a secret in a string result is masked as well.
+    text = await policy.post_tool_use({"toolResult": '{"text": "key=SUPERSECRETKEY"}'}, {})
+    assert text == {"modifiedResult": '{"text": "key=***"}'}
     assert await policy.post_tool_use({"toolResult": "clean"}, {}) is None
 
 
@@ -345,6 +348,8 @@ def test_system_message_contains_kb_profile_and_rules(kb):
     # INDEX.md is model-writable, so its content must not be promoted into the system message.
     assert "# idx" not in msg and "INDEX.md" in msg
     assert "目安" in msg and "個別銘柄" in msg
+    # web_fetch は先頭で切れることがあるので、続きの読み方を伝える（issue #65）。
+    assert "max_length" in msg and "start_index" in msg
     assert "write_knowledge_file" in msg and "edit_knowledge_file" in msg
     assert "report_result" not in msg and "承認" not in msg
     chat = build_system_message(kb, approval=True)
@@ -381,6 +386,8 @@ def test_research_agent_is_read_only(kb):
     assert agent["infer"] is False
     assert kb.resolve().as_posix() in agent["prompt"]
     assert "外部の信頼できないデータ" in agent["prompt"]
+    # Its only way to the internet is web_fetch, so it is told how to read past a cut-off result (issue #65).
+    assert "max_length" in agent["prompt"] and "start_index" in agent["prompt"]
 
 
 def test_chat_sessions_require_approval_but_automations_do_not(ctx):
