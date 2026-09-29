@@ -685,7 +685,9 @@ IMAGE_PAGE = """<!doctype html><html lang="ja"><head><meta charset="utf-8"><titl
 <figure><img src="{pixel}" width="600" height="300" alt=" 令和8年度の歳出グラフ "><figcaption>図1</figcaption></figure>
 <img src="{pixel}" width="16" height="16" alt="PDF">
 <img src="{pixel}" alt="   ">
+<img src="{pixel}" alt="代替テキスト" aria-label="ARIA の説明">
 <img src="{pixel}" alt="令和8年度の歳出グラフ">
+<img src="{pixel}" alt="{long}2">
 <div style="display:none"><img src="{pixel}" width="600" height="300" alt="隠れた図"></div>
 <span role="img" aria-label="晴れ" style="display:inline-block;width:20px;height:20px"></span>
 <a href="https://site.test/next"><img src="{pixel}" alt="次のページへ"></a>
@@ -696,6 +698,7 @@ IMAGE_PAGE = """<!doctype html><html lang="ja"><head><meta charset="utf-8"><titl
 @pytest.mark.skipif(not _chromium_installed(), reason="Chromium for Playwright is not installed")
 async def test_images_are_read_through_the_words_the_page_gives_them(tmp_path, monkeypatch):
     long_label = "長" * (LIMITS["maxLabel"] + 10)
+    cut = long_label[: LIMITS["maxLabel"]]
     body = IMAGE_PAGE.format(pixel=PIXEL, long=long_label)
 
     async def site(route):
@@ -711,8 +714,10 @@ async def test_images_are_read_through_the_words_the_page_gives_them(tmp_path, m
         assert "令和8年度の歳出グラフ" not in result["text"]
         assert labels.count("令和8年度の歳出グラフ") == 1  # whitespace is cleaned, repeats are dropped
         assert "PDF" in labels and "晴れ" in labels  # small icons and role="img" elements count too
-        assert "隠れた図" not in labels and all(labels)  # hidden images and blank alt text do not
-        assert long_label[: LIMITS["maxLabel"]] in labels and result["result_truncated"]
+        assert "ARIA の説明" in labels and "代替テキスト" not in labels  # ARIA's name wins over alt
+        assert "隠れた図" not in labels and all(labels)  # images laid out as 0x0 and blank alt text do not
+        # Both long labels are cut to the same 200 characters, and only one of them is kept.
+        assert labels.count(cut) == 1 and result["result_truncated"]
         # An anchor holding only an image used to be dropped with its URL; its label now names the link.
         assert {"text": "次のページへ", "url": "https://site.test/next"} in result["links"]
         assert {"text": long_label[:120], "url": "https://site.test/long"} in result["links"]

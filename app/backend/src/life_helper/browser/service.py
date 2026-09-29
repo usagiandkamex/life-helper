@@ -108,9 +108,14 @@ SNAPSHOT_JS = """
   };
   // An image is only ever read through the words the page itself gives it, never through its pixels.
   const IMAGES = 'img, [role="img"]';
-  const labelOf = (el) => pick([el.getAttribute('alt'), el.getAttribute('aria-label'), el.getAttribute('title')]);
+  // aria-label first: ARIA's name overrides the alt text when the page gives both.
+  const labelOf = (el) => pick([el.getAttribute('aria-label'), el.getAttribute('alt'), el.getAttribute('title')]);
+  const shown = (el) => { const box = el.getBoundingClientRect(); return box.width !== 0 || box.height !== 0; };
   const innerImageLabel = (el) => {
-    for (const child of el.querySelectorAll(IMAGES)) { const text = labelOf(child); if (text) return text; }
+    for (const child of el.querySelectorAll(IMAGES)) {
+      const text = labelOf(child);
+      if (text && shown(child)) return text;
+    }
     return '';
   };
   const full = (root.innerText || '').replace(/[ \\t]+\\n/g, '\\n').replace(/\\n{3,}/g, '\\n\\n').trim();
@@ -134,13 +139,14 @@ SNAPSHOT_JS = """
   const labelled = new Set();
   for (const el of root.querySelectorAll(IMAGES)) {
     if (imageLabels.length > args.maxImageLabels) break;
-    const box = el.getBoundingClientRect();
-    if (box.width === 0 && box.height === 0) continue;
     const text = labelOf(el);
-    if (!text || labelled.has(text)) continue;
+    if (!text || !shown(el)) continue;
     if (text.length > args.maxLabel) truncated = true;
-    labelled.add(text);
-    imageLabels.push(text.slice(0, args.maxLabel));
+    // Cut first, then de-duplicate: two long labels may only differ past the cut.
+    const label = text.slice(0, args.maxLabel);
+    if (labelled.has(label)) continue;
+    labelled.add(label);
+    imageLabels.push(label);
   }
   const tables = [];
   for (const t of root.querySelectorAll('table')) {
