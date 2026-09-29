@@ -53,6 +53,8 @@ LIMITS = {
     "maxCols": 16,
     "maxCell": 200,
     "maxInputs": 60,
+    "maxImageLabels": 40,
+    "maxLabel": 200,
     "maxUrl": 2048,
     "maxTitle": 500,
     "maxSelector": 1024,
@@ -66,6 +68,8 @@ RESULT_SCHEMA = {
     "text_truncated": bool,
     "result_truncated": bool,
     "links": (LIMITS["maxLinks"], {"text": 120, "url": LIMITS["maxUrl"]}),
+    # Only the words a page gives its images (alt / aria-label / title): the pictures themselves are never read.
+    "image_labels": (LIMITS["maxImageLabels"], LIMITS["maxLabel"]),
     "tables": (
         LIMITS["maxTables"],
         {"caption": 200, "rows": (LIMITS["maxRows"], (LIMITS["maxCols"], LIMITS["maxCell"]))},
@@ -98,6 +102,17 @@ SNAPSHOT_JS = """
   const root = args.selector ? document.querySelector(args.selector) : document.body;
   if (!root) return null;
   const clean = (s) => (s || '').replace(/\\s+/g, ' ').trim();
+  const pick = (values) => {
+    for (const value of values) { const text = clean(value); if (text) return text; }
+    return '';
+  };
+  // An image is only ever read through the words the page itself gives it, never through its pixels.
+  const IMAGES = 'img, [role="img"]';
+  const labelOf = (el) => pick([el.getAttribute('alt'), el.getAttribute('aria-label'), el.getAttribute('title')]);
+  const innerImageLabel = (el) => {
+    for (const child of el.querySelectorAll(IMAGES)) { const text = labelOf(child); if (text) return text; }
+    return '';
+  };
   const full = (root.innerText || '').replace(/[ \\t]+\\n/g, '\\n').replace(/\\n{3,}/g, '\\n\\n').trim();
   const title = document.title || '';
   let truncated = title.length > args.maxTitle;
@@ -107,10 +122,25 @@ SNAPSHOT_JS = """
     if (links.length > args.maxLinks) break;
     const url = a.href;
     if (url.length > args.maxUrl) { truncated = true; continue; }
-    const text = clean(a.innerText || a.getAttribute('aria-label') || a.title).slice(0, 120);
-    if (!/^https?:/i.test(url) || !text || seen.has(url)) continue;
+    if (!/^https?:/i.test(url) || seen.has(url)) continue;
+    // An anchor holding only an image has no text of its own: its image's label is what the page shows.
+    let text = pick([a.innerText, a.getAttribute('aria-label'), a.title]);
+    if (!text) text = innerImageLabel(a);
+    if (!text) continue;
     seen.add(url);
-    links.push({text, url});
+    links.push({text: text.slice(0, 120), url});
+  }
+  const imageLabels = [];
+  const labelled = new Set();
+  for (const el of root.querySelectorAll(IMAGES)) {
+    if (imageLabels.length > args.maxImageLabels) break;
+    const box = el.getBoundingClientRect();
+    if (box.width === 0 && box.height === 0) continue;
+    const text = labelOf(el);
+    if (!text || labelled.has(text)) continue;
+    if (text.length > args.maxLabel) truncated = true;
+    labelled.add(text);
+    imageLabels.push(text.slice(0, args.maxLabel));
   }
   const tables = [];
   for (const t of root.querySelectorAll('table')) {
@@ -143,7 +173,8 @@ SNAPSHOT_JS = """
       label: clean(label).slice(0, 80)});
   }
   return {title: title.slice(0, args.maxTitle), text: full.slice(0, args.maxText),
-    text_truncated: full.length > args.maxText, result_truncated: truncated, links, tables, inputs};
+    text_truncated: full.length > args.maxText, result_truncated: truncated, links, image_labels: imageLabels,
+    tables, inputs};
 }
 """
 
@@ -223,7 +254,7 @@ def limit_result(result: dict) -> dict:
 
     if size() > MAX_RESULT_BYTES:
         output["result_truncated"] = True
-        for key in ("tables", "links", "inputs", "text"):
+        for key in ("image_labels", "tables", "links", "inputs", "text"):
             while output.get(key) and size() > MAX_RESULT_BYTES:
                 output[key] = output[key][: len(output[key]) // 2]
                 if key == "text":

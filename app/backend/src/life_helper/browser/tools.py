@@ -62,8 +62,9 @@ def build_tools(ctx: AppContext) -> list[ToolSpec]:
     @define_tool(
         name="browser_open",
         description=(
-            "ヘッドレスブラウザで Web ページを開き、JavaScript で表示された後の本文・リンク・表・入力欄を返す。"
-            "web_fetch で本文が取れないページに使う。開けるのは外部の http / https サイトだけ。"
+            "ヘッドレスブラウザで Web ページを開き、JavaScript で表示された後の本文・リンク・表・入力欄・"
+            "画像の説明（image_labels）を返す。web_fetch で本文が取れないページに使う。"
+            "開けるのは外部の http / https サイトだけ。"
         ),
     )
     async def browser_open(params: OpenParams) -> str:
@@ -71,7 +72,10 @@ def build_tools(ctx: AppContext) -> list[ToolSpec]:
 
     @define_tool(
         name="browser_read",
-        description="browser_open で開いているページの本文・リンク・表・入力欄を読み直す。selector で範囲を絞れる。",
+        description=(
+            "browser_open で開いているページの本文・リンク・表・入力欄・画像の説明（image_labels）を読み直す。"
+            "selector で範囲を絞れる。"
+        ),
     )
     async def browser_read(params: ReadParams) -> str:
         return await session.run_json(lambda: session.read(params.selector))

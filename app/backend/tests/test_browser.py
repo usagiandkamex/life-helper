@@ -356,6 +356,7 @@ async def test_browser_results_have_a_serialized_byte_limit(tmp_path, character)
         "text": value,
         "text_truncated": False,
         "links": [{"text": value, "url": value}] * 100,
+        "image_labels": [value] * 100,
         "tables": [{"caption": value, "rows": [[value] * 20] * 50}] * 10,
         "inputs": [{"selector": value, "tag": value, "type": value, "label": value}] * 50,
         "unexpected": value,
@@ -376,6 +377,8 @@ async def test_browser_results_have_a_serialized_byte_limit(tmp_path, character)
     assert len(result["text"]) <= LIMITS["maxText"]
     assert len(result["links"]) <= LIMITS["maxLinks"]
     assert all(len(link["url"]) <= LIMITS["maxUrl"] and len(link["text"]) <= 120 for link in result["links"])
+    assert len(result["image_labels"]) <= LIMITS["maxImageLabels"]
+    assert all(len(label) <= LIMITS["maxLabel"] for label in result["image_labels"])
     assert len(result["inputs"]) <= LIMITS["maxInputs"]
     assert all(len(item["selector"]) <= LIMITS["maxSelector"] for item in result["inputs"])
 
@@ -397,10 +400,38 @@ def test_a_japanese_page_now_fits_without_losing_its_links_and_tables():
         "text": "あ" * LIMITS["maxText"],
         "text_truncated": False,
         "links": [{"text": f"リンク{i}", "url": f"https://example.com/{i}"} for i in range(LIMITS["maxLinks"])],
+        "image_labels": [f"図{i}" for i in range(LIMITS["maxImageLabels"])],
         "tables": [{"caption": "控除", "rows": [["収入", "控除額"]] * LIMITS["maxRows"]}] * LIMITS["maxTables"],
         "inputs": [{"selector": "#q", "tag": "input", "type": "search", "label": "検索"}],
     }
     assert limit_result(page) == page
+
+
+def test_image_labels_are_bounded_and_shed_before_the_page_content():
+    page = {
+        "url": "https://example.com/",
+        "title": "図の多いページ",
+        "text": "あ" * LIMITS["maxText"],
+        "text_truncated": False,
+        "links": [{"text": "次へ", "url": "https://example.com/next"}],
+        "image_labels": ["図" * (LIMITS["maxLabel"] + 1)] * (LIMITS["maxImageLabels"] + 1),
+        "tables": [{"caption": "控除", "rows": [["控除額"] * LIMITS["maxCols"]] * LIMITS["maxRows"]}]
+        * LIMITS["maxTables"],
+        "inputs": [{"selector": "#q", "tag": "input", "type": "search", "label": "検索"}],
+    }
+    assert len(result_json(page).encode("utf-8")) > MAX_RESULT_BYTES
+    result = limit_result(page)
+    # The labels only describe what a picture shows, so they are the first thing to go when the result is too large.
+    assert result["image_labels"] == []
+    assert result["tables"] and result["inputs"] and result["links"]
+    assert len(result["text"]) == LIMITS["maxText"] and result["text_truncated"] is False
+    assert result["result_truncated"] is True
+
+    small = limit_result({**page, "text": "少しの内容", "tables": [], "inputs": []})
+    assert len(small["image_labels"]) == LIMITS["maxImageLabels"]
+    assert all(len(label) == LIMITS["maxLabel"] for label in small["image_labels"])
+    assert small["result_truncated"] is True
+    assert limit_result({"image_labels": "図"}) == {"image_labels": [], "result_truncated": True}
 
 
 def test_result_limits_preserve_small_results_and_reject_unexpected_shapes():
@@ -515,7 +546,10 @@ def test_browser_is_listed_as_a_connector(client, ctx):
 
 
 def test_system_message_mentions_browser_rules_only_with_the_tools(tmp_path):
-    assert "browser_open" in build_system_message(tmp_path, browser=True)
+    message = build_system_message(tmp_path, browser=True)
+    assert "browser_open" in message
+    # The model is told what image_labels is, so it does not read values out of a picture's description.
+    assert "image_labels" in message and "推測しないでください" in message
     assert "browser_open" not in build_system_message(tmp_path)
 
 
@@ -570,6 +604,9 @@ def _chromium_installed() -> bool:
     return any(base.glob("chromium_headless_shell-*")) or any(base.glob("chromium-*"))
 
 
+# A 1x1 transparent GIF: an image that loads, so Chromium lays it out instead of showing its alt text as text.
+PIXEL = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
+
 PAGE = """<!doctype html><html><head><title>テストのページ</title></head><body>
 <h1>ふるさと納税</h1><p>上限の目安を調べます。</p>
 <a href="https://site.test/next">次のページ</a>
@@ -614,12 +651,13 @@ async def test_large_page_attributes_are_bounded_before_leaving_chromium(tmp_pat
 async def test_collection_caps_are_reported_as_truncated(tmp_path, monkeypatch):
     links = "".join(f'<a href="https://site.test/{i}">link {i}</a>' for i in range(LIMITS["maxLinks"] + 5))
     inputs = "".join(f'<input name="f{i}" type="text">' for i in range(LIMITS["maxInputs"] + 5))
+    images = "".join(f'<img src="{PIXEL}" alt="図 {i}">' for i in range(LIMITS["maxImageLabels"] + 5))
     cells = "".join(f"<td>c{c}</td>" for c in range(LIMITS["maxCols"] + 3))
     rows = "".join(f"<tr>{cells}</tr>" for _ in range(LIMITS["maxRows"] + 3))
-    body = f"<html><body>{links}{inputs}<table>{rows}</table></body></html>"
+    body = f"<html><body>{links}{inputs}{images}<table>{rows}</table></body></html>"
 
     async def site(route):
-        await route.fulfill(content_type="text/html", body=body)
+        await route.fulfill(content_type="text/html; charset=utf-8", body=body)
 
     monkeypatch.setattr(BrowserSession, "_route", staticmethod(site))
     session = BrowserSession(BrowserService(), MASKER, tmp_path)
@@ -627,6 +665,7 @@ async def test_collection_caps_are_reported_as_truncated(tmp_path, monkeypatch):
         result = await session.run(lambda: session.open("https://site.test/"))
         assert "error" not in result, result
         assert len(result["links"]) == LIMITS["maxLinks"]
+        assert len(result["image_labels"]) == LIMITS["maxImageLabels"]
         assert len(result["inputs"]) == LIMITS["maxInputs"]
         assert len(result["tables"][0]["rows"]) == LIMITS["maxRows"]
         assert all(len(row) == LIMITS["maxCols"] for row in result["tables"][0]["rows"])
@@ -634,9 +673,49 @@ async def test_collection_caps_are_reported_as_truncated(tmp_path, monkeypatch):
         # The renderer stops one item past each cap so the Python side can detect and report the overflow.
         data = await session._current().evaluate(SNAPSHOT_JS, {**LIMITS, "selector": None})
         assert len(data["links"]) == LIMITS["maxLinks"] + 1
+        assert len(data["image_labels"]) == LIMITS["maxImageLabels"] + 1
         assert len(data["inputs"]) == LIMITS["maxInputs"] + 1
         assert len(data["tables"][0]["rows"]) == LIMITS["maxRows"] + 1
         assert len(data["tables"][0]["rows"][0]) == LIMITS["maxCols"] + 1
+    finally:
+        await session.close()
+
+
+IMAGE_PAGE = """<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>図版のページ</title></head><body>
+<figure><img src="{pixel}" width="600" height="300" alt=" 令和8年度の歳出グラフ "><figcaption>図1</figcaption></figure>
+<img src="{pixel}" width="16" height="16" alt="PDF">
+<img src="{pixel}" alt="   ">
+<img src="{pixel}" alt="令和8年度の歳出グラフ">
+<div style="display:none"><img src="{pixel}" width="600" height="300" alt="隠れた図"></div>
+<span role="img" aria-label="晴れ" style="display:inline-block;width:20px;height:20px"></span>
+<a href="https://site.test/next"><img src="{pixel}" alt="次のページへ"></a>
+<a href="https://site.test/long"><img src="{pixel}" alt="{long}"></a>
+</body></html>"""
+
+
+@pytest.mark.skipif(not _chromium_installed(), reason="Chromium for Playwright is not installed")
+async def test_images_are_read_through_the_words_the_page_gives_them(tmp_path, monkeypatch):
+    long_label = "長" * (LIMITS["maxLabel"] + 10)
+    body = IMAGE_PAGE.format(pixel=PIXEL, long=long_label)
+
+    async def site(route):
+        await route.fulfill(content_type="text/html; charset=utf-8", body=body)
+
+    monkeypatch.setattr(BrowserSession, "_route", staticmethod(site))
+    session = BrowserSession(BrowserService(), MASKER, tmp_path)
+    try:
+        result = await session.run(lambda: session.open("https://site.test/"))
+        assert "error" not in result, result
+        labels = result["image_labels"]
+        # innerText has never held the alt text: without image_labels the chart would be invisible.
+        assert "令和8年度の歳出グラフ" not in result["text"]
+        assert labels.count("令和8年度の歳出グラフ") == 1  # whitespace is cleaned, repeats are dropped
+        assert "PDF" in labels and "晴れ" in labels  # small icons and role="img" elements count too
+        assert "隠れた図" not in labels and all(labels)  # hidden images and blank alt text do not
+        assert long_label[: LIMITS["maxLabel"]] in labels and result["result_truncated"]
+        # An anchor holding only an image used to be dropped with its URL; its label now names the link.
+        assert {"text": "次のページへ", "url": "https://site.test/next"} in result["links"]
+        assert {"text": long_label[:120], "url": "https://site.test/long"} in result["links"]
     finally:
         await session.close()
 
