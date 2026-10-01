@@ -25,8 +25,10 @@ router = APIRouter(prefix="/api/automations")
 # stopped, so the history shows it as interrupted instead of running for ever.
 INTERRUPTED_STATUS = "interrupted"
 # The run list shows only names, times and statuses. The result and transcript are read from the run itself, so the
-# list (up to 50 runs) carries nothing else, however long the results get.
+# list (up to 50 runs) is answered from the run metadata index without opening the records, however long the results
+# get.
 RUN_LIST_FIELDS = ("id", "automation_id", "name", "started_at", "finished_at", "status", "read", "notified")
+RUN_LIST_LIMIT = 50
 
 
 class AutomationBody(BaseModel):
@@ -231,10 +233,10 @@ def list_runs(
     automation_id: str | None = None, user: CurrentUser = Depends(require_user), ctx: AppContext = Depends(get_ctx)
 ) -> list[dict]:
     try:
-        runs = _store(ctx).list_runs(automation_id)
+        metas = _store(ctx).list_run_meta(automation_id)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
-    return [_run_view(ctx, {k: r[k] for k in RUN_LIST_FIELDS if k in r}) for r in runs]
+    return [_run_view(ctx, {k: m[k] for k in RUN_LIST_FIELDS if k in m}) for m in metas[:RUN_LIST_LIMIT]]
 
 
 @router.get("/{automation_id}/runs/{run_id}")

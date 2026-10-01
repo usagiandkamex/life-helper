@@ -723,7 +723,7 @@ def _chat_record(automation_id: str, run_id: str, *, mode: str = "new", minute: 
     } | extra
 
 
-def test_run_list_leaves_out_results_and_transcripts(client, ctx):
+def test_run_list_leaves_out_results_and_transcripts(client, ctx, monkeypatch):
     """The list only names the runs and the result is read from the run itself, so long results (up to 20,000
     characters each, issue #68) do not make the list heavy."""
     sign_in(client, ctx)
@@ -740,7 +740,16 @@ def test_run_list_leaves_out_results_and_transcripts(client, ctx):
         )
     )
 
+    # An index written before it cached "notified" is not trusted, so the list still says the run was notified.
+    index = json.loads(store.run_index_path.read_text(encoding="utf-8"))
+    for entry in index["runs"].values():
+        entry["meta"].pop("notified")
+    store.run_index_path.write_text(json.dumps({"runs": index["runs"]}), encoding="utf-8")
+    assert client.get("/api/automations/runs").json()[0]["notified"] is True
+
+    reads = _watch_run_reads(monkeypatch, store)
     [listed] = client.get("/api/automations/runs").json()
+    assert reads == []  # answered from the metadata index without opening the record
     # Only what the list shows: no result, error, instruction or transcript.
     assert listed == {
         "id": "a000000000000001",
