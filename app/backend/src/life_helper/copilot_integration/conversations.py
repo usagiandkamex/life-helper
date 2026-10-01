@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import threading
 import uuid
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -82,3 +83,27 @@ class ConversationStore:
                 return False
             self._save(items)
             return True
+
+    def delete_if(self, conversation_id: str, predicate: Callable[[Conversation], bool]) -> Conversation | None:
+        """Deletes the conversation only while ``predicate`` holds for it, checked under the same lock as updates
+        (so one renamed in the meantime is kept). Returns the deleted conversation."""
+        with self._lock:
+            items = self._load()
+            conv = items.get(conversation_id)
+            if conv is None or not predicate(conv):
+                return None
+            del items[conversation_id]
+            self._save(items)
+            return conv
+
+    def ids_if_readable(self) -> set[str] | None:
+        """Every conversation id, or None when the list exists but cannot be read (unlike ``list``, which shows an
+        unreadable list as empty): nothing may be treated as having no conversation then."""
+        with self._lock:
+            if not self.path.exists():
+                return set()
+            try:
+                raw = json.loads(self.path.read_text(encoding="utf-8"))
+                return {c["id"] for c in raw}
+            except (OSError, ValueError, TypeError, KeyError):
+                return None

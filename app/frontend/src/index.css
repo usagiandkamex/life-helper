@@ -249,7 +249,8 @@ details.collapse > summary:focus-visible { outline: 2px solid var(--md-primary);
 .runs li.selected .link { background: var(--md-secondary-container); }
 .run-name { overflow-wrap: anywhere; }
 .run-detail { min-width: 0; margin: 0; }
-.run-detail > h3:first-child { margin-top: 0; }
+.run-detail-head { align-items: flex-start; }
+.run-detail-head h3 { margin-top: 0; }
 /* 閉じられる一覧の見出し（閉じると見出しだけが残る） */
 .list-head { margin-bottom: 0.5rem; }
 .list-head h2 { margin: 0; }

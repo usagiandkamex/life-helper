@@ -57,6 +57,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   const [run, setRun] = useState<RunRecord | null>(null)
   const [runsOpen, setRunsOpen] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
+  const [deletingRunId, setDeletingRunId] = useState<string | null>(null)
   const [pendingRunIds, setPendingRunIds] = useState<Set<string>>(new Set())
   const pendingRunIdsRef = useRef(new Set<string>())
   // 実行中の記録を見張るためのカウンタ（進めると、次の読み直しが予約される）。
@@ -70,12 +71,18 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   const selectionGenerationRef = useRef(0)
   const openRunRequestRef = useRef(0)
   const interruptedWatchRef = useRef<{ runId: string; since: number } | null>(null)
+  const loadRequestRef = useRef(0)
 
   const load = useCallback(async () => {
+    // 見張り・更新・削除の読み込みは重なることがある。後から始めた読み込みだけを反映し、古い応答で消した記録を戻さない。
+    const request = ++loadRequestRef.current
     const data = await api<AutomationList>('/api/automations')
+    if (request !== loadRequestRef.current) return
     setList(data)
     onUnreadChange(data.unread)
-    setRuns(await api<RunRecord[]>('/api/automations/runs'))
+    const loaded = await api<RunRecord[]>('/api/automations/runs')
+    if (request !== loadRequestRef.current) return
+    setRuns(loaded)
   }, [onUnreadChange])
 
   const openRun = useCallback(
@@ -208,6 +215,46 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
     if (!window.confirm(`「${a.name}」を削除しますか？`)) return
     await api(`/api/automations/${a.id}`, { method: 'DELETE' })
     await load()
+  }
+
+  // 実行の記録を 1 件消す。チャットの 🤖 会話からも消える。
+  const removeRun = async (r: RunRecord) => {
+    // 「同じ会話に続ける」は 1 つの Copilot の会話を使い続けるので、記録を消しても Copilot はその回の内容を覚えている。
+    const memory =
+      r.conversation_mode === 'continue'
+        ? '\n\n「同じ会話に続ける」のオートメーションです。Copilot が会話の中で覚えている内容は消えず、次の実行でも踏まえて答えます。'
+        : ''
+    if (!window.confirm(`「${r.name}」（${formatDate(r.started_at)}）の実行の記録を削除しますか？\nチャットの 🤖 会話からも消えます。${memory}`)) return
+    setError('')
+    setMessage('')
+    setDeletingRunId(r.id)
+    try {
+      let gone = false
+      try {
+        const res = await api<{ unread: number }>(`/api/automations/${r.automation_id}/runs/${r.id}`, { method: 'DELETE' })
+        onUnreadChange(res.unread)
+      } catch (e) {
+        // ほかの画面で消した記録や、保存期間を過ぎて消えた記録は、消せたものとして扱う。
+        if (!(e instanceof ApiError && e.status === 404)) throw e
+        gone = true
+      }
+      setRuns((current) => current.filter((x) => x.id !== r.id))
+      // 開いていた記録なら選択を外す（読み込み中の取得や見張りが、消した記録を開き直さないようにする）。
+      if (selectedRunIdRef.current === r.id) {
+        selectionGenerationRef.current += 1
+        openRunRequestRef.current += 1
+        selectedRunIdRef.current = null
+        displayedRunIdRef.current = null
+        interruptedWatchRef.current = null
+        setRun(null)
+      }
+      setMessage(gone ? 'この実行の記録はすでに削除されていました。' : '実行の記録を削除しました。')
+      await load()
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e))
+    } finally {
+      setDeletingRunId(null)
+    }
   }
 
   const runNow = async (a: Automation) => {
@@ -364,9 +411,20 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
           )}
           {run && (
             <div className="run-detail" ref={detailRef}>
-              <h3>
-                {run.name}（{formatDate(run.started_at)}・{runStatusText(run)}）
-              </h3>
+              <div className="row run-detail-head">
+                <h3 className="grow">
+                  {run.name}（{formatDate(run.started_at)}・{runStatusText(run)}）
+                </h3>
+                {/* 実行中の記録は、終わったときに結果で置き換わるので消せない（中断した記録は消せる） */}
+                <button
+                  className="button small danger"
+                  onClick={() => removeRun(run)}
+                  disabled={run.status === 'running' || deletingRunId === run.id}
+                  title={run.status === 'running' ? '実行中は削除できません' : 'この実行の記録を削除'}
+                >
+                  {deletingRunId === run.id ? '削除中…' : '削除'}
+                </button>
+              </div>
               {/* 実行中の記録には結果がない（実行内容は終わってから記録される） */}
               {!hasResult(run) ? (
                 <p className="hint">

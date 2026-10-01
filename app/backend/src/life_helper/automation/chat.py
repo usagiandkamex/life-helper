@@ -6,10 +6,13 @@ automation form one conversation (they share one Copilot session). Only records 
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
 from .store import RUNNING_STATUS, AutomationStore
+
+logger = logging.getLogger(__name__)
 
 THREAD_ID_RE = re.compile(
     r"^(?:c-(?P<continue_id>[0-9a-f]{6,32})|r-(?P<new_id>[0-9a-f]{6,32})-(?P<run_id>[0-9a-f]{6,32}))$"
@@ -141,3 +144,27 @@ def hide_thread(store: AutomationStore, thread_id: str, through_run_id: str) -> 
         return False
     store.hide_chat_thread(thread_id, through_run_id)
     return True
+
+
+def forget_run(store: AutomationStore, record: dict) -> None:
+    """Keeps the chat list as it was after ``record`` was deleted: a conversation hidden through it stays hidden
+    through the run before it when it was the latest one, and is forgotten otherwise (newer runs show it anyway)."""
+    thread_id = thread_id_for(record)
+    if thread_id is None:
+        return
+    remaining = _thread_meta(store, thread_id)
+    was_latest = not remaining or _chronological(record) > _chronological(remaining[-1])
+    try:
+        store.repoint_hidden(thread_id, record["id"], remaining[-1]["id"] if was_latest and remaining else None)
+    except TimeoutError:
+        # Nothing is lost: at worst a hidden conversation shows up in the chat list again.
+        logger.warning("could not update the hidden automation conversations")
+
+
+def runs_by_thread(store: AutomationStore) -> dict[str, set[str]]:
+    groups: dict[str, set[str]] = {}
+    for record in store.list_run_meta():
+        thread_id = thread_id_for(record)
+        if thread_id:
+            groups.setdefault(thread_id, set()).add(record["id"])
+    return groups

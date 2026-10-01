@@ -186,18 +186,18 @@ class AutomationRunner:
                 "summary": f"使えないコネクタがあります（API キーが未登録か、機能が無効）: {', '.join(missing)}",
             }
             await self._notify_failure(automation, record)
-            return self._finish(automation, record, condition_met=None)
+            return await self._finish(automation, record, condition_met=None)
         if not await self._token_valid():
             record |= {"status": "reauth", "error": REAUTH_MESSAGE, "summary": REAUTH_MESSAGE}
             await self._notify_reauth(now)
-            return self._finish(automation, record, condition_met=None)
+            return await self._finish(automation, record, condition_met=None)
         limit = self.ctx.settings.automation_monthly_run_limit
         if not self.store.try_reserve_run(limit, now):
             record |= {
                 "status": "skipped_limit",
                 "summary": f"今月の実行回数の上限（{limit} 回）に達したため実行しませんでした。",
             }
-            return self._finish(automation, record, condition_met=None)
+            return await self._finish(automation, record, condition_met=None)
 
         # One deadline for the whole run, retry included, so a run never outlives its lock.
         loop = asyncio.get_running_loop()
@@ -256,7 +256,7 @@ class AutomationRunner:
                     condition_met = None
         elif status != "reauth":
             await self._notify_failure(automation, record)
-        return self._finish(automation, record, condition_met=condition_met)
+        return await self._finish(automation, record, condition_met=condition_met)
 
     def _sanitize(self, value: Any) -> Any:
         """Masks secrets and removes sensitive values from anything written to the run history."""
@@ -427,9 +427,14 @@ class AutomationRunner:
         except NotifyError:
             logger.warning("could not send re-login notice")
 
-    def _finish(self, automation: Automation, record: dict, *, condition_met: bool | None) -> dict:
+    async def _finish(self, automation: Automation, record: dict, *, condition_met: bool | None) -> dict:
         record["finished_at"] = datetime.now(UTC).isoformat()
-        self.store.save_run(record)
+        # The record was written when the run started; if it was deleted from the history since, it stays deleted.
+        # Waiting for the record's lock happens off the event loop, so the app keeps serving meanwhile.
+        if not await asyncio.to_thread(self.store.save_run, record, replace_only=True):
+            logger.info(
+                "automation %s: the run result was not saved (deleted from the history meanwhile)", automation.id
+            )
         fields: dict[str, Any] = {"last_run_at": record["started_at"], "last_status": record["status"]}
         if condition_met is not None:
             fields["last_condition_met"] = condition_met

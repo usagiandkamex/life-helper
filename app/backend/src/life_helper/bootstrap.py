@@ -50,13 +50,20 @@ async def start_services(ctx: AppContext) -> None:
     init_core(ctx)
     init_chat(ctx)
     from .browser.service import prune_screenshots, screenshot_dir
+    from .retention import RetentionScheduler
 
     prune_screenshots(screenshot_dir(ctx.settings))
+    retention = RetentionScheduler(ctx)
+    retention.start()
+    ctx.extras["retention"] = retention
 
 
 async def shutdown_services(ctx: AppContext) -> None:
     for task in list(ctx.extras.get("automation_tasks", ())):
         task.cancel()
+    retention = ctx.extras.pop("retention", None)
+    if retention is not None:
+        await retention.shutdown()
     runner = ctx.extras.get("automation_runner")
     if runner is not None:
         await runner.manager.reset()
