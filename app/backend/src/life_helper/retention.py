@@ -138,27 +138,45 @@ def _automation_session_last_used(
     name: str, path: Path, automations: dict[str, Automation], runs: list[dict]
 ) -> datetime | None:
     """A "continue" session counts as used whenever its automation ran in that mode, even when the run stopped
-    before reaching Copilot (a missing connector, the monthly limit), so its memory is kept while it is in use."""
-    times = [session_last_used(path)]
+    before reaching Copilot (a missing connector, the monthly limit), so its memory is kept while it is in use.
+    Returns None (the session is kept) when any of these times cannot be read, as a run whose start cannot be read is
+    kept too."""
+    last = session_last_used(path)
+    if last is None:
+        return None
     m = _AUTO_SESSION_RE.fullmatch(name)
     if m and not m.group("run"):
         automation_id = m.group("aid")
         automation = automations.get(automation_id)
-        if automation is not None and automation.conversation_mode == "continue":
-            times.append(parse_timestamp(automation.state.last_run_at))
-        times += [
-            parse_timestamp(r.get("started_at"))
+        stamps: list[object] = []
+        if automation is not None and automation.conversation_mode == "continue" and automation.state.last_run_at:
+            stamps.append(automation.state.last_run_at)
+        stamps += [
+            r.get("started_at")
             for r in runs
             if r.get("automation_id") == automation_id and r.get("conversation_mode") == "continue"
         ]
-    known = [t for t in times if t is not None]
-    return max(known) if known else None
+        for stamp in stamps:
+            when = parse_timestamp(stamp)
+            if when is None:
+                return None
+            last = max(last, when)
+    return last
 
 
-async def _delete_session(manager: CopilotManager, name: str, result: PassResult, key: str) -> bool:
-    """Deletes one Copilot session. Returns False when Copilot cannot be used at all (the rest is left for later)."""
+async def _delete_session(
+    manager: CopilotManager, name: str, result: PassResult, key: str, deadline: float | None = None
+) -> bool:
+    """Deletes one Copilot session. Returns False when Copilot cannot be used at all or the time is up (the rest is
+    left for later). ``deadline`` (``time.monotonic()``) bounds the wait, so a Copilot that does not answer cannot hold
+    the pass, and the locks it holds, past its time."""
     try:
-        await manager.delete_session(name)
+        timeout = None if deadline is None else max(deadline - time.monotonic(), 0)
+        await asyncio.wait_for(manager.delete_session(name), timeout=timeout)
+    except TimeoutError:
+        logger.warning("deleting an expired Copilot session took too long; the rest is left for later")
+        result.complete = False
+        return False
     except SessionStateError:
         logger.warning("could not delete an expired Copilot session")
         result.complete = False
@@ -178,7 +196,11 @@ async def _delete_session(manager: CopilotManager, name: str, result: PassResult
 
 
 async def prune_automation_data(
-    ctx: AppContext, manager: CopilotManager | None, now: datetime, should_stop: Callable[[], bool]
+    ctx: AppContext,
+    manager: CopilotManager | None,
+    now: datetime,
+    should_stop: Callable[[], bool],
+    deadline: float | None = None,
 ) -> PassResult:
     store = ctx.automations
     assert store is not None
@@ -195,7 +217,7 @@ async def prune_automation_data(
     except TimeoutError:
         result.complete = False
     if manager is not None and not should_stop():
-        await _prune_automation_sessions(ctx, manager, cutoff, should_stop, result)
+        await _prune_automation_sessions(ctx, manager, cutoff, should_stop, result, deadline)
     return result
 
 
@@ -218,7 +240,12 @@ def _scan_automation_sessions(
 
 
 async def _prune_automation_sessions(
-    ctx: AppContext, manager: CopilotManager, cutoff: datetime, should_stop: Callable[[], bool], result: PassResult
+    ctx: AppContext,
+    manager: CopilotManager,
+    cutoff: datetime,
+    should_stop: Callable[[], bool],
+    result: PassResult,
+    deadline: float | None = None,
 ) -> None:
     store = ctx.automations
     assert store is not None
@@ -256,7 +283,7 @@ async def _prune_automation_sessions(
                 continue
             if last is None or last >= cutoff:
                 continue
-            if not await _delete_session(manager, name, result, "automation_sessions"):
+            if not await _delete_session(manager, name, result, "automation_sessions", deadline):
                 return
         finally:
             if lock is not None:
@@ -273,7 +300,9 @@ def _recheck_automation_session(ctx: AppContext, name: str, path: Path) -> datet
 # -- chat scope -------------------------------------------------------------------------------------------
 
 
-async def prune_chat_data(ctx: AppContext, now: datetime, should_stop: Callable[[], bool]) -> PassResult:
+async def prune_chat_data(
+    ctx: AppContext, now: datetime, should_stop: Callable[[], bool], deadline: float | None = None
+) -> PassResult:
     from .copilot_integration.turns import TurnBusyError
 
     conversations = ctx.extras["conversations"]
@@ -307,7 +336,7 @@ async def prune_chat_data(ctx: AppContext, now: datetime, should_stop: Callable[
                 if not copilot_usable:
                     result.complete = False
                 else:
-                    copilot_usable = await _delete_session(ctx.copilot, conv.id, result, "chat_sessions")
+                    copilot_usable = await _delete_session(ctx.copilot, conv.id, result, "chat_sessions", deadline)
         except TurnBusyError:
             result.complete = False
 
@@ -332,8 +361,9 @@ async def prune_chat_data(ctx: AppContext, now: datetime, should_stop: Callable[
             result.complete = False
             break
         if ctx.turns.busy(name):
+            result.complete = False
             continue
-        copilot_usable = await _delete_session(ctx.copilot, name, result, "chat_sessions")
+        copilot_usable = await _delete_session(ctx.copilot, name, result, "chat_sessions", deadline)
     return result
 
 
@@ -364,9 +394,9 @@ async def run_scope(
 
         try:
             if scope == "automation":
-                result = await prune_automation_data(ctx, automation_manager, now, should_stop)
+                result = await prune_automation_data(ctx, automation_manager, now, should_stop, deadline)
             else:
-                result = await prune_chat_data(ctx, now, should_stop)
+                result = await prune_chat_data(ctx, now, should_stop, deadline)
         except BaseException:
             gate.record(now, complete=False)
             raise

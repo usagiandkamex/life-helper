@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import shutil
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -271,6 +272,44 @@ async def test_sessions_wait_for_a_token(env, monkeypatch):
     assert not result.complete and (base / "session-state" / "auto-aaaaaa000001").exists()
 
 
+async def test_a_session_whose_last_use_cannot_be_read_is_kept(env):
+    store = env.automations
+    base = env.settings.copilot_automation_dir
+    sessions = FakeSessions(base)
+    store.upsert(Automation(id="aaaaaa000001", name="続ける", prompt="x", conversation_mode="continue"))
+    _session(base, "auto-aaaaaa000001", OLD)
+    # The run is kept because its start cannot be read, so its session is kept too instead of going by the folder.
+    store.save_run(_run("aaaaaa000001", "a000000000000001", "not a time", conversation_mode="continue"))
+
+    result = await retention.prune_automation_data(env, sessions, NOW, _stop)
+
+    assert sessions.deleted == [] and result.complete
+
+
+async def test_a_session_deletion_that_does_not_answer_is_given_up(env):
+    base = env.settings.copilot_automation_dir
+    _session(base, "auto-aaaaaa000001", OLD)
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class Hanging(FakeSessions):
+        async def delete_session(self, session_id: str) -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    sessions = Hanging(base)
+    deadline = time.monotonic() + 1
+    result = await retention.prune_automation_data(env, sessions, NOW, _stop, deadline)
+
+    assert started.is_set() and cancelled.is_set() and not result.complete
+    assert (base / "session-state" / "auto-aaaaaa000001").exists()
+    assert not (env.automations.locks_dir / "automation-aaaaaa000001.lock").exists()
+
+
 def _link_dir(link: Path, target: Path) -> None:
     """A directory link: a junction on Windows (no extra rights needed), a symlink elsewhere."""
     if os.name == "nt":
@@ -379,6 +418,16 @@ async def test_chat_sessions_wait_for_a_token(chat_env, monkeypatch):
     monkeypatch.setattr(ctx, "github_token", lambda: "gho_unit_test_token_1234")
     result = await retention.prune_chat_data(ctx, NOW, _stop)
     assert not result.complete
+
+
+async def test_an_orphan_session_in_use_is_retried(chat_env):
+    ctx = chat_env
+    orphan = "f" * 32
+    _session(ctx.settings.copilot_chat_dir, orphan, OLD)
+    async with ctx.turns.reserve(orphan):
+        result = await retention.prune_chat_data(ctx, NOW, _stop)
+    # Not complete, so the pass is retried an hour later rather than the next day.
+    assert ctx.copilot.deleted == [] and not result.complete
 
 
 # -- what is never touched ---------------------------------------------------------------------------------

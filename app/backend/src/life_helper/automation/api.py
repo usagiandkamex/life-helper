@@ -17,7 +17,7 @@ from ..security import SENSITIVE_LABELS, detect_sensitive
 from . import chat
 from .models import Automation, AutomationState, NotifySettings, Schedule, normalize_connectors
 from .runner import AutomationRunner, build_notifier
-from .store import RUNNING_STATUS, AutomationStore
+from .store import RUNNING_STATUS, AutomationStore, parse_timestamp
 
 router = APIRouter(prefix="/api/automations")
 
@@ -103,11 +103,10 @@ def _run_view(ctx: AppContext, record: dict) -> dict:
     job process), so both the list and the detail decide the same way, from the same clock."""
     if record.get("status") != RUNNING_STATUS:
         return record
-    try:
-        age = datetime.now(UTC) - datetime.fromisoformat(record.get("started_at") or "")
-    except (TypeError, ValueError):
+    started = parse_timestamp(record.get("started_at"))
+    if started is None:
         return record
-    if age.total_seconds() > ctx.settings.automation_lock_ttl_seconds:
+    if (datetime.now(UTC) - started).total_seconds() > ctx.settings.automation_lock_ttl_seconds:
         return record | {"status": INTERRUPTED_STATUS}
     return record
 

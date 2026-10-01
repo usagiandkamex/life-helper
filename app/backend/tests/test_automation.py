@@ -1209,9 +1209,17 @@ def test_runs_api_shows_a_run_in_progress_and_an_abandoned_one(client, ctx, sett
 def test_a_run_in_progress_without_a_usable_start_time_stays_running(client, ctx):
     sign_in(client, ctx)
     record = _running_record("aaaaaa000001", "a000000000000001")
-    record["started_at"] = "2026-09-25 00:00:00"  # a start time without a timezone cannot be compared
+    record["started_at"] = "not a time"
     ctx.automations.save_run(record)
     assert client.get("/api/automations/runs").json()[0]["status"] == "running"
+
+
+def test_a_start_time_without_a_timezone_is_read_as_utc(client, ctx):
+    sign_in(client, ctx)
+    record = _running_record("aaaaaa000001", "a000000000000001")
+    record["started_at"] = "2026-09-25 00:00:00"  # written by an older version
+    ctx.automations.save_run(record)
+    assert client.get("/api/automations/runs").json()[0]["status"] == "interrupted"
 
 
 def test_automation_list_reports_runs_in_progress_beyond_the_history(client, ctx, settings):
@@ -1274,6 +1282,8 @@ def test_delete_run_api(client, ctx, settings):
     store.save_run(_running_record(aid, "a000000000000003", started=now))
     left_behind = now - timedelta(seconds=settings.automation_lock_ttl_seconds + 60)
     store.save_run(_running_record(aid, "a000000000000004", started=left_behind))
+    # Written by an older version without a time zone: read as UTC, like the rest of the history.
+    store.save_run(_running_record(aid, "a000000000000005", started=left_behind.replace(tzinfo=None)))
     url = f"/api/automations/{aid}/runs"
 
     assert client.delete(f"{url}/a000000000000001").status_code == 401
@@ -1292,6 +1302,7 @@ def test_delete_run_api(client, ctx, settings):
     assert deleted.status_code == 200 and deleted.json() == {"ok": True, "unread": 1}
     # One that stopped while running (shown as interrupted) can be deleted.
     assert client.delete(f"{url}/a000000000000004", headers=h).status_code == 200
+    assert client.delete(f"{url}/a000000000000005", headers=h).status_code == 200
     assert client.delete(f"{url}/a000000000000001", headers=h).status_code == 404
 
     assert [r["id"] for r in client.get("/api/automations/runs").json()] == ["a000000000000003", "a000000000000002"]
