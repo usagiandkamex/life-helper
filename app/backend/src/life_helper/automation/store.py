@@ -453,13 +453,13 @@ class AutomationStore:
         """True when deleted, False when kept (a link, or started again since), None when it could not be done now."""
         automation_id, run_id = meta["automation_id"], meta["id"]
         path = self._run_path(automation_id, run_id)
-        if is_link(path.parent) or is_link(path):
-            return False
 
         def op() -> bool:
             current = self.get_run(automation_id, run_id)
             started = parse_timestamp((current or {}).get("started_at"))
             if started is None or started >= cutoff:
+                return False
+            if is_link(self.runs_dir) or is_link(path.parent) or is_link(path):
                 return False
             path.unlink(missing_ok=True)
             return True
@@ -472,10 +472,14 @@ class AutomationStore:
 
     def remove_empty_run_dirs(self) -> None:
         """Removes the emptied history folders of deleted automations (a live automation may be writing to its own)."""
+        if is_link(self.runs_dir):
+            return
         live = {a.id for a in self.list()}
         for d in self.runs_dir.glob("*"):
             if d.name in live or not _valid_id(d.name) or is_link(d) or not d.is_dir():
                 continue
+            if is_link(self.runs_dir):
+                return
             try:
                 d.rmdir()
             except OSError:

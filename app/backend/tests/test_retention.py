@@ -444,6 +444,22 @@ async def test_linked_folders_are_not_followed(env, tmp_path):
     assert (outside / "session-state" / "auto-aaaaaa000001").exists()
 
 
+async def test_a_linked_history_root_is_not_followed(env, tmp_path):
+    store = env.automations
+    store.save_run(_run("aaaaaa000001", "a000000000000001", OLD))
+    (store.runs_dir / "dddddd000001").mkdir()  # an emptied folder of a deleted automation
+    store.list_run_meta()
+    outside = tmp_path / "runs-outside"
+    store.runs_dir.rename(outside)
+    _link_dir(store.runs_dir, outside)
+
+    await retention.prune_automation_data(env, None, NOW, _stop)
+
+    assert store_module.is_link(store.runs_dir)
+    assert (outside / "aaaaaa000001" / "a000000000000001.json").exists()
+    assert (outside / "dddddd000001").is_dir()
+
+
 # -- chat --------------------------------------------------------------------------------------------------
 
 
