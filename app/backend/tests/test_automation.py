@@ -593,6 +593,47 @@ async def test_run_record_is_sanitized(auto_env):
     assert "1234567" not in stored and "SECRET-API-KEY-123" not in stored
 
 
+async def test_report_result_accepts_summaries_up_to_the_limit(auto_env):
+    """A result may be up to MAX_SUMMARY_CHARS long. A longer one fails the tool call (so the model can shorten it and
+    call again) and is never recorded (issue #68)."""
+    from life_helper.copilot_integration.system_prompt import MAX_SUMMARY_CHARS
+
+    assert MAX_SUMMARY_CHARS == 20_000
+    ctx, runner, manager = auto_env
+    a = ctx.automations.upsert(Automation(name="x", prompt="y"))
+    full = "🏠" + "あ" * (MAX_SUMMARY_CHARS - 1)  # counted in code points, so the emoji is one character
+    calls: list[list[str]] = []
+    results: list = []
+    original = FakeAutoSession.send
+
+    async def reports(self, prompt):
+        self.manager.prompts.append(prompt)
+        tool = next(s.tool for s in self.manager.extra_tools if s.tool.name == "report_result")
+        for summary in calls.pop(0):
+            results.append(await tool.handler(ToolInvocation(arguments={"summary": summary, "notify": False})))
+        for h in list(self.handlers):
+            h(SimpleNamespace(data=SessionIdleData()))
+
+    FakeAutoSession.send = reports
+    try:
+        calls[:] = [[full + "い", full]]
+        record = await runner.run(a.id)
+        tool = next(s.tool for s in manager.extra_tools if s.tool.name == "report_result")
+        assert tool.parameters["properties"]["summary"]["maxLength"] == MAX_SUMMARY_CHARS
+        assert results[0].result_type == "failure" and "summary" in results[0].text_result_for_llm
+        assert results[1].result_type == "success"
+        assert record["report"]["summary"] == full and record["summary"] == full
+
+        # Only too-long reports: nothing is recorded, even after the follow-up request.
+        results.clear()
+        calls[:] = [[full + "い"], [full + "い"]]
+        record = await runner.run(a.id)
+        assert [r.result_type for r in results] == ["failure", "failure"]
+        assert record["status"] == "success" and record["report"] is None and record["summary"] == ""
+    finally:
+        FakeAutoSession.send = original
+
+
 async def test_no_retry_after_side_effects(auto_env, monkeypatch):
     ctx, runner, manager = auto_env
     monkeypatch.setattr("life_helper.automation.runner.asyncio.sleep", _no_sleep)
@@ -680,6 +721,42 @@ def _chat_record(automation_id: str, run_id: str, *, mode: str = "new", minute: 
         "summary": "要約",
         "events": [{"type": "message", "content": "確認しました"}],
     } | extra
+
+
+def test_run_list_leaves_out_results_and_transcripts(client, ctx):
+    """The list only names the runs and the result is read from the run itself, so long results (up to 20,000
+    characters each, issue #68) do not make the list heavy."""
+    sign_in(client, ctx)
+    store = ctx.automations
+    store.upsert(Automation(id="aaaaaa000001", name="定期チェック", prompt="確認して", schedule=Schedule(kind="daily")))
+    store.save_run(
+        _chat_record(
+            "aaaaaa000001",
+            "a000000000000001",
+            report={"summary": "要約", "notify": True},
+            final_message="確認しました",
+            error="途中で一部のページを読めませんでした",
+            notified=True,
+        )
+    )
+
+    [listed] = client.get("/api/automations/runs").json()
+    # Only what the list shows: no result, error, instruction or transcript.
+    assert listed == {
+        "id": "a000000000000001",
+        "automation_id": "aaaaaa000001",
+        "name": "定期チェック",
+        "started_at": "2026-09-25T00:00:00+00:00",
+        "finished_at": "2026-09-25T00:00:30+00:00",
+        "status": "success",
+        "read": False,
+        "notified": True,
+    }
+
+    detail = client.get("/api/automations/aaaaaa000001/runs/a000000000000001").json()
+    assert detail["summary"] == "要約" and detail["report"]["summary"] == "要約"
+    assert detail["final_message"] == "確認しました" and detail["prompt"] == "確認して" and detail["events"]
+    assert detail["error"] == "途中で一部のページを読めませんでした"
 
 
 async def test_run_record_carries_a_transcript(auto_env):
