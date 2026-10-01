@@ -372,6 +372,8 @@ class AutomationStore:
         path = self._run_path(automation_id, run_id)
 
         def op():
+            if is_link(self.runs_dir) or is_link(path.parent) or is_link(path):
+                return "missing", None
             record = self.get_run(automation_id, run_id)
             if record is None:
                 return "missing", None

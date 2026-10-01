@@ -21,6 +21,8 @@ from life_helper.automation.models import Automation
 from life_helper.bootstrap import init_chat, init_core
 from life_helper.copilot_integration.manager import NoTokenError, SessionStateError
 
+from .conftest import sign_in
+
 NOW = datetime(2026, 10, 1, 0, 0, tzinfo=UTC)
 OLD = NOW - timedelta(days=200)
 RECENT = NOW - timedelta(days=10)
@@ -386,6 +388,41 @@ def _link_dir(link: Path, target: Path) -> None:
         _winapi.CreateJunction(str(target), str(link))
     else:
         link.symlink_to(target, target_is_directory=True)
+
+
+@pytest.mark.parametrize("link_kind", ["root", "automation", "record"])
+def test_manual_deletion_leaves_links_and_their_targets_untouched(client, ctx, tmp_path, link_kind):
+    store = ctx.automations
+    aid, run_id = "aaaaaa000001", "a000000000000001"
+    store.save_run(_run(aid, run_id, OLD))
+    path = store.runs_dir / aid / f"{run_id}.json"
+    original = path.read_bytes()
+    index = store.run_index_path.read_bytes()
+    outside = tmp_path / "outside"
+    if link_kind == "record":
+        path.rename(outside)
+        try:
+            path.symlink_to(outside)
+        except OSError:
+            if os.name == "nt":
+                pytest.skip("file symlinks require Windows developer mode or elevated permissions")
+            raise
+        link, target = path, outside
+    else:
+        link = store.runs_dir if link_kind == "root" else path.parent
+        link.rename(outside)
+        _link_dir(link, outside)
+        target = outside / path.relative_to(link)
+
+    csrf = sign_in(client, ctx)
+    response = client.delete(f"/api/automations/{aid}/runs/{run_id}", headers={"x-csrf-token": csrf})
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "run not found"
+    assert store_module.is_link(link)
+    assert target.read_bytes() == original
+    assert path.read_bytes() == original
+    assert store.run_index_path.read_bytes() == index
 
 
 async def test_linked_folders_are_not_followed(env, tmp_path):
