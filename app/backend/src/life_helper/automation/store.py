@@ -38,6 +38,7 @@ RUN_META_FIELDS = (
     "finished_at",
     "status",
     "read",
+    "notified",
     "transcript_version",
     "conversation_mode",
 )
@@ -200,7 +201,8 @@ class AutomationStore:
             self._update_run_index(entries)
 
     # The index only caches what list_run_meta() would otherwise read from every record, so a failed or outdated
-    # update never loses anything: the next read repairs the entry from the record itself.
+    # update never loses anything: the next read repairs the entry from the record itself. It also names the fields
+    # it caches, so an index written before RUN_META_FIELDS changed is read again from the records instead of used.
 
     def _index_lock(self) -> FileLock:
         return FileLock(self.locks_dir / "automation-run-index.lock", ttl_seconds=30)
@@ -233,7 +235,9 @@ class AutomationStore:
             data = json.loads(self.run_index_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
-        runs = data.get("runs") if isinstance(data, dict) else None
+        if not isinstance(data, dict) or data.get("fields") != list(RUN_META_FIELDS):
+            return {}
+        runs = data.get("runs")
         return runs if isinstance(runs, dict) else {}
 
     def _update_run_index(self, entries: dict[str, dict], drop: set[str] = frozenset()) -> None:
@@ -242,7 +246,9 @@ class AutomationStore:
             runs.update(entries)
             for key in drop:
                 runs.pop(key, None)
-            atomic_write(self.run_index_path, json.dumps({"runs": runs}, ensure_ascii=False))
+            atomic_write(
+                self.run_index_path, json.dumps({"fields": list(RUN_META_FIELDS), "runs": runs}, ensure_ascii=False)
+            )
 
         try:
             self._with_lock(op, lock=self._index_lock())
