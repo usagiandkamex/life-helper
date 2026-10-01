@@ -1209,9 +1209,17 @@ def test_runs_api_shows_a_run_in_progress_and_an_abandoned_one(client, ctx, sett
 def test_a_run_in_progress_without_a_usable_start_time_stays_running(client, ctx):
     sign_in(client, ctx)
     record = _running_record("aaaaaa000001", "a000000000000001")
-    record["started_at"] = "2026-09-25 00:00:00"  # a start time without a timezone cannot be compared
+    record["started_at"] = "not a time"
     ctx.automations.save_run(record)
     assert client.get("/api/automations/runs").json()[0]["status"] == "running"
+
+
+def test_a_start_time_without_a_timezone_is_read_as_utc(client, ctx):
+    sign_in(client, ctx)
+    record = _running_record("aaaaaa000001", "a000000000000001")
+    record["started_at"] = "2026-09-25 00:00:00"  # written by an older version
+    ctx.automations.save_run(record)
+    assert client.get("/api/automations/runs").json()[0]["status"] == "interrupted"
 
 
 def test_automation_list_reports_runs_in_progress_beyond_the_history(client, ctx, settings):
@@ -1260,3 +1268,134 @@ def test_run_now_returns_the_id_reserved_for_its_task(client, ctx):
     assert response.json() == {"started": True, "run_id": run_id}
     assert len(run_id) == 16
     runner.run.assert_called_once_with(automation.id, run_id=run_id)
+
+
+# -- deleting runs from the history (issue #67) -------------------------------------------------------------
+
+
+def test_delete_run_api(client, ctx, settings):
+    store = ctx.automations
+    aid = "aaaaaa000001"
+    now = datetime.now(UTC)
+    store.save_run(_chat_record(aid, "a000000000000001"))
+    store.save_run(_chat_record(aid, "a000000000000002", minute=1))
+    store.save_run(_running_record(aid, "a000000000000003", started=now))
+    left_behind = now - timedelta(seconds=settings.automation_lock_ttl_seconds + 60)
+    store.save_run(_running_record(aid, "a000000000000004", started=left_behind))
+    # Written by an older version without a time zone: read as UTC, like the rest of the history.
+    store.save_run(_running_record(aid, "a000000000000005", started=left_behind.replace(tzinfo=None)))
+    url = f"/api/automations/{aid}/runs"
+
+    assert client.delete(f"{url}/a000000000000001").status_code == 401
+    csrf = sign_in(client, ctx)
+    h = {"x-csrf-token": csrf}
+    assert client.delete(f"{url}/a000000000000001").status_code == 403  # no CSRF
+    assert client.delete(f"{url}/not-a-run", headers=h).status_code == 400
+    assert client.delete("/api/automations/BAD/runs/a000000000000001", headers=h).status_code == 400
+    assert client.delete(f"{url}/ffffffffffffffff", headers=h).status_code == 404
+    # A run in progress is replaced by its result when it finishes, so it cannot be deleted yet.
+    running = client.delete(f"{url}/a000000000000003", headers=h)
+    assert running.status_code == 409 and "実行中" in running.json()["detail"]
+    assert store.get_run(aid, "a000000000000003") is not None
+
+    deleted = client.delete(f"{url}/a000000000000001", headers=h)
+    assert deleted.status_code == 200 and deleted.json() == {"ok": True, "unread": 1}
+    # One that stopped while running (shown as interrupted) can be deleted.
+    assert client.delete(f"{url}/a000000000000004", headers=h).status_code == 200
+    assert client.delete(f"{url}/a000000000000005", headers=h).status_code == 200
+    assert client.delete(f"{url}/a000000000000001", headers=h).status_code == 404
+
+    assert [r["id"] for r in client.get("/api/automations/runs").json()] == ["a000000000000003", "a000000000000002"]
+    assert client.get(f"{url}/a000000000000001").status_code == 404
+    assert [t["id"] for t in client.get("/api/automations/chat").json()] == [f"r-{aid}-a000000000000002"]
+    assert client.get(f"/api/automations/chat/r-{aid}-a000000000000001").status_code == 404
+    index = json.loads(store.run_index_path.read_text(encoding="utf-8"))["runs"]
+    assert f"{aid}/a000000000000001" not in index and f"{aid}/a000000000000004" not in index
+
+
+def test_deleting_the_latest_run_of_a_hidden_conversation_keeps_it_hidden(tmp_path):
+    store = AutomationStore(tmp_path)
+    aid, thread = "aaaaaa000001", "c-aaaaaa000001"
+    for i in range(2):
+        store.save_run(_chat_record(aid, f"a00000000000000{i + 1}", mode="continue", minute=i))
+    store.hide_chat_thread(thread, "a000000000000002")
+
+    outcome, record = store.delete_run(aid, "a000000000000002", in_progress=lambda r: False)
+    assert outcome == "deleted"
+    chat.forget_run(store, record)
+
+    # The user had seen the older run as well, so the conversation stays hidden until a new run arrives.
+    assert store.chat_hidden() == {thread: "a000000000000001"} and chat.list_threads(store) == []
+    store.save_run(_chat_record(aid, "a000000000000003", mode="continue", minute=2))
+    assert [t["id"] for t in chat.list_threads(store)] == [thread]
+
+
+def test_deleting_an_older_hidden_run_keeps_the_conversation_shown(tmp_path):
+    store = AutomationStore(tmp_path)
+    aid, thread = "aaaaaa000001", "c-aaaaaa000001"
+    store.save_run(_chat_record(aid, "a000000000000001", mode="continue", minute=0))
+    store.hide_chat_thread(thread, "a000000000000001")
+    store.save_run(_chat_record(aid, "a000000000000002", mode="continue", minute=1))  # an unseen run: shown again
+
+    _, record = store.delete_run(aid, "a000000000000001", in_progress=lambda r: False)
+    chat.forget_run(store, record)
+
+    assert store.chat_hidden() == {}
+    assert [t["id"] for t in chat.list_threads(store)] == [thread]
+
+
+def test_deleting_a_hidden_single_run_conversation_forgets_it(tmp_path):
+    store = AutomationStore(tmp_path)
+    store.save_run(_chat_record("aaaaaa000001", "a000000000000001"))
+    store.hide_chat_thread("r-aaaaaa000001-a000000000000001", "a000000000000001")
+    _, record = store.delete_run("aaaaaa000001", "a000000000000001", in_progress=lambda r: False)
+    chat.forget_run(store, record)
+    assert store.chat_hidden() == {}
+
+
+async def test_a_run_deleted_while_it_runs_is_not_written_back(auto_env, monkeypatch):
+    ctx, runner, manager = auto_env
+    a = ctx.automations.upsert(Automation(name="毎朝", prompt="予定"))
+    session = runner._run_session
+
+    async def deleted_meanwhile(*args, **kwargs):
+        await session(*args, **kwargs)
+        # Deleted from the history after the app stopped showing it as running (interrupted).
+        assert ctx.automations.delete_run(a.id, "a000000000000001", in_progress=lambda r: False)[0] == "deleted"
+
+    monkeypatch.setattr(runner, "_run_session", deleted_meanwhile)
+    record = await runner.run(a.id, run_id="a000000000000001")
+
+    assert record["status"] == "success"
+    assert ctx.automations.list_runs(a.id) == []
+    assert ctx.automations.get(a.id).state.last_status == "success"
+
+
+def test_marking_a_run_read_does_not_bring_back_a_deleted_one(tmp_path, monkeypatch):
+    store = AutomationStore(tmp_path)
+    aid, rid = "aaaaaa000001", "a000000000000001"
+    store.save_run(_chat_record(aid, rid))
+    real = store.get_run
+    calls = 0
+
+    def deleted_after_the_first_read(automation_id, run_id):
+        nonlocal calls
+        calls += 1
+        record = real(automation_id, run_id)
+        if calls == 1:
+            store.delete_run(automation_id, run_id, in_progress=lambda r: False)
+        return record
+
+    monkeypatch.setattr(store, "get_run", deleted_after_the_first_read)
+    store.mark_read(aid, rid)
+    assert not (store.runs_dir / aid / f"{rid}.json").exists()
+
+
+def test_writing_a_result_back_only_replaces_an_existing_record(tmp_path):
+    store = AutomationStore(tmp_path)
+    record = _running_record("aaaaaa000001", "a000000000000001")
+    assert store.save_run(record | {"status": "success"}, replace_only=True) is False
+    assert store.get_run("aaaaaa000001", "a000000000000001") is None
+    store.save_run(record)
+    assert store.save_run(record | {"status": "success"}, replace_only=True) is True
+    assert store.get_run("aaaaaa000001", "a000000000000001")["status"] == "success"

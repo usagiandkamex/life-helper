@@ -17,7 +17,7 @@ from ..security import SENSITIVE_LABELS, detect_sensitive
 from . import chat
 from .models import Automation, AutomationState, NotifySettings, Schedule, normalize_connectors
 from .runner import AutomationRunner, build_notifier
-from .store import RUNNING_STATUS, AutomationStore
+from .store import RUNNING_STATUS, AutomationStore, parse_timestamp
 
 router = APIRouter(prefix="/api/automations")
 
@@ -103,11 +103,10 @@ def _run_view(ctx: AppContext, record: dict) -> dict:
     job process), so both the list and the detail decide the same way, from the same clock."""
     if record.get("status") != RUNNING_STATUS:
         return record
-    try:
-        age = datetime.now(UTC) - datetime.fromisoformat(record.get("started_at") or "")
-    except (TypeError, ValueError):
+    started = parse_timestamp(record.get("started_at"))
+    if started is None:
         return record
-    if age.total_seconds() > ctx.settings.automation_lock_ttl_seconds:
+    if (datetime.now(UTC) - started).total_seconds() > ctx.settings.automation_lock_ttl_seconds:
         return record | {"status": INTERRUPTED_STATUS}
     return record
 
@@ -261,6 +260,29 @@ def mark_read(
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
     return {"ok": True}
+
+
+@router.delete("/{automation_id}/runs/{run_id}")
+def delete_run(
+    automation_id: str, run_id: str, user: CurrentUser = Depends(require_user), ctx: AppContext = Depends(get_ctx)
+) -> dict:
+    """Deletes one run from the history (and from the chat). A run that may still be running cannot be deleted."""
+    store = _store(ctx)
+    try:
+        outcome, record = store.delete_run(
+            automation_id, run_id, in_progress=lambda r: _run_view(ctx, r).get("status") == RUNNING_STATUS
+        )
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
+    except TimeoutError as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, "実行の記録を更新中です。もう一度お試しください") from e
+    if outcome == "missing":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "run not found")
+    if outcome == "running":
+        raise HTTPException(status.HTTP_409_CONFLICT, "実行中の記録は削除できません。終わってから削除してください")
+    assert record is not None
+    chat.forget_run(store, record)
+    return {"ok": True, "unread": store.unread_count()}
 
 
 @router.post("/{automation_id}/run")

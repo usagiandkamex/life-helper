@@ -13,6 +13,7 @@ from .bootstrap import init_core
 from .browser.service import shutdown_browser
 from .config import get_settings
 from .context import build_context
+from .retention import run_scope
 from .security import install_log_masking
 
 logger = logging.getLogger("life_helper.jobs")
@@ -26,6 +27,11 @@ async def run_due() -> int:
     runner = AutomationRunner(ctx, ctx.automations)
     try:
         results = await runner.run_due()
+        # Once a day, after the due runs so they are not delayed (the app does the same while it is running).
+        try:
+            await run_scope(ctx, "automation", automation_manager=runner.manager)
+        except Exception as exc:  # noqa: BLE001 - never fails the job; retried an hour later
+            logger.error("data retention failed: %s", type(exc).__name__)
     finally:
         await runner.manager.reset()
         await shutdown_browser(ctx)

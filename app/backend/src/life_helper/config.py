@@ -66,6 +66,9 @@ class Settings(BaseSettings):
     automation_lock_ttl_seconds: int = 25 * 60
     automation_monthly_run_limit: int = 300
 
+    # Automation runs, chat conversations and Copilot session state left unused for this many days are deleted.
+    data_retention_days: int = Field(default=180, ge=1)
+
     upload_max_bytes: int = Field(default=10 * 1024 * 1024)
 
     @model_validator(mode="after")
