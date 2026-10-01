@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from ..connectors.registry import get_connectors
 from ..copilot_integration.events import map_event, send_and_wait_own
 from ..copilot_integration.manager import CopilotManager, NoTokenError
+from ..copilot_integration.system_prompt import MAX_SUMMARY_CHARS
 from ..security import redact_sensitive
 from ..tools.registry import ToolSpec
 from .locks import FileLock
@@ -46,9 +47,9 @@ REAUTH_MESSAGE = "GitHub への再ログインが必要です。アプリを開�
 
 class ReportParams(BaseModel):
     summary: str = Field(
-        max_length=4000,
+        max_length=MAX_SUMMARY_CHARS,
         description=(
-            "利用者が「実行履歴」で読む結果の本文（Markdown、4000 文字以内）。"
+            f"利用者が「実行履歴」で読む結果の本文（Markdown、{MAX_SUMMARY_CHARS:,} 文字以内）。"
             "指示で表などの形式が指定されていればその形式で、完成した結果を書く。"
         ),
     )

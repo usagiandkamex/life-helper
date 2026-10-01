@@ -13,10 +13,10 @@ export const STATUS_LABELS: Record<string, string> = {
   skipped_limit: '上限のため未実行',
 }
 
-// The instruction is quoted in full (automation prompts are capped at 8,000) and the result is clipped so both,
-// plus the question, stay within the 50,000-character limit of a chat message.
+// The instruction is quoted in full (automation prompts are capped at 8,000) and so is a full result (summaries are
+// capped at 20,000); both, plus the question, stay within the 50,000-character limit of a chat message.
 const QUOTE_PROMPT_LIMIT = 8000
-const QUOTE_RESULT_LIMIT = 8000
+const QUOTE_RESULT_LIMIT = 20000
 
 export const statusLabel = (status: string) => STATUS_LABELS[status] ?? status
 
@@ -65,9 +65,10 @@ export function runAnswer(run: RunRecord): string {
   return parts.join('\n\n')
 }
 
+// Counted in code points, like the backend limits and the chat composer, so an emoji is one character.
 function clip(text: string, limit: number): string {
-  const trimmed = text.trim()
-  return trimmed.length > limit ? `${trimmed.slice(0, limit)}\n…（長いため以降を省略）` : trimmed
+  const chars = [...text.trim()]
+  return chars.length > limit ? `${chars.slice(0, limit).join('')}\n…（長いため以降を省略）` : chars.join('')
 }
 
 export function quoteDraft(run: RunRecord): string {

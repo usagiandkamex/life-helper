@@ -10,6 +10,8 @@ from .agents import MAX_TASKS_PER_ANSWER
 
 JST = ZoneInfo("Asia/Tokyo")
 PROFILE_LIMIT = 6000
+# The longest result an automation may report (report_result's summary), in characters.
+MAX_SUMMARY_CHARS = 20_000
 
 BASE_RULES = """\
 あなたは、利用者（GitHub アカウント usagiandkamex）専用のプライベートな生活サポートアシスタントです。
@@ -54,7 +56,7 @@ AUTOMATION_RULES = """\
 - 指示で形式（表にまとめる、箇条書きにする、○件だけ、など）が指定されていたら、必ずそのとおりの形式で書いてください。指定がなければ、要点を箇条書きか表にまとめ、長い文章の羅列にしないでください。
 - 途中経過ではなく、完成した結果そのものを書いてください。調べた日付・対象・数値・出典 URL など、あとから読んでも分かるように前提を添え、「前回」「上記」のようなその場でしか通じない書き方は避けてください。
 - 結果が得られなかったときも、何を試してなぜ得られなかったかを同じように書いてください。
-- summary は 4000 文字以内です。収まらないときは重要なものに絞り、絞ったことを書き添えてください。
+- summary は {summary_limit} 文字以内です。収まらないときは重要なものに絞り、絞ったことを書き添えてください。
 - 同じ内容を会話のメッセージにも長く書き直す必要はありません（利用者が読む本文は summary です）。
 """
 
@@ -143,7 +145,7 @@ def build_system_message(
             if allow_write
             else "- このオートメーションは読み取り専用です。ファイルや保有銘柄を変更しないでください。\n"
         )
-        parts.append(AUTOMATION_RULES.format(readonly=readonly))
+        parts.append(AUTOMATION_RULES.format(readonly=readonly, summary_limit=f"{MAX_SUMMARY_CHARS:,}"))
     else:
         if approval:
             parts.append(APPROVAL_RULES)
