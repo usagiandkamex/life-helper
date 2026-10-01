@@ -206,7 +206,12 @@ async def prune_automation_data(
     assert store is not None
     cutoff = cutoff_for(ctx, now)
     result = PassResult()
-    result.add("runs", len(await asyncio.to_thread(store.prune_runs, cutoff, should_stop)))
+    deleted, complete = await asyncio.to_thread(
+        store.prune_runs, cutoff, should_stop, ctx.settings.automation_lock_ttl_seconds
+    )
+    result.add("runs", len(deleted))
+    if not complete:
+        result.complete = False
     # Each later step reads the whole history or every session again, so none starts once the time is up.
     if should_stop():
         return result

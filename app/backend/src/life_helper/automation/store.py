@@ -63,6 +63,26 @@ def parse_timestamp(value: object) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
+def _conversation_key(meta: dict) -> tuple[str, str | None]:
+    """The conversation a run belongs to: one per "continue" automation, one per run otherwise."""
+    if meta.get("conversation_mode") == "continue":
+        return meta["automation_id"], None
+    return meta["automation_id"], meta["id"]
+
+
+def _conversations(metas: list[dict]) -> dict[tuple[str, str | None], list[dict]]:
+    groups: dict[tuple[str, str | None], list[dict]] = {}
+    for meta in metas:
+        groups.setdefault(_conversation_key(meta), []).append(meta)
+    return groups
+
+
+def _conversation_expired(runs: list[dict], cutoff: datetime) -> bool:
+    """Whether the last exchange of a conversation started before ``cutoff`` (unknown when a start cannot be read)."""
+    starts = [parse_timestamp(m.get("started_at")) for m in runs]
+    return bool(starts) and all(s is not None and s < cutoff for s in starts)
+
+
 def is_link(path: Path) -> bool:
     """Symlinks and junctions are never followed or deleted by the cleanup."""
     try:
@@ -365,41 +385,88 @@ class AutomationStore:
             self._update_run_index({}, drop={f"{automation_id}/{run_id}"})
         return outcome, record
 
-    def prune_runs(self, cutoff: datetime, should_stop: Callable[[], bool] = lambda: False) -> list[dict]:
-        """Deletes the records of runs that started before ``cutoff`` and returns their metadata.
+    def prune_runs(
+        self,
+        cutoff: datetime,
+        should_stop: Callable[[], bool] = lambda: False,
+        automation_lock_ttl_seconds: int = 25 * 60,
+    ) -> tuple[list[dict], bool]:
+        """Deletes the runs of conversations whose last exchange started before ``cutoff``.
 
-        The cutoff is at least a day ago while a run lasts at most 20 minutes, so a record still marked as running
-        that started before it was left behind by a stopped app or job (the history shows it as interrupted).
-        Records whose start time cannot be read are kept.
+        The runs of a "continue" automation are one conversation, so they are kept while any of them is recent and go
+        together; a "new" run is a conversation of its own. The cutoff is at least a day ago while a run lasts at most
+        20 minutes, so a record still marked as running that started before it was left behind by a stopped app or job
+        (the history shows it as interrupted). A conversation with a run whose start time cannot be read is kept, and
+        so is a "continue" conversation while one of its automation's records cannot be read.
+
+        Returns the metadata of the deleted runs and whether every expired conversation was handled (False when one
+        was in use or the time ran out).
         """
         deleted: list[dict] = []
-        for meta in self.list_run_meta():
+        complete = True
+        for key, runs in _conversations(self.list_run_meta()).items():
             if should_stop():
+                complete = False
                 break
-            started = parse_timestamp(meta.get("started_at"))
-            if started is None or started >= cutoff:
+            if not _conversation_expired(runs, cutoff):
                 continue
-            automation_id, run_id = meta["automation_id"], meta["id"]
-            path = self._run_path(automation_id, run_id)
-            if is_link(path.parent) or is_link(path):
+            automation_id, run_id = key
+            # Runs start under their automation's lock, so none can join the conversation while it is held.
+            lock = (
+                FileLock(self.locks_dir / f"automation-{automation_id}.lock", automation_lock_ttl_seconds)
+                if run_id is None
+                else None
+            )
+            if lock is not None and not lock.try_acquire():
+                complete = False
                 continue
-
-            def op(automation_id: str = automation_id, run_id: str = run_id, path: Path = path) -> bool:
-                current = self.get_run(automation_id, run_id)
-                started = parse_timestamp((current or {}).get("started_at"))
-                if started is None or started >= cutoff:
-                    return False
-                path.unlink(missing_ok=True)
-                return True
-
             try:
-                if self._with_lock(op, lock=self._run_lock(automation_id, run_id)):
-                    deleted.append(meta)
-            except (TimeoutError, OSError):
-                logger.warning("could not delete an expired run record")
+                if lock is not None:
+                    # Strict: a run that cannot be read may be a recent exchange of this conversation.
+                    try:
+                        metas = self.list_run_meta(automation_id, strict=True)
+                    except UnreadableRunError:
+                        complete = False
+                        continue
+                    runs = [m for m in metas if _conversation_key(m) == key]
+                    if not _conversation_expired(runs, cutoff):
+                        continue
+                for meta in runs:
+                    if should_stop():
+                        complete = False
+                        break
+                    outcome = self._delete_expired_run(meta, cutoff)
+                    if outcome:
+                        deleted.append(meta)
+                    elif outcome is None:
+                        complete = False
+            finally:
+                if lock is not None:
+                    lock.release()
         if deleted:
             self._update_run_index({}, drop={f"{m['automation_id']}/{m['id']}" for m in deleted})
-        return deleted
+        return deleted, complete
+
+    def _delete_expired_run(self, meta: dict, cutoff: datetime) -> bool | None:
+        """True when deleted, False when kept (a link, or started again since), None when it could not be done now."""
+        automation_id, run_id = meta["automation_id"], meta["id"]
+        path = self._run_path(automation_id, run_id)
+        if is_link(path.parent) or is_link(path):
+            return False
+
+        def op() -> bool:
+            current = self.get_run(automation_id, run_id)
+            started = parse_timestamp((current or {}).get("started_at"))
+            if started is None or started >= cutoff:
+                return False
+            path.unlink(missing_ok=True)
+            return True
+
+        try:
+            return self._with_lock(op, lock=self._run_lock(automation_id, run_id))
+        except (TimeoutError, OSError):
+            logger.warning("could not delete an expired run record")
+            return None
 
     def remove_empty_run_dirs(self) -> None:
         """Removes the emptied history folders of deleted automations (a live automation may be writing to its own)."""

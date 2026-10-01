@@ -134,8 +134,75 @@ async def test_a_run_used_meanwhile_is_kept(env, monkeypatch):
         return record and record | {"started_at": RECENT.isoformat()}
 
     monkeypatch.setattr(store, "get_run", rewritten)
-    assert store.prune_runs(NOW - timedelta(days=180)) == []
+    assert store.prune_runs(NOW - timedelta(days=180)) == ([], True)
     assert store.list_run_meta() != []
+
+
+async def test_a_continue_conversation_is_kept_until_its_last_exchange_expires(env):
+    """The runs of a "continue" automation are one conversation, counted from its last exchange."""
+    store = env.automations
+    for i, started in enumerate([OLD - timedelta(days=100), OLD, RECENT]):
+        store.save_run(_run("aaaaaa000001", f"a00000000000000{i}", started, conversation_mode="continue"))
+    store.save_run(_run("bbbbbb000001", "b000000000000000", OLD - timedelta(days=1), conversation_mode="continue"))
+    store.save_run(_run("bbbbbb000001", "b000000000000001", OLD, conversation_mode="continue"))
+    # Its "new" runs are conversations of their own, so a recent one keeps only itself.
+    store.save_run(_run("bbbbbb000001", "b000000000000002", RECENT))
+    # A run whose start cannot be read keeps its whole conversation.
+    store.save_run(_run("cccccc000001", "c000000000000000", OLD, conversation_mode="continue"))
+    store.save_run(_run("cccccc000001", "c000000000000001", "not a time", conversation_mode="continue"))
+
+    result = await retention.prune_automation_data(env, None, NOW, _stop)
+
+    assert result.complete and result.deleted == {"runs": 2}
+    assert sorted(m["id"] for m in store.list_run_meta()) == [
+        "a000000000000000",
+        "a000000000000001",
+        "a000000000000002",
+        "b000000000000002",
+        "c000000000000000",
+        "c000000000000001",
+    ]
+
+
+async def test_a_continue_conversation_is_not_pruned_while_its_automation_runs(env):
+    store = env.automations
+    store.save_run(_run("aaaaaa000001", "a000000000000001", OLD, conversation_mode="continue"))
+    lock = FileLock(store.locks_dir / "automation-aaaaaa000001.lock", ttl_seconds=60)
+    assert lock.try_acquire()
+    try:
+        result = await retention.prune_automation_data(env, None, NOW, _stop)
+    finally:
+        lock.release()
+    assert not result.complete and len(store.list_run_meta()) == 1
+
+    # A run that joined the conversation after the scan keeps it (checked again under the lock).
+    real = store.list_run_meta
+
+    def joined(automation_id=None, **kwargs):
+        metas = real(automation_id, **kwargs)
+        if automation_id == "aaaaaa000001":
+            store.save_run(_run("aaaaaa000001", "a000000000000002", NOW, conversation_mode="continue"))
+            metas = real(automation_id, **kwargs)
+        return metas
+
+    store.list_run_meta = joined
+    try:
+        assert store.prune_runs(NOW - timedelta(days=180)) == ([], True)
+    finally:
+        del store.list_run_meta
+    assert len(store.list_run_meta()) == 2
+
+
+async def test_a_continue_conversation_is_kept_while_one_of_its_runs_cannot_be_read(env):
+    store = env.automations
+    store.save_run(_run("aaaaaa000001", "a000000000000001", OLD, conversation_mode="continue"))
+    broken = store.runs_dir / "aaaaaa000001" / "a000000000000002.json"
+    broken.write_text("{broken", encoding="utf-8")  # could be a recent exchange of the same conversation
+
+    result = await retention.prune_automation_data(env, None, NOW, _stop)
+
+    assert not result.complete and broken.exists()
+    assert [m["id"] for m in store.list_run_meta()] == ["a000000000000001"]
 
 
 async def test_hidden_conversations_and_month_counts_are_pruned(env):
@@ -160,7 +227,8 @@ async def test_hidden_conversations_and_month_counts_are_pruned(env):
     }
     # Months that ended before the cutoff (2026-04-04) go; the month it falls in and later ones stay.
     assert json.loads(store.usage_path.read_text()) == {"2026-04": 7, "2026-10": 1, "last_reauth_notice": "2026-01-01"}
-    assert result.deleted == {"runs": 2, "hidden": 1, "usage_months": 2}
+    # The old "continue" run stays with the recent one in the same conversation.
+    assert result.deleted == {"runs": 1, "hidden": 1, "usage_months": 2}
     assert [t["id"] for t in chat.list_threads(store)] == []
 
 
