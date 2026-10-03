@@ -15,7 +15,15 @@ from ..connectors.registry import get_connectors
 from ..context import AppContext, get_ctx
 from ..security import SENSITIVE_LABELS, detect_sensitive
 from . import chat
-from .models import Automation, AutomationState, NotifySettings, Schedule, normalize_connectors
+from .models import (
+    DEFAULT_RUNTIME_MINUTES,
+    MAX_RUNTIME_MINUTES,
+    Automation,
+    AutomationState,
+    NotifySettings,
+    Schedule,
+    normalize_connectors,
+)
 from .runner import AutomationRunner, build_notifier
 from .store import RUNNING_STATUS, AutomationStore, parse_timestamp
 
@@ -41,7 +49,7 @@ class AutomationBody(BaseModel):
     allow_write: bool = False
     connectors: list[str] = Field(default_factory=list)
     notify: NotifySettings = Field(default_factory=NotifySettings)
-    max_runtime_minutes: int = Field(default=20, ge=1, le=20)
+    max_runtime_minutes: int = Field(default=DEFAULT_RUNTIME_MINUTES, ge=1, le=MAX_RUNTIME_MINUTES)
 
     @field_validator("connectors")
     @classmethod

@@ -576,8 +576,8 @@ function Editor({
           </select>
         </label>
         <label>
-          最大実行時間（分、20 まで）
-          <input type="number" min={1} max={20} value={draft.max_runtime_minutes} onChange={(e) => set('max_runtime_minutes', Number(e.target.value))} />
+          最大実行時間（分、60 まで）
+          <input type="number" min={1} max={60} value={draft.max_runtime_minutes} onChange={(e) => set('max_runtime_minutes', Number(e.target.value))} />
         </label>
       </div>
       <label className="check">

@@ -12,7 +12,13 @@ import pytest
 import respx
 import yaml
 from copilot import ToolInvocation
-from copilot.session_events import AssistantMessageData, AssistantUsageData, SessionErrorData, SessionIdleData
+from copilot.session_events import (
+    AssistantMessageData,
+    AssistantMessageDeltaData,
+    AssistantUsageData,
+    SessionErrorData,
+    SessionIdleData,
+)
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from pydantic import SecretStr, ValidationError
@@ -64,9 +70,9 @@ def test_signal_condition():
     assert n.signal_met({}) is None
 
 
-def test_max_runtime_is_capped_at_20_minutes():
+def test_max_runtime_is_capped_at_60_minutes():
     with pytest.raises(ValidationError):
-        Automation(name="x", prompt="y", max_runtime_minutes=21)
+        Automation(name="x", prompt="y", max_runtime_minutes=61)
 
 
 # -- locks and store --------------------------------------------------------------------------------------
@@ -406,6 +412,27 @@ async def test_timeout_is_recorded(auto_env):
     assert record["status"] == "timeout" and "20 分" in record["error"]
 
 
+async def test_timeout_keeps_the_partial_answer(auto_env, monkeypatch):
+    ctx, runner, manager = auto_env
+
+    async def stream_then_timeout(session, prompt):
+        manager.prompts.append(prompt)
+        for handler in list(session.handlers):
+            handler(SimpleNamespace(data=AssistantUsageData(model="gpt-5-mini")))
+            for chunk in ("途中まで", "書きました"):
+                handler(SimpleNamespace(data=AssistantMessageDeltaData(delta_content=chunk, message_id="m", parent_tool_call_id=None)))
+        raise TimeoutError
+
+    monkeypatch.setattr(FakeAutoSession, "send", stream_then_timeout)
+    a = ctx.automations.upsert(Automation(name="x", prompt="y"))
+    record = await runner.run(a.id)
+
+    # The run still timed out, but the text produced before it was cut off is kept as the result.
+    assert record["status"] == "timeout"
+    assert record["final_message"] == "途中まで書きました" and record["summary"] == "途中まで書きました"
+    assert record["events"][-1] == {"type": "message", "content": "途中まで書きました", "partial": True}
+
+
 @respx.mock
 async def test_reauth_notice_sent_once_per_day(auto_env):
     ctx, runner, manager = auto_env
@@ -500,7 +527,7 @@ def test_automation_api(client, ctx):
     bad = dict(body, notify={"github": True, "condition": "signal"})
     assert client.post("/api/automations", json=bad, headers=h).status_code == 400
     assert client.post("/api/automations", json=dict(body, connectors=["nope"]), headers=h).status_code == 400
-    assert client.post("/api/automations", json=dict(body, max_runtime_minutes=30), headers=h).status_code == 422
+    assert client.post("/api/automations", json=dict(body, max_runtime_minutes=61), headers=h).status_code == 422
     assert client.post("/api/automations", json=dict(body, prompt="口座番号: 1234567"), headers=h).status_code == 422
 
     updated = client.put(f"/api/automations/{created['id']}", json=dict(body, name="改名"), headers=h).json()

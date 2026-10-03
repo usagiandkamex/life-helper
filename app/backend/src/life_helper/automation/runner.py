@@ -62,6 +62,9 @@ class RunContext:
     signals: dict[str, float] = field(default_factory=dict)
     events: list[dict] = field(default_factory=list)
     requests: int = 0
+    # Text streamed for the answer currently being written, before it is finalized into a "message" event. It is
+    # kept so a run that is cut off (e.g. a timeout) can still show the partial result in its history.
+    partial: str = ""
 
     def capture_tool_result(self, tool_name: str, result: Any) -> None:
         data = result
@@ -230,6 +233,10 @@ class AutomationRunner:
                     continue
                 break
 
+        # An answer cut off before it finished (e.g. a timeout) leaves its streamed text here; keep it as the
+        # run's result so the history shows what was produced instead of only the failure reason.
+        if run_ctx.partial.strip():
+            run_ctx.events.append({"type": "message", "content": run_ctx.partial, "partial": True})
         final_message = next((e["content"] for e in reversed(run_ctx.events) if e["type"] == "message"), "")
         summary = (run_ctx.report or {}).get("summary") or final_message[:2000] or error or ""
         events, omitted = trim_events(run_ctx.events)
@@ -320,7 +327,12 @@ class AutomationRunner:
                 return
             if mapped["type"] == "usage":
                 run_ctx.requests += 1
+            elif mapped["type"] == "delta":
+                # One per token; not stored as events (too many), but kept so a cut-off answer still has its text.
+                run_ctx.partial += mapped["text"]
             elif mapped["type"] in KEPT_EVENT_TYPES:
+                if mapped["type"] == "message":
+                    run_ctx.partial = ""  # the finished answer supersedes the text streamed so far
                 run_ctx.events.append(mapped)
 
         unsubscribe = active.session.on(on_event)
@@ -347,6 +359,8 @@ class AutomationRunner:
                     logger.warning("automation %s did not report after the follow-up request", automation.id)
                     await self._abort(active.session)
                     del run_ctx.events[follow_up_start:]
+                    # The main answer already finished, so drop the follow-up's partial text too (issue #41).
+                    run_ctx.partial = ""
         except TimeoutError:
             await self._abort(active.session)
             raise
