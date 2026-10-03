@@ -516,6 +516,50 @@ async def test_progress_is_kept_when_the_run_is_cut_off(auto_env, monkeypatch):
     assert stored["summary"] == "途中まで" and "finished_at" not in stored
 
 
+async def test_progress_leaves_out_an_unfinished_follow_up(auto_env, monkeypatch):
+    ctx, runner, manager = auto_env
+    monkeypatch.setattr(runner_module, "CHECKPOINT_SECONDS", 0.01)
+    manager.report_on_call = 2
+    in_follow_up = asyncio.Event()
+    send = FakeAutoSession.send
+
+    async def hang_in_follow_up(session, prompt):
+        if not manager.prompts:
+            return await send(session, prompt)
+        manager.prompts.append(prompt)
+        for handler in list(session.handlers):
+            handler(SimpleNamespace(data=AssistantUsageData(model="gpt-5-mini")))
+            handler(SimpleNamespace(data=AssistantMessageData(content="報告を試みます", message_id="f1")))
+            handler(
+                SimpleNamespace(
+                    data=AssistantMessageDeltaData(delta_content="報告しま", message_id="f2", parent_tool_call_id=None)
+                )
+            )
+        in_follow_up.set()
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(FakeAutoSession, "send", hang_in_follow_up)
+    a = ctx.automations.upsert(Automation(name="x", prompt="y"))
+    task = asyncio.create_task(runner.run(a.id, run_id="abcdef0123456789"))
+    await in_follow_up.wait()
+    for _ in range(200):
+        stored = ctx.automations.get_run(a.id, "abcdef0123456789")
+        if stored and stored["final_message"]:
+            break
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0.05)  # more checkpoints while the follow-up is in progress
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # Interrupted during the follow-up: the finished main answer is shown, never the follow-up's text.
+    stored = ctx.automations.get_run(a.id, "abcdef0123456789")
+    assert stored["status"] == "running"
+    assert stored["final_message"] == stored["summary"] == "空室を確認しました"
+    assert [e["type"] for e in stored["events"]] == ["message", "follow_up"]
+    assert not any(e.get("partial") for e in stored["events"])
+
+
 async def test_finished_result_replaces_the_progress(auto_env, monkeypatch):
     ctx, runner, manager = auto_env
     monkeypatch.setattr(runner_module, "CHECKPOINT_SECONDS", 0.01)

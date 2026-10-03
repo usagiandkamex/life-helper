@@ -70,6 +70,9 @@ class RunContext:
     # Text streamed for the answer currently being written, before it is finalized into a "message" event. It is
     # kept so a run that is cut off (e.g. a timeout) can still show the partial result in its history.
     partial: str = ""
+    # While the report follow-up is in progress, the index of its first event (after its marker). Until it finishes,
+    # its events and streamed text are left out of the progress, as they would be if it failed.
+    follow_up_start: int | None = None
 
     def capture_tool_result(self, tool_name: str, result: Any) -> None:
         data = result
@@ -295,6 +298,9 @@ class AutomationRunner:
         """The run's events and the answer it shows; with ``include_partial`` text streamed but never finished into
         a message is added as the last (partial) message."""
         events = list(run_ctx.events)
+        if run_ctx.follow_up_start is not None:
+            del events[run_ctx.follow_up_start :]
+            include_partial = False
         if include_partial and run_ctx.partial.strip():
             events.append({"type": "message", "content": run_ctx.partial, "partial": True})
         final_message = next((e["content"] for e in reversed(events) if e["type"] == "message"), "")
@@ -310,7 +316,14 @@ class AutomationRunner:
             except TimeoutError:
                 pass
             run_ctx = current()
-            state = (id(run_ctx), len(run_ctx.events), len(run_ctx.partial), run_ctx.requests, run_ctx.report)
+            state = (
+                id(run_ctx),
+                len(run_ctx.events),
+                len(run_ctx.partial),
+                run_ctx.requests,
+                run_ctx.report,
+                run_ctx.follow_up_start,
+            )
             # A retry starts from an empty context, which is written too so the discarded attempt does not remain.
             if state != written and (written is not None or run_ctx.events or run_ctx.partial or run_ctx.report):
                 written = state
@@ -403,7 +416,9 @@ class AutomationRunner:
                 run_ctx.requests += 1
             elif mapped["type"] == "delta":
                 # One per token; not stored as events (too many), but kept so a cut-off answer still has its text.
-                run_ctx.partial += mapped["text"]
+                # The follow-up's text is never kept: the main answer is already finished.
+                if run_ctx.follow_up_start is None:
+                    run_ctx.partial += mapped["text"]
             elif mapped["type"] in KEPT_EVENT_TYPES:
                 if mapped["type"] == "message":
                     run_ctx.partial = ""  # the finished answer supersedes the text streamed so far
@@ -425,14 +440,16 @@ class AutomationRunner:
                 # so ask once more within the same session. The work itself is already done, so this extra
                 # request is best effort: failing it must not turn a finished run into a failed one.
                 run_ctx.events.append({"type": "follow_up"})
-                follow_up_start = len(run_ctx.events)
+                run_ctx.partial = ""  # leftover of the finished main answer, never shown for it
+                run_ctx.follow_up_start = len(run_ctx.events)
                 try:
                     active.policy.begin_answer()
                     await asyncio.wait_for(send_and_wait_own(active.session, REPORT_FOLLOW_UP), remaining)
                 except Exception:  # noqa: BLE001
                     logger.warning("automation %s did not report after the follow-up request", automation.id)
                     await self._abort(active.session)
-                    del run_ctx.events[follow_up_start:]
+                    del run_ctx.events[run_ctx.follow_up_start :]
+                run_ctx.follow_up_start = None
         except TimeoutError:
             await self._abort(active.session)
             raise
