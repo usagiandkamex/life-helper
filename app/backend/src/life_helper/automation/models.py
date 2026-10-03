@@ -12,7 +12,10 @@ from croniter import croniter
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 JST = ZoneInfo("Asia/Tokyo")
-MAX_RUNTIME_MINUTES = 20
+# The cap must stay below the ACA job's replicaTimeout (see infra/resources.bicep) so a run can save its
+# results and release its lock before the replica is killed. The default stays conservative.
+MAX_RUNTIME_MINUTES = 60
+DEFAULT_RUNTIME_MINUTES = 20
 # Connectors that were replaced, so automations saved with the old name keep their tools.
 RENAMED_CONNECTORS = {"stooq": "yahoo_finance", "mufg_api": "toushin_lib", "rakuten_travel": "rakuten"}
 
@@ -121,7 +124,7 @@ class Automation(BaseModel):
     )
     connectors: list[str] = Field(default_factory=list)
     notify: NotifySettings = Field(default_factory=NotifySettings)
-    max_runtime_minutes: int = Field(default=MAX_RUNTIME_MINUTES, ge=1, le=MAX_RUNTIME_MINUTES)
+    max_runtime_minutes: int = Field(default=DEFAULT_RUNTIME_MINUTES, ge=1, le=MAX_RUNTIME_MINUTES)
     state: AutomationState = Field(default_factory=AutomationState)
 
     @field_validator("connectors")

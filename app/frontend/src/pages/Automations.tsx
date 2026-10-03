@@ -267,7 +267,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
       const startedRun = await api<{ started: boolean; run_id: string }>(`/api/automations/${a.id}/run`, {
         method: 'POST',
       })
-      setMessage(`「${a.name}」の実行を始めました。実行中も実行履歴に出て、終わると結果に変わります（最大 20 分）。`)
+      setMessage(`「${a.name}」の実行を始めました。実行中も実行履歴に出て、終わると結果に変わります（最大 ${a.max_runtime_minutes} 分）。`)
       // 同時に定期実行が始まっても取り違えないよう、API が割り当てた記録だけを待つ。
       const started = Date.now()
       await new Promise((resolve) => window.setTimeout(resolve, 2_000))
@@ -425,13 +425,22 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
                   {deletingRunId === run.id ? '削除中…' : '削除'}
                 </button>
               </div>
-              {/* 実行中の記録には結果がない（実行内容は終わってから記録される） */}
+              {/* 実行中の記録には結果がない（実行内容は終わってから記録される）。途切れた記録には途中までの出力だけが残ることがある */}
               {!hasResult(run) ? (
-                <p className="hint">
-                  {run.status === 'running'
-                    ? '実行中です。終わると、ここに結果を表示します。'
-                    : '実行中のまま記録が途切れました（アプリや定期実行のジョブが止まった可能性があります）。結果は残っていません。'}
-                </p>
+                run.status === 'running' ? (
+                  <p className="hint">実行中です。終わると、ここに結果を表示します。</p>
+                ) : runAnswer(run) ? (
+                  <>
+                    <p className="hint">
+                      実行中のまま記録が途切れました（アプリや定期実行のジョブが止まった可能性があります）。途中までの出力を表示します。
+                    </p>
+                    <Markdown text={runAnswer(run)} />
+                  </>
+                ) : (
+                  <p className="hint">
+                    実行中のまま記録が途切れました（アプリや定期実行のジョブが止まった可能性があります）。結果は残っていません。
+                  </p>
+                )
               ) : (
                 <>
                   {run.chat_thread_id && (
@@ -576,8 +585,8 @@ function Editor({
           </select>
         </label>
         <label>
-          最大実行時間（分、20 まで）
-          <input type="number" min={1} max={20} value={draft.max_runtime_minutes} onChange={(e) => set('max_runtime_minutes', Number(e.target.value))} />
+          最大実行時間（分、60 まで）
+          <input type="number" min={1} max={60} value={draft.max_runtime_minutes} onChange={(e) => set('max_runtime_minutes', Number(e.target.value))} />
         </label>
       </div>
       <label className="check">

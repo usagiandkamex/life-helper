@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from datetime import UTC, datetime, timedelta
@@ -12,12 +13,19 @@ import pytest
 import respx
 import yaml
 from copilot import ToolInvocation
-from copilot.session_events import AssistantMessageData, AssistantUsageData, SessionErrorData, SessionIdleData
+from copilot.session_events import (
+    AssistantMessageData,
+    AssistantMessageDeltaData,
+    AssistantUsageData,
+    SessionErrorData,
+    SessionIdleData,
+)
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from pydantic import SecretStr, ValidationError
 
 from life_helper.automation import chat
+from life_helper.automation import runner as runner_module
 from life_helper.automation import store as store_module
 from life_helper.automation.locks import FileLock
 from life_helper.automation.models import Automation, NotifySettings, Schedule, expand_prompt
@@ -64,9 +72,9 @@ def test_signal_condition():
     assert n.signal_met({}) is None
 
 
-def test_max_runtime_is_capped_at_20_minutes():
+def test_max_runtime_is_capped_at_60_minutes():
     with pytest.raises(ValidationError):
-        Automation(name="x", prompt="y", max_runtime_minutes=21)
+        Automation(name="x", prompt="y", max_runtime_minutes=61)
 
 
 # -- locks and store --------------------------------------------------------------------------------------
@@ -406,6 +414,260 @@ async def test_timeout_is_recorded(auto_env):
     assert record["status"] == "timeout" and "20 分" in record["error"]
 
 
+async def test_timeout_keeps_the_partial_answer(auto_env, monkeypatch):
+    ctx, runner, manager = auto_env
+
+    async def stream_then_timeout(session, prompt):
+        manager.prompts.append(prompt)
+        for handler in list(session.handlers):
+            handler(SimpleNamespace(data=AssistantUsageData(model="gpt-5-mini")))
+            for chunk in ("途中まで", "書きました"):
+                handler(
+                    SimpleNamespace(
+                        data=AssistantMessageDeltaData(delta_content=chunk, message_id="m", parent_tool_call_id=None)
+                    )
+                )
+        raise TimeoutError
+
+    monkeypatch.setattr(FakeAutoSession, "send", stream_then_timeout)
+    a = ctx.automations.upsert(Automation(name="x", prompt="y"))
+    record = await runner.run(a.id)
+
+    # The run still timed out, but the text produced before it was cut off is kept as the result.
+    assert record["status"] == "timeout"
+    assert record["final_message"] == "途中まで書きました" and record["summary"] == "途中まで書きました"
+    assert record["events"][-1] == {"type": "message", "content": "途中まで書きました", "partial": True}
+
+
+async def test_successful_follow_up_stream_is_not_kept_as_partial(auto_env, monkeypatch):
+    ctx, runner, manager = auto_env
+    manager.report_on_call = 2  # the model reports only on the follow-up request
+
+    async def send(session, prompt):
+        manager.prompts.append(prompt)
+        if len(manager.prompts) == 1:
+            # The main answer finishes normally.
+            for handler in list(session.handlers):
+                handler(SimpleNamespace(data=AssistantUsageData(model="gpt-5-mini")))
+                handler(SimpleNamespace(data=AssistantMessageData(content="空室を確認しました", message_id="m")))
+        else:
+            # The follow-up streams chatter as deltas and then calls the terminal report tool without ever
+            # finishing a message, so that leftover text must not become the run's result.
+            for handler in list(session.handlers):
+                handler(SimpleNamespace(data=AssistantUsageData(model="gpt-5-mini")))
+                handler(
+                    SimpleNamespace(
+                        data=AssistantMessageDeltaData(
+                            delta_content="報告します", message_id="f", parent_tool_call_id=None
+                        )
+                    )
+                )
+            report = next(s.tool for s in manager.extra_tools if s.tool.name == "report_result")
+            await report.handler(ToolInvocation(arguments={"summary": "要約", "notify": False}))
+        for handler in list(session.handlers):
+            handler(SimpleNamespace(data=SessionIdleData()))
+
+    monkeypatch.setattr(FakeAutoSession, "send", send)
+    a = ctx.automations.upsert(Automation(name="x", prompt="y"))
+    record = await runner.run(a.id)
+
+    assert record["status"] == "success" and record["report"]["summary"] == "要約"
+    assert record["final_message"] == "空室を確認しました" and "報告します" not in record["final_message"]
+    assert not any(e.get("partial") for e in record["events"])
+
+
+async def test_progress_is_kept_when_the_run_is_cut_off(auto_env, monkeypatch):
+    ctx, runner, manager = auto_env
+    monkeypatch.setattr(runner_module, "CHECKPOINT_SECONDS", 0.01)
+    streamed = asyncio.Event()
+
+    async def stream_then_hang(session, prompt):
+        manager.prompts.append(prompt)
+        for handler in list(session.handlers):
+            handler(SimpleNamespace(data=AssistantUsageData(model="gpt-5-mini")))
+            handler(
+                SimpleNamespace(
+                    data=AssistantMessageDeltaData(delta_content="途中まで", message_id="m", parent_tool_call_id=None)
+                )
+            )
+        streamed.set()
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(FakeAutoSession, "send", stream_then_hang)
+    a = ctx.automations.upsert(Automation(name="x", prompt="y"))
+    task = asyncio.create_task(runner.run(a.id, run_id="abcdef0123456789"))
+    await streamed.wait()
+
+    # While it runs, the text streamed so far is written to the record, which stays marked as running.
+    for _ in range(200):
+        stored = ctx.automations.get_run(a.id, "abcdef0123456789")
+        if stored and stored["final_message"]:
+            break
+        await asyncio.sleep(0.01)
+    assert stored["status"] == "running" and stored["final_message"] == "途中まで"
+    assert stored["events"][-1] == {"type": "message", "content": "途中まで", "partial": True}
+
+    # Stopped from outside (the app shutting down): no result is written, but the progress stays in the record.
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    stored = ctx.automations.get_run(a.id, "abcdef0123456789")
+    assert stored["status"] == "running" and stored["final_message"] == "途中まで"
+    assert stored["summary"] == "途中まで" and "finished_at" not in stored
+
+
+async def test_progress_leaves_out_an_unfinished_follow_up(auto_env, monkeypatch):
+    ctx, runner, manager = auto_env
+    monkeypatch.setattr(runner_module, "CHECKPOINT_SECONDS", 0.01)
+    manager.report_on_call = 2
+    in_follow_up = asyncio.Event()
+    send = FakeAutoSession.send
+
+    async def hang_in_follow_up(session, prompt):
+        if not manager.prompts:
+            return await send(session, prompt)
+        manager.prompts.append(prompt)
+        for handler in list(session.handlers):
+            handler(SimpleNamespace(data=AssistantUsageData(model="gpt-5-mini")))
+            handler(SimpleNamespace(data=AssistantMessageData(content="報告を試みます", message_id="f1")))
+            handler(
+                SimpleNamespace(
+                    data=AssistantMessageDeltaData(delta_content="報告しま", message_id="f2", parent_tool_call_id=None)
+                )
+            )
+        in_follow_up.set()
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(FakeAutoSession, "send", hang_in_follow_up)
+    a = ctx.automations.upsert(Automation(name="x", prompt="y"))
+    task = asyncio.create_task(runner.run(a.id, run_id="abcdef0123456789"))
+    await in_follow_up.wait()
+    for _ in range(200):
+        stored = ctx.automations.get_run(a.id, "abcdef0123456789")
+        if stored and stored["final_message"]:
+            break
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0.05)  # more checkpoints while the follow-up is in progress
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # Interrupted during the follow-up: the finished main answer is shown, never the follow-up's text.
+    stored = ctx.automations.get_run(a.id, "abcdef0123456789")
+    assert stored["status"] == "running"
+    assert stored["final_message"] == stored["summary"] == "空室を確認しました"
+    assert [e["type"] for e in stored["events"]] == ["message", "follow_up"]
+    assert not any(e.get("partial") for e in stored["events"])
+
+
+async def test_finished_result_replaces_the_progress(auto_env, monkeypatch):
+    ctx, runner, manager = auto_env
+    monkeypatch.setattr(runner_module, "CHECKPOINT_SECONDS", 0.01)
+    original_send = FakeAutoSession.send
+
+    async def slow_send(session, prompt):
+        for handler in list(session.handlers):
+            handler(
+                SimpleNamespace(
+                    data=AssistantMessageDeltaData(delta_content="途中", message_id="m", parent_tool_call_id=None)
+                )
+            )
+        await asyncio.sleep(0.1)  # long enough for checkpoints to be written
+        await original_send(session, prompt)
+
+    monkeypatch.setattr(FakeAutoSession, "send", slow_send)
+    a = ctx.automations.upsert(Automation(name="x", prompt="y"))
+    record = await runner.run(a.id)
+
+    stored = ctx.automations.get_run(a.id, record["id"])
+    assert stored["status"] == "success" and stored["final_message"] == "空室を確認しました"
+    assert not any(e.get("partial") for e in stored["events"])
+
+
+async def test_progress_is_kept_when_cut_off_while_notifying(auto_env, monkeypatch):
+    ctx, runner, manager = auto_env
+    notifying = asyncio.Event()
+
+    async def hang(*args, **kwargs):
+        notifying.set()
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(runner, "_send", hang)
+    a = ctx.automations.upsert(Automation(name="x", prompt="y", notify=NotifySettings(github=True, condition="always")))
+    task = asyncio.create_task(runner.run(a.id, run_id="abcdef0123456789"))
+    await notifying.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # The answer was finished before the notification, so it stays even though the result is never written.
+    stored = ctx.automations.get_run(a.id, "abcdef0123456789")
+    assert stored["status"] == "running" and stored["final_message"] == "空室を確認しました"
+    assert stored["report"] == {"summary": "要約", "notify": False} and stored["summary"] == "要約"
+
+
+async def test_failure_reason_is_kept_when_cut_off_while_notifying(auto_env, monkeypatch):
+    ctx, runner, manager = auto_env
+    manager.fail = TimeoutError()
+    notifying = asyncio.Event()
+
+    async def hang(*args, **kwargs):
+        notifying.set()
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(runner, "_send", hang)
+    a = ctx.automations.upsert(Automation(name="x", prompt="y", notify=NotifySettings(github=True)))
+    task = asyncio.create_task(runner.run(a.id, run_id="abcdef0123456789"))
+    await notifying.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    stored = ctx.automations.get_run(a.id, "abcdef0123456789")
+    assert stored["status"] == "running" and "20 分" in stored["error"] and "20 分" in stored["summary"]
+
+
+async def test_retry_clears_the_progress_of_the_failed_attempt(auto_env, monkeypatch):
+    ctx, runner, manager = auto_env
+    monkeypatch.setattr(runner_module, "CHECKPOINT_SECONDS", 0.01)
+    retrying = asyncio.Event()
+
+    async def send(session, prompt):
+        manager.prompts.append(prompt)
+        if len(manager.prompts) == 1:
+            for handler in list(session.handlers):
+                handler(
+                    SimpleNamespace(
+                        data=AssistantMessageDeltaData(delta_content="失敗前", message_id="m", parent_tool_call_id=None)
+                    )
+                )
+            await real_sleep(0.1)  # checkpointed before the failure
+            raise RuntimeError("boom")
+        retrying.set()
+        await real_sleep(3600)
+
+    real_sleep = asyncio.sleep
+
+    async def short_sleep(seconds):
+        await real_sleep(min(seconds, 0.1))  # shortens the retry delay; still long enough for a checkpoint
+
+    monkeypatch.setattr("life_helper.automation.runner.asyncio.sleep", short_sleep)
+    monkeypatch.setattr(FakeAutoSession, "send", send)
+    a = ctx.automations.upsert(Automation(name="x", prompt="y"))
+    task = asyncio.create_task(runner.run(a.id, run_id="abcdef0123456789"))
+    await retrying.wait()
+    await real_sleep(0.1)
+    # The checkpoints of the new attempt replace the failed attempt's text while the run continues.
+    assert ctx.automations.get_run(a.id, "abcdef0123456789")["final_message"] == ""
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # Only the attempt that was running is kept; the failed attempt's text is not shown as the result.
+    stored = ctx.automations.get_run(a.id, "abcdef0123456789")
+    assert stored["status"] == "running" and stored["final_message"] == "" and stored["events"] == []
+
+
 @respx.mock
 async def test_reauth_notice_sent_once_per_day(auto_env):
     ctx, runner, manager = auto_env
@@ -493,6 +755,7 @@ def test_automation_api(client, ctx):
     created = client.post("/api/automations", json=body, headers=h).json()
     assert created["notify"]["github"] is True and created["allow_write"] is False
     assert created["estimated_runs_per_month"] == 30 and created["state"]["next_run_at"]
+    assert created["max_runtime_minutes"] == 20
 
     listing = client.get("/api/automations").json()
     assert listing["usage"]["estimated_runs_per_month"] == 30 and listing["github_notify_configured"] is False
@@ -500,7 +763,10 @@ def test_automation_api(client, ctx):
     bad = dict(body, notify={"github": True, "condition": "signal"})
     assert client.post("/api/automations", json=bad, headers=h).status_code == 400
     assert client.post("/api/automations", json=dict(body, connectors=["nope"]), headers=h).status_code == 400
-    assert client.post("/api/automations", json=dict(body, max_runtime_minutes=30), headers=h).status_code == 422
+    longest = client.post("/api/automations", json=dict(body, max_runtime_minutes=60), headers=h)
+    assert longest.status_code == 200 and longest.json()["max_runtime_minutes"] == 60
+    assert client.delete(f"/api/automations/{longest.json()['id']}", headers=h).status_code == 200
+    assert client.post("/api/automations", json=dict(body, max_runtime_minutes=61), headers=h).status_code == 422
     assert client.post("/api/automations", json=dict(body, prompt="口座番号: 1234567"), headers=h).status_code == 422
 
     updated = client.put(f"/api/automations/{created['id']}", json=dict(body, name="改名"), headers=h).json()

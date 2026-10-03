@@ -240,8 +240,8 @@ resource job 'Microsoft.App/jobs@2024-03-01' = {
       triggerType: 'Schedule'
       // Cron is UTC; automation times are converted from Japan time by the app. Due checks run every 15 minutes.
       scheduleTriggerConfig: { cronExpression: '*/15 * * * *', parallelism: 1, replicaCompletionCount: 1 }
-      // 20-minute automation limit + time to save results and release locks.
-      replicaTimeout: 1500
+      // 60-minute automation limit + time to save results and release locks.
+      replicaTimeout: 3900
       replicaRetryLimit: 0
       registries: registries
       secrets: secrets
