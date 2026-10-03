@@ -425,13 +425,22 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
                   {deletingRunId === run.id ? '削除中…' : '削除'}
                 </button>
               </div>
-              {/* 実行中の記録には結果がない（実行内容は終わってから記録される） */}
+              {/* 実行中の記録には結果がない（実行内容は終わってから記録される）。途切れた記録には途中までの出力だけが残ることがある */}
               {!hasResult(run) ? (
-                <p className="hint">
-                  {run.status === 'running'
-                    ? '実行中です。終わると、ここに結果を表示します。'
-                    : '実行中のまま記録が途切れました（アプリや定期実行のジョブが止まった可能性があります）。結果は残っていません。'}
-                </p>
+                run.status === 'running' ? (
+                  <p className="hint">実行中です。終わると、ここに結果を表示します。</p>
+                ) : runAnswer(run) ? (
+                  <>
+                    <p className="hint">
+                      実行中のまま記録が途切れました（アプリや定期実行のジョブが止まった可能性があります）。途中までの出力を表示します。
+                    </p>
+                    <Markdown text={runAnswer(run)} />
+                  </>
+                ) : (
+                  <p className="hint">
+                    実行中のまま記録が途切れました（アプリや定期実行のジョブが止まった可能性があります）。結果は残っていません。
+                  </p>
+                )
               ) : (
                 <>
                   {run.chat_thread_id && (

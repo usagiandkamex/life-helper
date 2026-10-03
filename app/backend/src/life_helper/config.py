@@ -62,7 +62,6 @@ class Settings(BaseSettings):
     # All automations stop without a valid token, so this notice is sent even when per-automation notify is off.
     notify_reauth: bool = True
 
-    automation_max_runtime_seconds: int = 60 * 60
     # Must exceed the longest allowed run so the per-automation lock outlives the run; kept in step with the
     # ACA job's replicaTimeout (see infra/resources.bicep).
     automation_lock_ttl_seconds: int = 65 * 60
