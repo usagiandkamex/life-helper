@@ -420,7 +420,11 @@ async def test_timeout_keeps_the_partial_answer(auto_env, monkeypatch):
         for handler in list(session.handlers):
             handler(SimpleNamespace(data=AssistantUsageData(model="gpt-5-mini")))
             for chunk in ("途中まで", "書きました"):
-                handler(SimpleNamespace(data=AssistantMessageDeltaData(delta_content=chunk, message_id="m", parent_tool_call_id=None)))
+                handler(
+                    SimpleNamespace(
+                        data=AssistantMessageDeltaData(delta_content=chunk, message_id="m", parent_tool_call_id=None)
+                    )
+                )
         raise TimeoutError
 
     monkeypatch.setattr(FakeAutoSession, "send", stream_then_timeout)
@@ -449,7 +453,13 @@ async def test_successful_follow_up_stream_is_not_kept_as_partial(auto_env, monk
             # finishing a message, so that leftover text must not become the run's result.
             for handler in list(session.handlers):
                 handler(SimpleNamespace(data=AssistantUsageData(model="gpt-5-mini")))
-                handler(SimpleNamespace(data=AssistantMessageDeltaData(delta_content="報告します", message_id="f", parent_tool_call_id=None)))
+                handler(
+                    SimpleNamespace(
+                        data=AssistantMessageDeltaData(
+                            delta_content="報告します", message_id="f", parent_tool_call_id=None
+                        )
+                    )
+                )
             report = next(s.tool for s in manager.extra_tools if s.tool.name == "report_result")
             await report.handler(ToolInvocation(arguments={"summary": "要約", "notify": False}))
         for handler in list(session.handlers):
@@ -551,6 +561,7 @@ def test_automation_api(client, ctx):
     created = client.post("/api/automations", json=body, headers=h).json()
     assert created["notify"]["github"] is True and created["allow_write"] is False
     assert created["estimated_runs_per_month"] == 30 and created["state"]["next_run_at"]
+    assert created["max_runtime_minutes"] == 20
 
     listing = client.get("/api/automations").json()
     assert listing["usage"]["estimated_runs_per_month"] == 30 and listing["github_notify_configured"] is False
@@ -558,6 +569,9 @@ def test_automation_api(client, ctx):
     bad = dict(body, notify={"github": True, "condition": "signal"})
     assert client.post("/api/automations", json=bad, headers=h).status_code == 400
     assert client.post("/api/automations", json=dict(body, connectors=["nope"]), headers=h).status_code == 400
+    longest = client.post("/api/automations", json=dict(body, max_runtime_minutes=60), headers=h)
+    assert longest.status_code == 200 and longest.json()["max_runtime_minutes"] == 60
+    assert client.delete(f"/api/automations/{longest.json()['id']}", headers=h).status_code == 200
     assert client.post("/api/automations", json=dict(body, max_runtime_minutes=61), headers=h).status_code == 422
     assert client.post("/api/automations", json=dict(body, prompt="口座番号: 1234567"), headers=h).status_code == 422
 
