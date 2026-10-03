@@ -433,6 +433,37 @@ async def test_timeout_keeps_the_partial_answer(auto_env, monkeypatch):
     assert record["events"][-1] == {"type": "message", "content": "途中まで書きました", "partial": True}
 
 
+async def test_successful_follow_up_stream_is_not_kept_as_partial(auto_env, monkeypatch):
+    ctx, runner, manager = auto_env
+    manager.report_on_call = 2  # the model reports only on the follow-up request
+
+    async def send(session, prompt):
+        manager.prompts.append(prompt)
+        if len(manager.prompts) == 1:
+            # The main answer finishes normally.
+            for handler in list(session.handlers):
+                handler(SimpleNamespace(data=AssistantUsageData(model="gpt-5-mini")))
+                handler(SimpleNamespace(data=AssistantMessageData(content="空室を確認しました", message_id="m")))
+        else:
+            # The follow-up streams chatter as deltas and then calls the terminal report tool without ever
+            # finishing a message, so that leftover text must not become the run's result.
+            for handler in list(session.handlers):
+                handler(SimpleNamespace(data=AssistantUsageData(model="gpt-5-mini")))
+                handler(SimpleNamespace(data=AssistantMessageDeltaData(delta_content="報告します", message_id="f", parent_tool_call_id=None)))
+            report = next(s.tool for s in manager.extra_tools if s.tool.name == "report_result")
+            await report.handler(ToolInvocation(arguments={"summary": "要約", "notify": False}))
+        for handler in list(session.handlers):
+            handler(SimpleNamespace(data=SessionIdleData()))
+
+    monkeypatch.setattr(FakeAutoSession, "send", send)
+    a = ctx.automations.upsert(Automation(name="x", prompt="y"))
+    record = await runner.run(a.id)
+
+    assert record["status"] == "success" and record["report"]["summary"] == "要約"
+    assert record["final_message"] == "空室を確認しました" and "報告します" not in record["final_message"]
+    assert not any(e.get("partial") for e in record["events"])
+
+
 @respx.mock
 async def test_reauth_notice_sent_once_per_day(auto_env):
     ctx, runner, manager = auto_env

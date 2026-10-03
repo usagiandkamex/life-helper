@@ -233,9 +233,11 @@ class AutomationRunner:
                     continue
                 break
 
-        # An answer cut off before it finished (e.g. a timeout) leaves its streamed text here; keep it as the
-        # run's result so the history shows what was produced instead of only the failure reason.
-        if run_ctx.partial.strip():
+        # A run cut off before it finished (timeout/error) leaves its streamed text here; keep it as the run's
+        # result so the history shows what was produced instead of only the failure reason. Successful runs already
+        # have their finished answer (and report), and a success's follow-up may stream text without finishing a
+        # message, so that leftover must not be surfaced.
+        if status != "success" and run_ctx.partial.strip():
             run_ctx.events.append({"type": "message", "content": run_ctx.partial, "partial": True})
         final_message = next((e["content"] for e in reversed(run_ctx.events) if e["type"] == "message"), "")
         summary = (run_ctx.report or {}).get("summary") or final_message[:2000] or error or ""
@@ -359,8 +361,6 @@ class AutomationRunner:
                     logger.warning("automation %s did not report after the follow-up request", automation.id)
                     await self._abort(active.session)
                     del run_ctx.events[follow_up_start:]
-                    # The main answer already finished, so drop the follow-up's partial text too (issue #41).
-                    run_ctx.partial = ""
         except TimeoutError:
             await self._abort(active.session)
             raise
