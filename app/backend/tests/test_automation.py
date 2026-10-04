@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import signal
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1673,3 +1675,427 @@ def test_writing_a_result_back_only_replaces_an_existing_record(tmp_path):
     store.save_run(record)
     assert store.save_run(record | {"status": "success"}, replace_only=True) is True
     assert store.get_run("aaaaaa000001", "a000000000000001")["status"] == "success"
+
+
+# -- interrupted runs (issue #75) ---------------------------------------------------------------------------
+
+JOB_ID = (
+    "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-life-helper"
+    "/providers/Microsoft.App/jobs/caj-lifehelper-abc"
+)
+IDENTITY_ENDPOINT = "http://localhost:42356/msi/token"
+
+
+def _hang_after_start(monkeypatch) -> asyncio.Event:
+    """Makes the fake Copilot session work forever; the event is set once the prompt was sent."""
+    started = asyncio.Event()
+
+    async def hang(session, prompt):
+        session.manager.prompts.append(prompt)
+        started.set()
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(FakeAutoSession, "send", hang)
+    return started
+
+
+def _due(ctx, now: datetime, *automations: tuple[Automation, int]) -> None:
+    for automation, minutes_late in automations:
+        ctx.automations.update_state(automation.id, next_run_at=(now - timedelta(minutes=minutes_late)).isoformat())
+
+
+async def test_a_run_stopped_in_the_job_records_why(auto_env, monkeypatch):
+    ctx, runner, manager = auto_env
+    runner.job_deadline = time.monotonic() + 3600
+    started = _hang_after_start(monkeypatch)
+    a = ctx.automations.upsert(Automation(name="x", prompt="y"))
+    task = asyncio.create_task(runner.run(a.id, run_id="abcdef0123456789"))
+    await started.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    stored = ctx.automations.get_run(a.id, "abcdef0123456789")
+    assert stored["status"] == "interrupted" and stored["error"] == runner_module.JOB_STOPPED_MESSAGE
+    assert stored["summary"] == runner_module.JOB_STOPPED_MESSAGE and stored["finished_at"]
+    # No time is spent on the Copilot session while the process stops (its client is stopped on the way out).
+    assert manager.closed == [] and manager.deleted == []
+    # The automation can run again right away.
+    assert runner._lock(a.id).try_acquire()
+
+
+async def test_a_session_that_does_not_close_restarts_the_client(auto_env, monkeypatch):
+    ctx, runner, manager = auto_env
+    monkeypatch.setattr(runner_module, "CLEANUP_TIMEOUT_SECONDS", 0.05)
+    resets: list[bool] = []
+
+    async def hang(session_id):
+        await asyncio.sleep(3600)
+
+    async def reset():
+        resets.append(True)
+
+    monkeypatch.setattr(manager, "close_session", hang)
+    monkeypatch.setattr(manager, "reset", reset)
+    a = ctx.automations.upsert(Automation(name="x", prompt="y"))
+
+    record = await asyncio.wait_for(runner.run(a.id), 5)
+
+    # The result is still recorded; the client that stopped answering is restarted.
+    assert record["status"] == "success" and resets == [True]
+    assert ctx.automations.get_run(a.id, record["id"])["status"] == "success"
+
+
+async def test_a_run_cut_short_by_the_jobs_limit_does_not_wait_for_copilot(auto_env, monkeypatch):
+    ctx, runner, manager = auto_env
+    monkeypatch.setattr(runner_module, "ABORT_TIMEOUT_SECONDS", 0.05)
+    _hang_after_start(monkeypatch)
+
+    async def hang_abort(session):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(FakeAutoSession, "abort", hang_abort)
+    a = ctx.automations.upsert(Automation(name="x", prompt="y", max_runtime_minutes=20))
+    # Less time left in the job than the automation's limit: the run ends with the job's, not the platform's, limit.
+    runner.job_deadline = time.monotonic() + 0.2
+
+    record = await asyncio.wait_for(runner.run(a.id), 5)
+
+    assert record["status"] == "timeout" and record["error"] == runner_module.JOB_TIME_LIMIT_MESSAGE
+    assert ctx.automations.get_run(a.id, record["id"])["status"] == "timeout"
+
+
+async def test_a_client_that_does_not_stop_is_stopped_forcibly(ctx, monkeypatch):
+    from life_helper.copilot_integration import manager as manager_module
+
+    monkeypatch.setattr(manager_module, "STOP_TIMEOUT_SECONDS", 0.05)
+    copilot = manager_module.CopilotManager(ctx, ctx.settings.copilot_automation_dir, automation=True)
+    forced: list[bool] = []
+
+    class HungClient:
+        async def stop(self):
+            await asyncio.sleep(3600)
+
+        async def force_stop(self):
+            forced.append(True)
+
+    copilot._client, copilot._token = HungClient(), "token"  # type: ignore[assignment]
+    await asyncio.wait_for(copilot.reset(), 5)
+    assert forced == [True] and copilot._client is None and copilot._token is None
+
+
+async def test_a_run_in_progress_keeps_its_record_fresh(auto_env, monkeypatch):
+    ctx, runner, manager = auto_env
+    monkeypatch.setattr(runner_module, "CHECKPOINT_SECONDS", 0.01)
+    monkeypatch.setattr(runner_module, "HEARTBEAT_SECONDS", 0)
+    started = _hang_after_start(monkeypatch)
+    a = ctx.automations.upsert(Automation(name="x", prompt="y"))
+    task = asyncio.create_task(runner.run(a.id, run_id="abcdef0123456789"))
+    await started.wait()
+    first = ctx.automations.get_run(a.id, "abcdef0123456789")["heartbeat_at"]
+
+    for _ in range(200):
+        await asyncio.sleep(0.01)
+        stored = ctx.automations.get_run(a.id, "abcdef0123456789")
+        if stored["heartbeat_at"] != first:
+            break
+    # Written again although the run has produced nothing yet, so the history can tell it is still going on.
+    assert stored["heartbeat_at"] > first
+    assert stored["status"] == "running" and stored["events"] == []
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+def test_a_run_whose_record_stopped_being_written_is_shown_as_interrupted(client, ctx):
+    csrf = sign_in(client, ctx)
+    store = ctx.automations
+    for aid in ("aaaaaa000001", "aaaaaa000002"):
+        store.upsert(Automation(id=aid, name="定期チェック", prompt="確認して", schedule=Schedule(kind="daily")))
+    now = datetime.now(UTC)
+    fresh = _running_record("aaaaaa000001", "a000000000000001", started=now - timedelta(minutes=30))
+    store.save_run(fresh | {"heartbeat_at": (now - timedelta(minutes=1)).isoformat()})
+    stale = _running_record("aaaaaa000002", "a000000000000002", started=now - timedelta(minutes=10))
+    store.save_run(stale | {"heartbeat_at": (now - timedelta(minutes=6)).isoformat()})
+
+    runs = client.get("/api/automations/runs").json()
+    assert {r["id"]: r["status"] for r in runs} == {"a000000000000001": "running", "a000000000000002": "interrupted"}
+    assert all("heartbeat_at" not in r for r in runs)
+    detail = client.get("/api/automations/aaaaaa000002/runs/a000000000000002").json()
+    assert detail["status"] == "interrupted"
+    # Long before its lock would expire, the automation can be started again and the run deleted.
+    assert client.get("/api/automations").json()["running_automation_ids"] == ["aaaaaa000001"]
+    h = {"x-csrf-token": csrf}
+    assert client.delete("/api/automations/aaaaaa000001/runs/a000000000000001", headers=h).status_code == 409
+    assert client.delete("/api/automations/aaaaaa000002/runs/a000000000000002", headers=h).status_code == 200
+
+
+async def test_due_runs_that_no_longer_fit_in_the_job_wait_for_the_next_one(auto_env):
+    ctx, runner, manager = auto_env
+    now = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    newest = ctx.automations.upsert(Automation(name="C", prompt="c", max_runtime_minutes=10))
+    longest = ctx.automations.upsert(Automation(name="B", prompt="b", max_runtime_minutes=30))
+    oldest = ctx.automations.upsert(Automation(name="A", prompt="a", max_runtime_minutes=20))
+    _due(ctx, now, (oldest, 3), (longest, 2), (newest, 1))
+    runner.job_deadline = time.monotonic() + 25 * 60
+
+    results = await runner.run_due(now)
+
+    # The longest-waiting run goes first; after it, only runs that can still use their whole time limit start.
+    assert [(r["automation_id"], r["status"]) for r in results] == [
+        (oldest.id, "success"),
+        (longest.id, "deferred"),
+        (newest.id, "success"),
+    ]
+    assert [p.split("\n")[0] for p in manager.prompts] == ["a", "c"]
+    # The run put off is still due, so the next job execution runs it.
+    assert ctx.automations.get(longest.id).state.next_run_at == (now - timedelta(minutes=2)).isoformat()
+    assert ctx.automations.list_runs(longest.id) == []
+
+
+async def test_the_first_run_of_a_job_execution_always_starts(auto_env):
+    ctx, runner, manager = auto_env
+    now = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    first = ctx.automations.upsert(Automation(name="A", prompt="a", max_runtime_minutes=20))
+    second = ctx.automations.upsert(Automation(name="B", prompt="b", max_runtime_minutes=20))
+    _due(ctx, now, (first, 2), (second, 1))
+    runner.job_deadline = time.monotonic() + 60  # less than either limit
+
+    results = await runner.run_due(now)
+
+    assert [(r["automation_id"], r["status"]) for r in results] == [(first.id, "success"), (second.id, "deferred")]
+
+
+def _expire_request(store: AutomationStore, automation_id: str) -> None:
+    path = store.requests_dir / f"{automation_id}.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    path.write_text(json.dumps(data | {"expires_at": time.time() - 1}), encoding="utf-8")
+
+
+def test_run_requests_wait_once_per_automation(tmp_path):
+    store = AutomationStore(tmp_path)
+    aid = "aaaaaa000001"
+    assert store.add_run_request(aid, "a000000000000001")
+    assert not store.add_run_request(aid, "a000000000000002")  # already waiting for the job
+    assert [(r["automation_id"], r["run_id"], r["expired"]) for r in store.run_requests()] == [
+        (aid, "a000000000000001", False)
+    ]
+    # Only the request of that run is taken, and only once.
+    assert not store.take_run_request(aid, "a000000000000002")
+    assert [r["run_id"] for r in store.run_requests()] == ["a000000000000001"]
+    assert store.take_run_request(aid, "a000000000000001")
+    assert not store.take_run_request(aid, "a000000000000001")
+    assert store.run_requests() == []
+    # A request no job execution took in time gives way to a new one.
+    assert store.add_run_request(aid, "a000000000000003")
+    _expire_request(store, aid)
+    assert store.run_requests()[0]["expired"] is True
+    assert store.add_run_request(aid, "a000000000000004")
+    assert [r["run_id"] for r in store.run_requests()] == ["a000000000000004"]
+    for automation_id, run_id in (("../x", "a000000000000005"), (aid, "../x")):
+        with pytest.raises(ValueError):
+            store.add_run_request(automation_id, run_id)
+
+
+async def test_the_job_runs_the_requested_runs(auto_env):
+    ctx, runner, manager = auto_env
+    store = ctx.automations
+    ready = store.upsert(Automation(name="A", prompt="a"))
+    busy = store.upsert(Automation(name="B", prompt="b"))
+    late = store.upsert(Automation(name="C", prompt="c"))
+    gone = "bbbbbb000009"  # deleted after the request was made
+    for aid, rid in ((ready.id, "a000000000000001"), (busy.id, "b000000000000001"), (gone, "c000000000000001")):
+        assert store.add_run_request(aid, rid)
+    assert store.add_run_request(late.id, "d000000000000001")
+    _expire_request(store, late.id)
+    lock = runner._lock(busy.id)
+    assert lock.try_acquire()  # running in another job execution
+
+    results = await runner.run_requested()
+
+    statuses = {r["automation_id"]: r["status"] for r in results}
+    assert statuses == {ready.id: "success", busy.id: "skipped_locked", gone: "not_found"}
+    # The run has the id the app returned to the browser.
+    assert store.get_run(ready.id, "a000000000000001")["status"] == "success"
+    assert [p.split("\n")[0] for p in manager.prompts] == ["a"]
+    # The busy automation's request waits for a later job execution; the others are gone.
+    assert [r["automation_id"] for r in store.run_requests()] == [busy.id]
+    lock.release()
+
+
+@pytest.mark.parametrize(
+    "job_id",
+    [
+        "https://example.com/jobs/x",
+        JOB_ID + "/../../x",
+        JOB_ID.replace("Microsoft.App/jobs", "Microsoft.App/containerApps"),
+        JOB_ID.replace("rg-life-helper", ".."),
+    ],
+)
+def test_the_job_to_start_must_be_a_container_apps_job(tmp_path, job_id):
+    from life_helper.config import Settings
+
+    assert Settings(environment="development", data_dir=tmp_path, automation_job_id=f" {JOB_ID} ").automation_job_id
+    with pytest.raises(ValidationError):
+        Settings(environment="development", data_dir=tmp_path, automation_job_id=job_id)
+
+
+def _job_settings(settings, monkeypatch) -> None:
+    settings.automation_job_id = JOB_ID
+    settings.managed_identity_client_id = "identity-client-id"
+    monkeypatch.setenv("IDENTITY_ENDPOINT", IDENTITY_ENDPOINT)
+    monkeypatch.setenv("IDENTITY_HEADER", "identity-header-value")
+
+
+def test_run_now_hands_the_run_to_the_job(client, ctx, settings, monkeypatch):
+    csrf = sign_in(client, ctx)
+    _job_settings(settings, monkeypatch)
+    automation = ctx.automations.upsert(Automation(name="定期チェック", prompt="確認して"))
+    h = {"x-csrf-token": csrf}
+
+    with respx.mock(assert_all_called=True) as mock:
+        token = mock.get(IDENTITY_ENDPOINT).mock(
+            return_value=httpx.Response(200, json={"access_token": "arm-token", "expires_on": str(time.time() + 3600)})
+        )
+        start = mock.post(f"https://management.azure.com{JOB_ID}/start").mock(
+            return_value=httpx.Response(202, json={"name": "execution-1"})
+        )
+        response = client.post(f"/api/automations/{automation.id}/run", headers=h)
+
+    assert response.status_code == 200
+    run_id = response.json()["run_id"]
+    assert response.json() == {"started": True, "run_id": run_id, "runner": "job", "job_started": True}
+    assert "automation_runner" not in ctx.extras  # nothing runs in the app
+    # The app's managed identity signs in to Azure Resource Manager and starts the job.
+    request = token.calls.last.request
+    assert request.headers["X-IDENTITY-HEADER"] == "identity-header-value"
+    assert request.url.params["resource"] == "https://management.azure.com/"
+    assert request.url.params["client_id"] == "identity-client-id"
+    assert start.calls.last.request.headers["Authorization"].split() == ["Bearer", "arm-token"]
+    assert start.calls.last.request.url.params["api-version"] == "2024-03-01"
+    # The job finds the request; until it is done the automation is shown as running and cannot be started twice.
+    assert [(r["automation_id"], r["run_id"]) for r in ctx.automations.run_requests()] == [(automation.id, run_id)]
+    assert client.get("/api/automations").json()["running_automation_ids"] == [automation.id]
+    assert client.post(f"/api/automations/{automation.id}/run", headers=h).status_code == 409
+
+
+def test_run_now_leaves_the_request_to_the_scheduled_job_when_the_job_cannot_be_started(
+    client, ctx, settings, monkeypatch, caplog
+):
+    csrf = sign_in(client, ctx)
+    _job_settings(settings, monkeypatch)
+    automation = ctx.automations.upsert(Automation(name="定期チェック", prompt="確認して"))
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(IDENTITY_ENDPOINT).mock(
+            return_value=httpx.Response(200, json={"access_token": "arm-token", "expires_on": str(time.time() + 3600)})
+        )
+        mock.post(f"https://management.azure.com{JOB_ID}/start").mock(
+            return_value=httpx.Response(403, json={"error": {"code": "AuthorizationFailed"}})
+        )
+        response = client.post(f"/api/automations/{automation.id}/run", headers={"x-csrf-token": csrf})
+
+    run_id = response.json()["run_id"]
+    assert response.json() == {"started": True, "run_id": run_id, "runner": "job", "job_started": False}
+    assert [r["run_id"] for r in ctx.automations.run_requests()] == [run_id]
+    assert "HTTP 403" in caplog.text and "arm-token" not in caplog.text
+
+
+async def test_the_job_starter_reuses_its_token():
+    from life_helper.automation.dispatch import JobStarter
+
+    starter = JobStarter(JOB_ID, identity_endpoint=IDENTITY_ENDPOINT, identity_header="identity-header-value")
+    with respx.mock(assert_all_called=True) as mock:
+        token = mock.get(IDENTITY_ENDPOINT).mock(
+            return_value=httpx.Response(200, json={"access_token": "arm-token", "expires_on": str(time.time() + 3600)})
+        )
+        start = mock.post(f"https://management.azure.com{JOB_ID}/start").mock(return_value=httpx.Response(202))
+        await starter.start()
+        await starter.start()
+    assert token.call_count == 1 and start.call_count == 2
+    assert "client_id" not in token.calls.last.request.url.params  # the system identity when none is given
+    assert not JobStarter(JOB_ID).configured  # outside Azure there is no identity endpoint
+
+
+def test_run_now_refuses_an_automation_that_is_running(client, ctx):
+    csrf = sign_in(client, ctx)
+    automation = ctx.automations.upsert(Automation(name="定期チェック", prompt="確認して"))
+    ctx.automations.save_run(_running_record(automation.id, "a000000000000001", started=datetime.now(UTC)))
+
+    response = client.post(f"/api/automations/{automation.id}/run", headers={"x-csrf-token": csrf})
+
+    assert response.status_code == 409 and "automation_runner" not in ctx.extras
+
+
+async def test_the_job_runs_the_requests_first_and_keeps_to_its_time_limit(monkeypatch, settings):
+    from life_helper import jobs
+
+    calls: list = []
+
+    async def run_requested(self):
+        calls.append(("run_requested", self.job_deadline - time.monotonic()))
+        return []
+
+    async def run_due(self, now=None):
+        calls.append("run_due")
+        return []
+
+    async def run_scope(ctx, scope, *, automation_manager=None, budget_seconds=None):
+        calls.append(("retention", budget_seconds))
+
+    settings.automation_job_timeout_seconds = 3600
+    monkeypatch.setattr(jobs, "get_settings", lambda: settings)
+    monkeypatch.setattr(jobs.AutomationRunner, "run_requested", run_requested)
+    monkeypatch.setattr(jobs.AutomationRunner, "run_due", run_due)
+    monkeypatch.setattr(jobs, "run_scope", run_scope)
+    assert await jobs.run_due() == 0
+    (name, left), *rest = calls
+    # Runs end 5 minutes before the job's limit, so the platform never stops one half-way.
+    assert name == "run_requested" and 3600 - 300 - 5 < left <= 3600 - 300
+    assert rest == ["run_due", ("retention", jobs.PASS_BUDGET_SECONDS)]
+
+    # Without time left for it, the data retention waits for a later job execution.
+    calls.clear()
+    monkeypatch.setattr(jobs, "RETENTION_RESERVE_SECONDS", 3600 - 5)
+    assert await jobs.run_due() == 0
+    assert [c if isinstance(c, str) else c[0] for c in calls] == ["run_requested", "run_due"]
+
+
+async def test_the_job_stopped_by_the_platform_lets_the_run_record_it(monkeypatch):
+    from life_helper import jobs
+
+    stopped: list[bool] = []
+
+    async def run_due():
+        asyncio.get_running_loop().call_later(0.05, os.kill, os.getpid(), signal.SIGTERM)
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            stopped.append(True)
+            raise
+        return 0
+
+    monkeypatch.setattr(jobs, "run_due", run_due)
+    assert await asyncio.wait_for(jobs.run_until_stopped(), 5) == 1
+    assert stopped == [True]
+
+
+async def test_the_app_waits_for_stopped_runs_before_it_exits(ctx):
+    from life_helper.bootstrap import shutdown_services
+
+    recorded: list[bool] = []
+
+    async def run():
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.05)  # saving that the run was interrupted
+            recorded.append(True)
+            raise
+
+    task = asyncio.create_task(run())
+    await asyncio.sleep(0)
+    ctx.extras["automation_tasks"] = {task}
+    await shutdown_services(ctx)
+    assert recorded == [True] and task.cancelled()

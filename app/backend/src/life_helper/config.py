@@ -13,7 +13,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Resource ID of a Container Apps job; the app calls Azure Resource Manager with it, so nothing else is accepted.
 _JOB_ID = re.compile(
-    r"/subscriptions/[0-9a-fA-F-]{36}/resourceGroups/[\w.()-]{1,90}/providers/Microsoft\.App/jobs/[A-Za-z0-9-]{1,32}"
+    r"/subscriptions/[0-9a-fA-F-]{36}/resourceGroups/[\w.()-]{0,89}[\w()-]"
+    r"/providers/Microsoft\.App/jobs/[A-Za-z0-9-]{1,32}"
 )
 
 

@@ -3,10 +3,12 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { api, ApiError, formatDate, json } from '../api'
 import { hasResult, runAnswer, runStatusText, STATUS_LABELS } from '../automationRuns'
 import { Markdown } from '../components/Markdown'
-import type { Automation, AutomationList, NotifySettings, RunRecord, Schedule } from '../types'
+import type { Automation, AutomationList, NotifySettings, RunNowResult, RunRecord, Schedule } from '../types'
 
 const WEEKDAYS = ['月', '火', '水', '木', '金', '土', '日']
 const INTERRUPTED_WATCH_MS = 5 * 60_000
+// ジョブで実行する「今すぐ実行」は、ジョブの起動を待つので、記録が出るまで長めに待つ。
+const RUN_NOW_JOB_WAIT_MS = 5 * 60_000
 
 // 表の中の「今すぐ実行」。文字の代わりに再生の形を出す（名前は .visually-hidden で読み上げに残す）。
 function PlayIcon() {
@@ -111,7 +113,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
         throw e
       }
       if (selectedRunIdRef.current !== runId || openRunRequestRef.current !== request) return
-      if (record.status === 'interrupted') {
+      if (record.status === 'interrupted' && !hasResult(record)) {
         if (interruptedWatchRef.current?.runId !== record.id) {
           interruptedWatchRef.current = { runId: record.id, since: Date.now() }
         }
@@ -264,10 +266,20 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
     const selectionGeneration = selectionGenerationRef.current
     setError('')
     try {
-      const startedRun = await api<{ started: boolean; run_id: string }>(`/api/automations/${a.id}/run`, {
-        method: 'POST',
-      })
-      setMessage(`「${a.name}」の実行を始めました。実行中も実行履歴に出て、終わると結果に変わります（最大 ${a.max_runtime_minutes} 分）。`)
+      const startedRun = await api<RunNowResult>(`/api/automations/${a.id}/run`, { method: 'POST' })
+      // 本番では、アプリが使われないと止まるため、実行はジョブに任せる。ジョブの起動には数分かかることがある。
+      const inJob = startedRun.runner === 'job'
+      if (inJob && !startedRun.job_started) {
+        setMessage(`「${a.name}」の実行を受け付けました。実行用のジョブをすぐに起動できなかったため、次の定期確認（15 分以内）で実行します。始まると実行履歴に出ます。`)
+        await load()
+        return
+      }
+      setMessage(
+        inJob
+          ? `「${a.name}」の実行を受け付けました。実行用のジョブが起動すると（数分かかることがあります）実行履歴に出て、終わると結果に変わります（最大 ${a.max_runtime_minutes} 分）。`
+          : `「${a.name}」の実行を始めました。実行中も実行履歴に出て、終わると結果に変わります（最大 ${a.max_runtime_minutes} 分）。`,
+      )
+      if (inJob) await load()
       // 同時に定期実行が始まっても取り違えないよう、API が割り当てた記録だけを待つ。
       const started = Date.now()
       await new Promise((resolve) => window.setTimeout(resolve, 2_000))
@@ -280,9 +292,13 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
           }
           return
         }
-        if (Date.now() - started >= 60_000) {
+        if (Date.now() - started >= (inJob ? RUN_NOW_JOB_WAIT_MS : 60_000)) {
           // 前の実行が続いていると、そのオートメーションは実行されない（API は受け付けたことだけを返す）。
-          setMessage(`「${a.name}」の実行を確認できませんでした。ほかの実行が続いている可能性があります。`)
+          setMessage(
+            inJob
+              ? `「${a.name}」の実行はまだ始まっていません。実行用のジョブが起動すると実行履歴に出ます。`
+              : `「${a.name}」の実行を確認できませんでした。ほかの実行が続いている可能性があります。`,
+          )
           return
         }
         await new Promise((resolve) => window.setTimeout(resolve, 3_000))

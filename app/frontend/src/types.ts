@@ -226,13 +226,17 @@ export type Automation = {
 
 export type AutomationList = {
   automations: Automation[]
-  // 実行中の記録があるオートメーション（実行履歴の件数の上限に関係なく、すべての記録から求める）
+  // 実行中の記録があるオートメーション（実行履歴の件数の上限に関係なく、すべての記録から求める）と、
+  // 「今すぐ実行」がジョブの起動を待っているオートメーション
   running_automation_ids: string[]
   usage: { runs_this_month: number; monthly_limit: number; estimated_runs_per_month: number }
   unread: number
   github_notify_configured: boolean
   connectors: { name: string; label: string; configured: boolean }[]
 }
+
+// 「今すぐ実行」の応答。runner が job のときはジョブが実行する（job_started が false なら、次の定期確認で実行する）。
+export type RunNowResult = { started: boolean; run_id: string; runner: 'app' | 'job'; job_started?: boolean }
 
 export type RunRecord = {
   id: string

@@ -27,6 +27,12 @@ param budgetStartDate string
 var token = uniqueString(subscription().id, resourceGroup().id, environmentName)
 var appName = 'ca-lifehelper-${token}'
 var acrPullRoleId = '7f951dda-4ed3-4680-a7ca-43fe172d538d'
+// Container Apps Jobs Operator: lets the app start the automation job for 「今すぐ実行」.
+var jobsOperatorRoleId = 'b9a307c4-5aa3-4b52-ba60-2b17c136cd7b'
+// The job's time limit: the 60-minute automation limit, start-up, and time to stop Copilot and save the results.
+// The job ends its runs 5 minutes before it (LH_AUTOMATION_JOB_TIMEOUT_SECONDS) and leaves later runs to the next
+// execution, so the platform does not stop a run half-way.
+var jobTimeoutSeconds = 4200
 var appPlaceholderImage = 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
 
 var resolvedImage = appImageName
@@ -206,7 +212,11 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
           name: 'app'
           image: hasImage ? resolvedImage : appPlaceholderImage
           resources: { cpu: json('1.0'), memory: '2Gi' }
-          env: commonEnv
+          // 「今すぐ実行」 runs in the job: the app scales in to zero when unused, which would stop the run.
+          env: concat(commonEnv, [
+            { name: 'LH_AUTOMATION_JOB_ID', value: job.id }
+            { name: 'LH_MANAGED_IDENTITY_CLIENT_ID', value: identity.properties.clientId }
+          ])
           volumeMounts: hasImage ? volumeMounts : []
           probes: hasImage
             ? [
@@ -222,6 +232,8 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
       ]
       // Single replica: chat sessions, the SSE event buffer and Copilot session state live in one process.
       scale: { minReplicas: 0, maxReplicas: 1 }
+      // Time to finish requests and record runs in progress as interrupted before the container is killed.
+      terminationGracePeriodSeconds: 60
       volumes: hasImage ? volumes : []
     }
   }
@@ -240,8 +252,7 @@ resource job 'Microsoft.App/jobs@2024-03-01' = {
       triggerType: 'Schedule'
       // Cron is UTC; automation times are converted from Japan time by the app. Due checks run every 15 minutes.
       scheduleTriggerConfig: { cronExpression: '*/15 * * * *', parallelism: 1, replicaCompletionCount: 1 }
-      // 60-minute automation limit + time to save results and release locks.
-      replicaTimeout: 3900
+      replicaTimeout: jobTimeoutSeconds
       replicaRetryLimit: 0
       registries: registries
       secrets: secrets
@@ -253,12 +264,22 @@ resource job 'Microsoft.App/jobs@2024-03-01' = {
           image: hasImage ? resolvedImage : 'mcr.microsoft.com/azurelinux/base/core:3.0'
           command: hasImage ? ['life-helper-job'] : ['/bin/sh', '-c', 'echo waiting for the first deploy']
           resources: { cpu: json('1.0'), memory: '2Gi' }
-          env: commonEnv
+          env: concat(commonEnv, [{ name: 'LH_AUTOMATION_JOB_TIMEOUT_SECONDS', value: string(jobTimeoutSeconds) }])
           volumeMounts: hasImage ? volumeMounts : []
         }
       ]
       volumes: hasImage ? volumes : []
     }
+  }
+}
+
+resource jobsOperator 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(job.id, identity.id, jobsOperatorRoleId)
+  scope: job
+  properties: {
+    principalId: identity.properties.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', jobsOperatorRoleId)
   }
 }
 
