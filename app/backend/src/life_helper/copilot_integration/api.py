@@ -175,6 +175,31 @@ async def conversation_messages(
     }
 
 
+async def _shared_events(ctx: AppContext, conversation_id: str, model: str) -> list:
+    """The session's events for the history's images. The thumbnails of one history are fetched at once, so a read
+    that is already running for the conversation is shared rather than refused; the read itself still reserves the
+    conversation, so it never overlaps a turn or a deletion."""
+    reads: dict[str, asyncio.Task] = ctx.extras.setdefault("attachment_reads", {})
+    task = reads.get(conversation_id)
+    if task is None:
+
+        async def read() -> list:
+            try:
+                async with ctx.turns.reserve(conversation_id):
+                    # The read starts later than the request looked the conversation up: it may be gone by now, and
+                    # opening it again would bring its session back.
+                    if ctx.extras["conversations"].get(conversation_id) is None:
+                        return []
+                    active = await ctx.copilot.open_session(conversation_id, model=model, resume=True)
+                    return await active.session.get_events()
+            finally:
+                reads.pop(conversation_id, None)
+
+        task = reads[conversation_id] = asyncio.create_task(read())
+    # A request that goes away does not cancel the read the others wait for.
+    return await asyncio.shield(task)
+
+
 @router.get("/conversations/{conversation_id}/attachments/{asset_id}")
 async def conversation_attachment(
     conversation_id: str,
@@ -186,9 +211,7 @@ async def conversation_attachment(
     if conv is None or not conv.started:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "attachment not found")
     try:
-        async with ctx.turns.reserve(conversation_id):
-            active = await ctx.copilot.open_session(conversation_id, model=conv.model, resume=True)
-            events = await active.session.get_events()
+        events = await _shared_events(ctx, conversation_id, conv.model)
     except TurnBusyError as e:
         raise HTTPException(status.HTTP_409_CONFLICT, "the conversation is answering; wait until it finishes") from e
     except NoTokenError as e:

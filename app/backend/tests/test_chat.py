@@ -1006,6 +1006,117 @@ def test_history_lists_attachments_without_the_file_text(client, ctx):
     assert history[2] == {"role": "assistant", "content": "回答"}
 
 
+def image_message(*assets) -> list:
+    """A history whose one message references every given asset, as an image."""
+    from copilot.session_events import AttachmentBlob, BinaryAssetType, SessionBinaryAssetData
+
+    events = [
+        SimpleNamespace(
+            data=SessionBinaryAssetData(
+                asset_id=asset_id, byte_length=length, data=data, mime_type=mime, type=BinaryAssetType.IMAGE
+            )
+        )
+        for asset_id, length, data, mime in assets
+    ]
+    blobs = [AttachmentBlob(mime_type=mime, display_name=f"{a}.png", asset_id=a) for a, _, _, mime in assets]
+    return [*events, SimpleNamespace(data=UserMessageData(content="見て", attachments=blobs))]
+
+
+def test_history_images_reject_invalid_assets(client, ctx, settings):
+    settings.upload_max_bytes = 64
+    limit = PNG + b"\x00" * (64 - len(PNG))
+    over = limit + b"\x00"
+    events = image_message(
+        ("limit", len(limit), b64(limit), "image/png"),
+        ("over", len(over), b64(over), "image/png"),
+        # The base64 text is longer than the stated size can be.
+        ("long", len(PNG), b64(PNG) + "AAAA", "image/png"),
+        # Of the right length, but not base64.
+        ("garbled", len(PNG), "!" * len(b64(PNG)), "image/png"),
+        # Padded base64 of the right length that decodes to one byte less than stated.
+        ("short", len(PNG), b64(PNG[:-1]), "image/png"),
+        ("text", 24, b64(b"x" * 24), "image/png"),
+        ("mislabelled", len(PNG), b64(PNG), "image/jpeg"),
+    )
+    assert len(b64(PNG[:-1])) == len(b64(PNG))
+    csrf = sign_in(client, ctx)
+    install_fake(ctx, AttachmentSession(events=events))
+    conv = client.post("/api/conversations", json={}, headers={"x-csrf-token": csrf}).json()
+    ctx.extras["conversations"].update(conv["id"], started=True)
+
+    image = client.get(f"/api/conversations/{conv['id']}/attachments/limit")
+    assert image.status_code == 200 and image.content == limit
+    for asset_id in ("over", "long", "garbled", "short", "text", "mislabelled"):
+        assert client.get(f"/api/conversations/{conv['id']}/attachments/{asset_id}").status_code == 404, asset_id
+
+
+async def test_overlapping_history_image_requests_share_one_read(ctx):
+    from life_helper.bootstrap import init_chat, init_core
+    from life_helper.copilot_integration.api import conversation_attachment
+    from life_helper.copilot_integration.turns import TurnBusyError
+
+    jpeg = b"\xff\xd8\xff" + b"\x00" * 16
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class SlowSession(AttachmentSession):
+        reads = 0
+
+        async def get_events(self):
+            self.reads += 1
+            started.set()
+            await release.wait()
+            return await super().get_events()
+
+    init_core(ctx)
+    init_chat(ctx)
+    session = SlowSession(
+        events=image_message(("a", len(PNG), b64(PNG), "image/png"), ("b", len(jpeg), b64(jpeg), "image/jpeg"))
+    )
+    install_fake(ctx, session)
+    conv = ctx.extras["conversations"].create("", "auto")
+    ctx.extras["conversations"].update(conv.id, started=True)
+
+    first = asyncio.create_task(conversation_attachment(conv.id, "a", user=None, ctx=ctx))
+    await started.wait()
+    second = asyncio.create_task(conversation_attachment(conv.id, "b", user=None, ctx=ctx))
+    await asyncio.sleep(0)
+    # The read still keeps turns and deletion out of the conversation.
+    with pytest.raises(TurnBusyError):
+        async with ctx.turns.reserve(conv.id):
+            pass
+    release.set()
+    images = await asyncio.gather(first, second)
+    assert [(r.status_code, r.body, r.media_type) for r in images] == [
+        (200, PNG, "image/png"),
+        (200, jpeg, "image/jpeg"),
+    ]
+    assert session.reads == 1
+    assert not ctx.turns.busy(conv.id)
+
+
+async def test_history_image_read_does_not_reopen_a_deleted_conversation(ctx):
+    from fastapi import HTTPException
+
+    from life_helper.bootstrap import init_chat, init_core
+    from life_helper.copilot_integration.api import conversation_attachment, delete_conversation
+
+    init_core(ctx)
+    init_chat(ctx)
+    fake = install_fake(ctx, AttachmentSession(events=image_message(("a", len(PNG), b64(PNG), "image/png"))))
+    conv = ctx.extras["conversations"].create("", "auto")
+    ctx.extras["conversations"].update(conv.id, started=True)
+
+    image = asyncio.create_task(conversation_attachment(conv.id, "a", user=None, ctx=ctx))
+    await asyncio.sleep(0)
+    # Deleted after the request looked the conversation up, but before its read reserved it.
+    assert await delete_conversation(conv.id, user=None, ctx=ctx) == {"ok": True}
+    with pytest.raises(HTTPException) as e:
+        await image
+    assert e.value.status_code == 404
+    assert fake.opened == [] and fake.deleted == [conv.id]
+
+
 def test_message_times_come_from_the_session_events(client, ctx):
     from life_helper.copilot_integration.events import map_event
     from life_helper.security import SecretMasker
