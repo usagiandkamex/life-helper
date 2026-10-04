@@ -54,7 +54,7 @@ TRANSCRIPT_VERSION = 1
 REPORT_REMINDER = (
     "\n\n（最後に必ず report_result ツールを呼び、結果の本文（summary）と、利用者に通知すべきかを報告してください。"
     "summary はアプリの「実行履歴」に Markdown で表示されます。上の指示で形式（表など）が指定されていればそのとおりに、"
-    "指定がなければ表や箇条書きで、あとから読んでも分かるようにまとめてください。）"
+    "指定がなければ表や箇条書きで整理し、分かったことを省略せずに、あとから読んでも分かるように書いてください。）"
 )
 REPORT_FOLLOW_UP = (
     "report_result ツールを呼んで、今回の結果の本文（summary。指示どおりの形式の Markdown）と、"
@@ -71,7 +71,7 @@ class ReportParams(BaseModel):
         max_length=MAX_SUMMARY_CHARS,
         description=(
             f"利用者が「実行履歴」で読む結果の本文（Markdown、{MAX_SUMMARY_CHARS:,} 文字以内）。"
-            "指示で表などの形式が指定されていればその形式で、完成した結果を書く。"
+            "指示で表などの形式が指定されていればその形式で、完成した結果を省略せずに書く。"
         ),
     )
     notify: bool = Field(description="利用者に知らせるべき結果か（例: 条件を満たした、要確認の事項がある）")

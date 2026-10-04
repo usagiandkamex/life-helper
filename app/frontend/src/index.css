@@ -103,6 +103,8 @@ tr.muted { color: var(--muted); }
 /* 表の下の欄で選んでいる銘柄は、表の中でも分かるようにする（損益の色は残す） */
 tr.selected > td { background: var(--md-secondary-container); }
 td.neg { color: var(--danger); }
+/* 損益の比率（"+20.0%"）。損益の下に小さく出し、色は損益に合わせる */
+td .rate { display: block; font-size: 0.75rem; }
 /* 操作の列はセルのまま横に並べる（display: flex にするとセルが行から外れて表が崩れる） */
 td.actions { white-space: nowrap; }
 td.actions > * + * { margin-left: 0.75rem; }
@@ -218,6 +220,14 @@ details.collapse > summary:focus-visible { outline: 2px solid var(--md-primary);
 .row { display: flex; gap: 0.75rem; align-items: center; }
 .row.wrap { flex-wrap: wrap; align-items: flex-end; }
 .grow { flex: 1; }
+/* 選択肢の文字が長くても、選択欄は置き場所の幅を超えない（スマホで画面の外にはみ出さない） */
+select { max-width: 100%; }
+.row.wrap > label { min-width: 0; max-width: 100%; }
+/* 編集する銘柄の選択欄は、狭い画面では 1 行を使って表と同じ幅にそろえ、ボタンを次の行に送る */
+.holding-actions > label { flex: 1 1 16rem; }
+/* ラベルの横にボタン（すべて選択など）を置く入力欄。ラベルで包むとボタンもラベルの一部になるので分ける */
+.field { display: flex; flex-direction: column; gap: 0.25rem; }
+.field-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 0.5rem; }
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.75rem; }
 .card { background: var(--md-surface); border-radius: var(--md-shape-m); padding: 1rem; box-shadow: var(--md-elevation-1); }
 .card h3 { margin-top: 0; color: var(--muted); }
@@ -236,6 +246,8 @@ details.collapse > summary:focus-visible { outline: 2px solid var(--md-primary);
 }
 .grid-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0.75rem; margin-top: 0.75rem; align-items: end; }
 .editor-panel { display: flex; flex-direction: column; gap: 0.75rem; }
+/* Groups controls only to disable them together; its children lay out as if it were not there. */
+fieldset.contents { display: contents; }
 /* 実行履歴: 一覧は高さを決めてスクロールし、選んだ実行の結果は右側に出す */
 .runs-layout { display: grid; grid-template-columns: minmax(220px, 320px) minmax(0, 1fr); gap: 1rem; align-items: start; }
 .runs { list-style: none; padding: 0; margin: 0; max-height: 28rem; overflow-y: auto; border: 1px solid var(--md-outline-variant); border-radius: var(--md-shape-m); }
@@ -306,6 +318,11 @@ details.collapse > summary:focus-visible { outline: 2px solid var(--md-primary);
 @keyframes blink { 50% { opacity: 0; } }
 .markdown table { margin: 0.5rem 0; }
 .markdown p { margin: 0.4rem 0; }
+/* 長い URL や英数字の続き（コード・ファイルパスなど）は折り返して、スマホで画面が横にはみ出さないようにする。
+   表は折り返さずに .table-wrap の中で横スクロールする（日本語が 1 文字ずつ折り返して潰れないように） */
+.messages, .markdown { overflow-wrap: anywhere; }
+.messages .table-wrap, .markdown .table-wrap { overflow-wrap: normal; }
+.markdown img { max-width: 100%; }
 /* 回答のコードブロック：中身をそのままコピーできるボタンを、コードの上の右端に置く（重ねないので長い行と干渉しない） */
 .code-block { display: flex; flex-direction: column; gap: 0.25rem; margin: 0.5rem 0; }
 .code-block .copy-code { align-self: flex-end; }
@@ -371,15 +388,21 @@ details.collapse > summary:focus-visible { outline: 2px solid var(--md-primary);
   .wide-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .composer-actions .button { padding-inline: 0.75rem; }
   .composer-actions .button.icon, .composer-buttons .stop { width: 40px; padding: 0; }
-  /* 縮むのはモデル選択の側（添付のアイコンと、選択欄の端が見える幅までは縮める）。それでも入らない狭い画面や
-     大きい文字では、ボタンを次の行の右端に送る */
+  /* 縮むのはモデル選択の側（添付・すべて選択のアイコンと、選択欄の端が見える幅までは縮める）。それでも入らない
+     狭い画面や大きい文字では、ボタンを次の行の右端に送る */
   .composer-actions { flex-wrap: wrap; }
-  .composer-tools { flex: 1 1 0; min-width: calc(40px + 0.5rem + 2.5rem); }
+  .composer-tools { flex: 1 1 0; min-width: calc(2 * 40px + 2 * 0.5rem + 2.5rem); }
   .composer-buttons, .composer-actions > .button { margin-left: auto; }
   .runs-layout { grid-template-columns: minmax(0, 1fr); }
   .runs { max-height: 16rem; }
   /* 銘柄名は長いので、スマホでは折り返す（keep-all のままだと 1 行に伸びて列幅が広がる） */
   .table-wrap th.name, .table-wrap td.name { word-break: normal; overflow-wrap: anywhere; min-width: 6rem; }
+}
+
+/* iPhone は文字が 16px より小さい入力欄に触れると画面を拡大し、そのまま横にスクロールできる状態が残る。
+   スマホ幅とタッチ操作の端末では、入力欄の文字を 16px にして拡大させない */
+@media (max-width: 760px), (pointer: coarse) {
+  input:not([type='checkbox']):not([type='radio']):not([type='file']), select, textarea { font-size: 1rem; }
 }
 
 @media (prefers-reduced-motion: reduce) {

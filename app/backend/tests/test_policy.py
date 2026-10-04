@@ -362,7 +362,9 @@ def test_system_message_contains_kb_profile_and_rules(kb):
     # The result is read later in the run history, so the rules say how to write it (issue #41).
     assert "実行履歴" in auto and "Markdown" in auto and "表" in auto
     # The rules give the same limit as report_result checks (issue #68).
-    assert "summary は 20,000 文字以内" in auto and "4000" not in auto
+    assert "summary は 40,000 文字以内" in auto and "4000" not in auto
+    # The run history should show what was found, not only its gist (issue #77).
+    assert "省略せずに" in auto and "長い文章の羅列にしない" not in auto
     assert "承認ボタン" not in auto  # unattended runs never wait for a user
     # Batching independent look-ups into one answer helps everywhere; the sub-agent rules are added only when the
     # session is given the research agent (issue #56).

@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type InputHTMLAttributes } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api, ApiError, formatDate, json } from '../api'
 import { hasResult, runAnswer, runStatusText, STATUS_LABELS } from '../automationRuns'
 import { Markdown } from '../components/Markdown'
+import { SelectAllButton } from '../components/SelectAllButton'
+import { draftStore } from '../drafts'
 import type { Automation, AutomationList, NotifySettings, RunNowResult, RunRecord, Schedule } from '../types'
 
 const WEEKDAYS = ['月', '火', '水', '木', '金', '土', '日']
@@ -34,6 +36,44 @@ const emptyDraft = (prompt = ''): Draft => ({
   max_runtime_minutes: 20,
 })
 
+// 保存していない編集（オートメーションの id ごと、新規は ''）。ほかを編集したり、画面を移ったりしても戻せるように残す。
+const editorDrafts = draftStore<Draft>()
+// 画面を離れたときに開いていた編集の id。戻ったら同じ編集を開き直す。
+const openEditorKey = draftStore<string>()
+const editorKey = (d: Draft) => d.id ?? ''
+// 保存している途中の編集。保存が終わるまでは変えられないようにする（画面を移って戻っても同じ）。
+const savingEditors = new Set<Draft>()
+// 保存が終わったことを、表示している画面に知らせる（保存の途中で画面を移っても、戻った画面に届く）。
+let editorSaved: ((saving: Draft, ok: boolean) => void) | null = null
+
+const isIntIn = (v: number, min: number, max: number) => Number.isInteger(v) && v >= min && v <= max
+
+const parseNumber = (text: string) => (text.trim() === '' ? NaN : Number(text))
+
+// 数値の入力欄。消して打ち直している間は空欄のままにする（0 で埋めない）。空欄は NaN で持ち、保存前に止める。
+// 打ちかけの文字（「-」「1.」など）は、数にすると消えてしまうので、打った文字のまま見せる。
+function NumberInput({
+  value,
+  onValueChange,
+  ...rest
+}: Omit<InputHTMLAttributes<HTMLInputElement>, 'type' | 'value' | 'onChange'> & { value: number; onValueChange: (v: number) => void }) {
+  const [text, setText] = useState('')
+  // 外から値が変わったとき（別の編集を開いたなど）は、その値を見せる。
+  const shown = Object.is(parseNumber(text), value) ? text : Number.isNaN(value) ? '' : String(value)
+  return (
+    <input
+      type="number"
+      {...rest}
+      value={shown}
+      onChange={(e) => {
+        const next = e.currentTarget.value
+        setText(next)
+        onValueChange(parseNumber(next))
+      }}
+    />
+  )
+}
+
 function describe(s: Schedule): string {
   switch (s.kind) {
     case 'daily':
@@ -52,7 +92,15 @@ function describe(s: Schedule): string {
 export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number) => void }) {
   const [params, setParams] = useSearchParams()
   const [list, setList] = useState<AutomationList | null>(null)
-  const [draft, setDraft] = useState<Draft | null>(null)
+  const [draft, setDraft] = useState<Draft | null>(() => {
+    const key = openEditorKey.get('')
+    return key === undefined ? null : editorDrafts.get(key) ?? null
+  })
+  // 残しておいた編集を開いたか（編集欄に、そのことを書いておく）。
+  const [restored, setRestored] = useState(() => draft !== null)
+  const draftRef = useRef(draft)
+  // 開いたときの内容。ここから変わっていれば、閉じずに離れても編集を残す（画面に戻って開いた編集は、残したものなので空にしておく）。
+  const draftBaseRef = useRef('')
   // null は「まだ読めていない」。読めたかどうかで、保存済みモデルが一覧にないときの書き方を変える。
   const [models, setModels] = useState<{ id: string; name: string }[] | null>(null)
   const [runs, setRuns] = useState<RunRecord[]>([])
@@ -74,6 +122,49 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   const openRunRequestRef = useRef(0)
   const interruptedWatchRef = useRef<{ runId: string; since: number } | null>(null)
   const loadRequestRef = useRef(0)
+  const mountedRef = useRef(false)
+  // 処理した「この質問を定期実行」のリンク（StrictMode で effect が 2 回動いても、確かめるのは 1 回にする）。
+  const handledNewRef = useRef<string | null>(null)
+  const [, setSavingVersion] = useState(0)
+
+  useLayoutEffect(() => {
+    draftRef.current = draft
+  })
+
+  // 開いている編集が変わっていれば残し、変わっていなければ前に残したものも消す。残したかどうかを返す。
+  const keepEditor = useCallback(() => {
+    const d = draftRef.current
+    if (!d) return false
+    const changed = JSON.stringify(d) !== draftBaseRef.current
+    if (changed) editorDrafts.set(editorKey(d), d)
+    else editorDrafts.delete(editorKey(d))
+    return changed
+  }, [])
+
+  const openEditor = useCallback(
+    (fresh: Draft, restore = true) => {
+      keepEditor()
+      const kept = restore ? editorDrafts.get(editorKey(fresh)) : undefined
+      draftBaseRef.current = JSON.stringify(fresh)
+      setDraft(kept ?? fresh)
+      setRestored(kept !== undefined)
+    },
+    [keepEditor],
+  )
+
+  const closeEditor = () => {
+    if (draft) editorDrafts.delete(editorKey(draft))
+    setDraft(null)
+  }
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      if (keepEditor()) openEditorKey.set('', editorKey(draftRef.current as Draft))
+      else openEditorKey.delete('')
+    }
+  }, [keepEditor])
 
   const load = useCallback(async () => {
     // 見張り・更新・削除の読み込みは重なることがある。後から始めた読み込みだけを反映し、古い応答で消した記録を戻さない。
@@ -132,6 +223,21 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   )
 
   useEffect(() => {
+    const listener = (saving: Draft, ok: boolean) => {
+      setSavingVersion((n) => n + 1)
+      if (!ok) return
+      // 保存したときのまま開いている編集だけを閉じる（ほかの編集を開いていたら、そちらはそのまま）。
+      if (draftRef.current === saving) setDraft(null)
+      setMessage('保存しました')
+      load().catch((e) => setError(e.message))
+    }
+    editorSaved = listener
+    return () => {
+      if (editorSaved === listener) editorSaved = null
+    }
+  }, [load])
+
+  useEffect(() => {
     load().catch((e) => setError(e.message))
     // The list is only used to fill the model dropdown, so a failure (e.g. an expired token) is not shown here.
     api<{ models: { id: string; name: string }[] }>('/api/models')
@@ -175,28 +281,52 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
 
   useEffect(() => {
     // Deep links: "この質問を定期実行" (?new=1&prompt=) and GitHub notifications (?automation=&run=).
-    if (params.get('new')) {
-      setDraft(emptyDraft(params.get('prompt') ?? ''))
+    if (!params.get('new')) handledNewRef.current = null
+    else if (handledNewRef.current !== params.toString()) {
+      handledNewRef.current = params.toString()
+      // 渡された質問で始める。書きかけの新規作成があれば、破棄してよいかを確かめる（やめたら、書きかけのほうを開く）。
+      const shown = draftRef.current
+      const pending =
+        shown && editorKey(shown) === '' ? JSON.stringify(shown) !== draftBaseRef.current : editorDrafts.has('')
+      if (
+        !pending ||
+        window.confirm('書きかけの新しいオートメーションがあります。書きかけを破棄して、この質問で始めますか？')
+      )
+        openEditor(emptyDraft(params.get('prompt') ?? ''), false)
+      else openEditor(emptyDraft())
       setParams({}, { replace: true })
     }
     const a = params.get('automation')
     const r = params.get('run')
     if (a && r) openRun(a, r).catch((e) => setError(e.message))
-  }, [params, setParams, openRun])
+  }, [params, setParams, openRun, openEditor])
 
   const save = async () => {
-    if (!draft) return
+    if (!draft || savingEditors.has(draft)) return
+    const saving = draft
     setError('')
     // 旧 UI では空のモデルも保存できたので、編集したら既定値に正規化しておく。
-    const body = json({ ...draft, model: draft.model || 'auto' })
+    // 今の周期で使わない欄は、打ちかけ（空欄など）のままだと保存できないので、使える値に戻しておく。
+    const { schedule: s, notify: n } = draft
+    const body = json({
+      ...draft,
+      model: draft.model || 'auto',
+      schedule: { ...s, month: isIntIn(s.month, 1, 12) ? s.month : 1, day: isIntIn(s.day, 1, 31) ? s.day : 1 },
+      notify: { ...n, signal_value: Number.isFinite(n.signal_value) ? n.signal_value : 0 },
+    })
+    savingEditors.add(saving)
+    setSavingVersion((n) => n + 1)
     try {
-      if (draft.id) await api(`/api/automations/${draft.id}`, { method: 'PUT', body })
+      if (saving.id) await api(`/api/automations/${saving.id}`, { method: 'PUT', body })
       else await api('/api/automations', { method: 'POST', body })
-      setDraft(null)
-      setMessage('保存しました')
-      await load()
+      // 保存の途中でほかの編集へ移った・画面を離れたときに残した編集は、保存したものなので消す。
+      if (editorDrafts.get(editorKey(saving)) === saving) editorDrafts.delete(editorKey(saving))
+      savingEditors.delete(saving)
+      editorSaved?.(saving, true)
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e))
+      savingEditors.delete(saving)
+      editorSaved?.(saving, false)
+      if (mountedRef.current) setError(e instanceof ApiError ? e.message : String(e))
     }
   }
 
@@ -216,6 +346,11 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   const remove = async (a: Automation) => {
     if (!window.confirm(`「${a.name}」を削除しますか？`)) return
     await api(`/api/automations/${a.id}`, { method: 'DELETE' })
+    editorDrafts.delete(a.id)
+    if (openEditorKey.get('') === a.id) openEditorKey.delete('')
+    if (!mountedRef.current) return
+    // 削除したオートメーションの編集を開いていたら閉じる（保存すると、ないものを更新しようとして失敗する）。
+    if (draftRef.current?.id === a.id) setDraft(null)
     await load()
   }
 
@@ -267,17 +402,21 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
     setError('')
     try {
       const startedRun = await api<RunNowResult>(`/api/automations/${a.id}/run`, { method: 'POST' })
+      // 画面の一覧は、ほかの画面で保存した設定より古いことがあるので、API が返した保存済みの設定で伝える。
+      const name = startedRun.name ?? a.name
+      const minutes = startedRun.max_runtime_minutes ?? a.max_runtime_minutes
+      const limit = `実行時間の上限は、「最大実行時間」の設定の ${minutes} 分です（「編集」で 60 分まで変えられます）。`
       // 本番では、アプリが使われないと止まるため、実行はジョブに任せる。ジョブの起動には数分かかることがある。
       const inJob = startedRun.runner === 'job'
       if (inJob && !startedRun.job_started) {
-        setMessage(`「${a.name}」の実行を受け付けました。実行用のジョブをすぐに起動できなかったため、次の定期確認（15 分以内）で実行します。始まると実行履歴に出ます。`)
+        setMessage(`「${name}」の実行を受け付けました。実行用のジョブをすぐに起動できなかったため、次の定期確認（15 分以内）で実行します。始まると実行履歴に出ます。${limit}`)
         await load()
         return
       }
       setMessage(
         inJob
-          ? `「${a.name}」の実行を受け付けました。実行用のジョブが起動すると（数分かかることがあります）実行履歴に出て、終わると結果に変わります（最大 ${a.max_runtime_minutes} 分）。`
-          : `「${a.name}」の実行を始めました。実行中も実行履歴に出て、終わると結果に変わります（最大 ${a.max_runtime_minutes} 分）。`,
+          ? `「${name}」の実行を受け付けました。実行用のジョブが起動すると（数分かかることがあります）実行履歴に出て、終わると結果に変わります。${limit}ジョブの起動を待つ時間は含みません。`
+          : `「${name}」の実行を始めました。実行中も実行履歴に出て、終わると結果に変わります。${limit}`,
       )
       if (inJob) await load()
       // 同時に定期実行が始まっても取り違えないよう、API が割り当てた記録だけを待つ。
@@ -296,8 +435,8 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
           // 前の実行が続いていると、そのオートメーションは実行されない（API は受け付けたことだけを返す）。
           setMessage(
             inJob
-              ? `「${a.name}」の実行はまだ始まっていません。実行用のジョブが起動すると実行履歴に出ます。`
-              : `「${a.name}」の実行を確認できませんでした。ほかの実行が続いている可能性があります。`,
+              ? `「${name}」の実行はまだ始まっていません。実行用のジョブが起動すると実行履歴に出ます。`
+              : `「${name}」の実行を確認できませんでした。ほかの実行が続いている可能性があります。`,
           )
           return
         }
@@ -323,7 +462,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
       <section className="panel">
         <div className="row">
           <h2 className="grow">オートメーション</h2>
-          <button className="button primary" onClick={() => setDraft(emptyDraft())}>
+          <button className="button primary" onClick={() => openEditor(emptyDraft())}>
             ＋ 新規作成
           </button>
         </div>
@@ -368,7 +507,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
                   <td>{a.state.last_status ? STATUS_LABELS[a.state.last_status] ?? a.state.last_status : '—'}</td>
                   <td>{a.notify.github ? 'GitHub' : 'アプリ内のみ'}</td>
                   <td className="actions">
-                    <button className="link" onClick={() => setDraft({ ...a })}>
+                    <button className="link" onClick={() => openEditor({ ...a })}>
                       編集
                     </button>
                     <button className="link danger" onClick={() => remove(a)}>
@@ -388,8 +527,10 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
           setDraft={setDraft}
           list={list}
           models={models}
+          restored={restored}
+          saving={savingEditors.has(draft)}
           onSave={() => save()}
-          onCancel={() => setDraft(null)}
+          onCancel={closeEditor}
         />
       )}
 
@@ -497,6 +638,8 @@ function Editor({
   setDraft,
   list,
   models,
+  restored,
+  saving,
   onSave,
   onCancel,
 }: {
@@ -504,9 +647,13 @@ function Editor({
   setDraft: (d: Draft) => void
   list: AutomationList
   models: { id: string; name: string }[] | null
+  restored: boolean
+  saving: boolean
   onSave: () => void
   onCancel: () => void
 }) {
+  const promptId = useId()
+  const promptRef = useRef<HTMLTextAreaElement>(null)
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft({ ...draft, [key]: value })
   const setSchedule = (patch: Partial<Schedule>) => set('schedule', { ...draft.schedule, ...patch })
   const setNotify = (patch: Partial<NotifySettings>) => set('notify', { ...draft.notify, ...patch })
@@ -524,155 +671,174 @@ function Editor({
       ? [{ id: model, name: models ? `${model}（一覧にありません）` : model }]
       : []),
   ]
+  // 空欄や範囲外の数値はサーバーで弾かれる（理由が出ない）ので、ここで止めて直す欄を書いておく。
+  const problems = [
+    !isIntIn(draft.max_runtime_minutes, 1, 60) && '最大実行時間は 1〜60 の整数で入れてください。',
+    s.kind === 'yearly' && !isIntIn(s.month, 1, 12) && '月は 1〜12 の整数で入れてください。',
+    (s.kind === 'monthly' || s.kind === 'yearly') && !isIntIn(s.day, 1, 31) && '日は 1〜31 の整数で入れてください。',
+    n.github && n.condition === 'signal' && !Number.isFinite(n.signal_value) && '通知の判定に使う数値を入れてください。',
+  ].filter((p): p is string => typeof p === 'string')
   return (
     <section className="panel editor-panel">
       <h2>{draft.id ? 'オートメーションの編集' : '新しいオートメーション'}</h2>
-      <label>
-        名前
-        <input value={draft.name} onChange={(e) => set('name', e.target.value)} maxLength={80} />
-      </label>
-      <label>
-        実行する指示（{'{{today}} {{year}} {{month}} {{weekday}}'} が使えます）
-        <textarea rows={10} value={draft.prompt} onChange={(e) => set('prompt', e.target.value)} />
-      </label>
-      <div className="row wrap">
+      {restored && <p className="hint">保存していない編集を戻しました（「キャンセル」で破棄できます）。</p>}
+      {/* 保存している間は変えられないようにする: 保存の途中で変えた内容が、保存したものと区別できなくなる */}
+      <fieldset className="contents" disabled={saving}>
         <label>
-          周期
-          <select value={s.kind} onChange={(e) => setSchedule({ kind: e.target.value as Schedule['kind'] })}>
-            <option value="daily">毎日</option>
-            <option value="weekly">毎週</option>
-            <option value="monthly">毎月</option>
-            <option value="yearly">毎年</option>
-            <option value="cron">cron 式</option>
-          </select>
+          名前
+          <input value={draft.name} onChange={(e) => set('name', e.target.value)} maxLength={80} />
         </label>
-        {s.kind === 'weekly' && (
+        <div className="field">
+          <div className="field-head">
+            <label htmlFor={promptId}>実行する指示（{'{{today}} {{year}} {{month}} {{weekday}}'} が使えます）</label>
+            <SelectAllButton target={promptRef} />
+          </div>
+          <textarea id={promptId} ref={promptRef} rows={10} value={draft.prompt} onChange={(e) => set('prompt', e.target.value)} />
+        </div>
+        <div className="row wrap">
           <label>
-            曜日
-            <select value={s.weekday} onChange={(e) => setSchedule({ weekday: Number(e.target.value) })}>
-              {WEEKDAYS.map((w, i) => (
-                <option key={w} value={i}>
-                  {w}曜
+            周期
+            <select value={s.kind} onChange={(e) => setSchedule({ kind: e.target.value as Schedule['kind'] })}>
+              <option value="daily">毎日</option>
+              <option value="weekly">毎週</option>
+              <option value="monthly">毎月</option>
+              <option value="yearly">毎年</option>
+              <option value="cron">cron 式</option>
+            </select>
+          </label>
+          {s.kind === 'weekly' && (
+            <label>
+              曜日
+              <select value={s.weekday} onChange={(e) => setSchedule({ weekday: Number(e.target.value) })}>
+                {WEEKDAYS.map((w, i) => (
+                  <option key={w} value={i}>
+                    {w}曜
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          {s.kind === 'yearly' && (
+            <label>
+              月
+              <NumberInput min={1} max={12} value={s.month} onValueChange={(month) => setSchedule({ month })} />
+            </label>
+          )}
+          {(s.kind === 'monthly' || s.kind === 'yearly') && (
+            <label>
+              日
+              <NumberInput min={1} max={31} value={s.day} onValueChange={(day) => setSchedule({ day })} />
+            </label>
+          )}
+          {s.kind === 'cron' ? (
+            <label>
+              cron（分 時 日 月 曜日・日本時間）
+              <input value={s.cron} onChange={(e) => setSchedule({ cron: e.target.value })} placeholder="0 9 * * 1-5" />
+            </label>
+          ) : (
+            <label>
+              時刻（日本時間）
+              <input type="time" value={s.time} onChange={(e) => setSchedule({ time: e.target.value })} />
+            </label>
+          )}
+        </div>
+        <div className="row wrap">
+          <label>
+            会話
+            <select value={draft.conversation_mode} onChange={(e) => set('conversation_mode', e.target.value as Draft['conversation_mode'])}>
+              <option value="new">毎回新しい会話</option>
+              <option value="continue">同じ会話に続ける（前回を踏まえる）</option>
+            </select>
+          </label>
+          <label>
+            モデル
+            <select value={model} onChange={(e) => set('model', e.target.value)}>
+              {modelOptions.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name}
                 </option>
               ))}
             </select>
           </label>
-        )}
-        {s.kind === 'yearly' && (
           <label>
-            月
-            <input type="number" min={1} max={12} value={s.month} onChange={(e) => setSchedule({ month: Number(e.target.value) })} />
+            最大実行時間（分、60 まで）
+            <NumberInput min={1} max={60} value={draft.max_runtime_minutes} onValueChange={(v) => set('max_runtime_minutes', v)} />
           </label>
-        )}
-        {(s.kind === 'monthly' || s.kind === 'yearly') && (
-          <label>
-            日
-            <input type="number" min={1} max={31} value={s.day} onChange={(e) => setSchedule({ day: Number(e.target.value) })} />
-          </label>
-        )}
-        {s.kind === 'cron' ? (
-          <label>
-            cron（分 時 日 月 曜日・日本時間）
-            <input value={s.cron} onChange={(e) => setSchedule({ cron: e.target.value })} placeholder="0 9 * * 1-5" />
-          </label>
-        ) : (
-          <label>
-            時刻（日本時間）
-            <input type="time" value={s.time} onChange={(e) => setSchedule({ time: e.target.value })} />
-          </label>
-        )}
-      </div>
-      <div className="row wrap">
-        <label>
-          会話
-          <select value={draft.conversation_mode} onChange={(e) => set('conversation_mode', e.target.value as Draft['conversation_mode'])}>
-            <option value="new">毎回新しい会話</option>
-            <option value="continue">同じ会話に続ける（前回を踏まえる）</option>
-          </select>
-        </label>
-        <label>
-          モデル
-          <select value={model} onChange={(e) => set('model', e.target.value)}>
-            {modelOptions.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          最大実行時間（分、60 まで）
-          <input type="number" min={1} max={60} value={draft.max_runtime_minutes} onChange={(e) => set('max_runtime_minutes', Number(e.target.value))} />
-        </label>
-      </div>
-      <label className="check">
-        <input type="checkbox" checked={draft.allow_write} onChange={(e) => set('allow_write', e.target.checked)} />
-        メモリ・ノート・保有銘柄の書き換えを許可する（既定は読み取り専用）
-      </label>
-      <label className="check">
-        <input type="checkbox" checked={draft.enabled} onChange={(e) => set('enabled', e.target.checked)} />
-        有効
-      </label>
-      <fieldset>
-        <legend>使うコネクタ（API キーは Azure のシークレットで管理）</legend>
-        {list.connectors.map((c) => (
-          <label key={c.name} className="check">
-            <input
-              type="checkbox"
-              checked={draft.connectors.includes(c.name)}
-              onChange={(e) => set('connectors', e.target.checked ? [...draft.connectors, c.name] : draft.connectors.filter((x) => x !== c.name))}
-            />
-            {c.label} {!c.configured && <small>（キー未登録）</small>}
-          </label>
-        ))}
-      </fieldset>
-      <fieldset>
-        <legend>通知</legend>
-        <p className="hint">実行結果は常にアプリ内に記録されます。GitHub Issue での通知は、ここでオンにしたものだけです。</p>
+        </div>
         <label className="check">
-          <input type="checkbox" checked={n.github} onChange={(e) => setNotify({ github: e.target.checked })} />
-          GitHub で通知する
+          <input type="checkbox" checked={draft.allow_write} onChange={(e) => set('allow_write', e.target.checked)} />
+          メモリ・ノート・保有銘柄の書き換えを許可する（既定は読み取り専用）
         </label>
-        {n.github && (
-          <>
-            <label>
-              通知する条件
-              <select value={n.condition} onChange={(e) => setNotify({ condition: e.target.value as NotifySettings['condition'] })}>
-                <option value="report">Copilot が「知らせるべき」と報告したとき</option>
-                <option value="signal">ツールの結果の値で判定（例: 空室数 &gt; 0）</option>
-                <option value="always">毎回</option>
-              </select>
+        <label className="check">
+          <input type="checkbox" checked={draft.enabled} onChange={(e) => set('enabled', e.target.checked)} />
+          有効
+        </label>
+        <fieldset>
+          <legend>使うコネクタ（API キーは Azure のシークレットで管理）</legend>
+          {list.connectors.map((c) => (
+            <label key={c.name} className="check">
+              <input
+                type="checkbox"
+                checked={draft.connectors.includes(c.name)}
+                onChange={(e) => set('connectors', e.target.checked ? [...draft.connectors, c.name] : draft.connectors.filter((x) => x !== c.name))}
+              />
+              {c.label} {!c.configured && <small>（キー未登録）</small>}
             </label>
-            {n.condition === 'signal' && (
-              <div className="row wrap">
-                <input placeholder="値の名前（例: vacancy_count）" value={n.signal_field} onChange={(e) => setNotify({ signal_field: e.target.value })} />
-                <select value={n.signal_op} onChange={(e) => setNotify({ signal_op: e.target.value as NotifySettings['signal_op'] })}>
-                  {['>', '>=', '==', '!=', '<', '<='].map((op) => (
-                    <option key={op}>{op}</option>
-                  ))}
+          ))}
+        </fieldset>
+        <fieldset>
+          <legend>通知</legend>
+          <p className="hint">実行結果は常にアプリ内に記録されます。GitHub Issue での通知は、ここでオンにしたものだけです。</p>
+          <label className="check">
+            <input type="checkbox" checked={n.github} onChange={(e) => setNotify({ github: e.target.checked })} />
+            GitHub で通知する
+          </label>
+          {n.github && (
+            <>
+              <label>
+                通知する条件
+                <select value={n.condition} onChange={(e) => setNotify({ condition: e.target.value as NotifySettings['condition'] })}>
+                  <option value="report">Copilot が「知らせるべき」と報告したとき</option>
+                  <option value="signal">ツールの結果の値で判定（例: 空室数 &gt; 0）</option>
+                  <option value="always">毎回</option>
                 </select>
-                <input type="number" value={n.signal_value} onChange={(e) => setNotify({ signal_value: Number(e.target.value) })} />
-              </div>
-            )}
-            <label className="check">
-              <input type="checkbox" checked={n.only_on_change} onChange={(e) => setNotify({ only_on_change: e.target.checked })} />
-              前回は条件を満たさず、今回満たしたときだけ通知する
-            </label>
-            <label className="check">
-              <input type="checkbox" checked={n.include_summary} onChange={(e) => setNotify({ include_summary: e.target.checked })} />
-              Issue に要約を含める（既定は含めない。GitHub に内容が残ります）
-            </label>
-          </>
-        )}
+              </label>
+              {n.condition === 'signal' && (
+                <div className="row wrap">
+                  <input placeholder="値の名前（例: vacancy_count）" value={n.signal_field} onChange={(e) => setNotify({ signal_field: e.target.value })} />
+                  <select value={n.signal_op} onChange={(e) => setNotify({ signal_op: e.target.value as NotifySettings['signal_op'] })}>
+                    {['>', '>=', '==', '!=', '<', '<='].map((op) => (
+                      <option key={op}>{op}</option>
+                    ))}
+                  </select>
+                  <NumberInput value={n.signal_value} onValueChange={(signal_value) => setNotify({ signal_value })} aria-label="比べる値" />
+                </div>
+              )}
+              <label className="check">
+                <input type="checkbox" checked={n.only_on_change} onChange={(e) => setNotify({ only_on_change: e.target.checked })} />
+                前回は条件を満たさず、今回満たしたときだけ通知する
+              </label>
+              <label className="check">
+                <input type="checkbox" checked={n.include_summary} onChange={(e) => setNotify({ include_summary: e.target.checked })} />
+                Issue に要約を含める（既定は含めない。GitHub に内容が残ります）
+              </label>
+            </>
+          )}
+        </fieldset>
+        {problems.map((p) => (
+          <p key={p} className="error-text">
+            {p}
+          </p>
+        ))}
+        <div className="row">
+          <button className="button primary" onClick={onSave} disabled={!draft.name || !draft.prompt || problems.length > 0}>
+            {saving ? '保存中…' : '保存'}
+          </button>
+          <button className="button" onClick={onCancel}>
+            キャンセル
+          </button>
+        </div>
       </fieldset>
-      <div className="row">
-        <button className="button primary" onClick={onSave} disabled={!draft.name || !draft.prompt}>
-          保存
-        </button>
-        <button className="button" onClick={onCancel}>
-          キャンセル
-        </button>
-      </div>
     </section>
   )
 }

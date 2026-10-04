@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError, formatDate, json } from '../api'
 import { Markdown } from '../components/Markdown'
+import { SelectAllButton } from '../components/SelectAllButton'
+import { draftEpoch, draftStore } from '../drafts'
 import type { FileEntry } from '../types'
 
 const GROUP_LABELS: Record<string, string> = {
@@ -19,21 +21,140 @@ const FILE_ERROR_STATUSES = [400, 413]
 const summarize = (items: string[], limit = 3): string =>
   items.length > limit ? `${items.slice(0, limit).join('、')} ほか ${items.length - limit} 件` : items.join('、')
 
+// 保存していない編集（ファイルのパスごと）。ほかのファイルを開いたり、画面を移ったりしても戻せるように残す。
+// base は編集を始めたときのファイルの内容で、戻すときにファイルがその後で変わったかを確かめる。
+const fileDrafts = draftStore<{ base: string; content: string }>()
+// 画面を離れたときに編集していたファイル。戻ったら開き直す。
+const openFileKey = draftStore<string>()
+// 保存・削除中のファイルごとの最後の操作。同じファイルの保存と削除は順番に送る（後から押した保存を、先の保存が上書きしないように。
+// 待っていた保存が、削除したファイルを作り直さないように）。画面を離れて戻っても続けて並べられるように、画面の外に持つ。
+const writesInFlight = new Map<string, Promise<unknown>>()
+// 削除を始めたファイル（続けて押した削除の数）。削除が終わるまで、新しい保存は受け付けない。
+const deleting = new Map<string, number>()
+
+function enqueueWrite(path: string, task: () => Promise<unknown>) {
+  const previous = writesInFlight.get(path) ?? Promise.resolve()
+  const epoch = draftEpoch()
+  const send = () => {
+    // ログアウトしたあとは、待っていた操作を送らない（次にログインした人の権限で書き込まない）。
+    if (epoch !== draftEpoch()) throw new Error('ログアウトしたため、送りませんでした。')
+    return task()
+  }
+  // 先の操作が失敗しても、この操作は送る。
+  const request = previous.then(send, send)
+  writesInFlight.set(path, request)
+  const done = () => {
+    if (writesInFlight.get(path) === request) writesInFlight.delete(path)
+  }
+  request.then(done, done)
+  return request
+}
+
+function saveFile(path: string, content: string) {
+  if (deleting.has(path)) return Promise.reject(new Error(`${path} を削除しているため、保存しませんでした。`))
+  return enqueueWrite(path, () => api('/api/files/content', { method: 'PUT', body: json({ path, content }) }))
+}
+
+// 先に押した保存を送り終えてから削除する。
+function deleteFile(path: string) {
+  deleting.set(path, (deleting.get(path) ?? 0) + 1)
+  const request = enqueueWrite(path, () => api(`/api/files?path=${encodeURIComponent(path)}`, { method: 'DELETE' }))
+  const done = () => {
+    const left = (deleting.get(path) ?? 1) - 1
+    if (left > 0) deleting.set(path, left)
+    else deleting.delete(path)
+  }
+  request.then(done, done)
+  return request
+}
+
 export function KnowledgePage() {
   const [files, setFiles] = useState<FileEntry[]>([])
   const [selected, setSelected] = useState<string | null>(null)
   const [content, setContent] = useState('')
+  // 開いたときのファイルの内容（編集を破棄したらここへ戻す）。
+  const [base, setBase] = useState('')
   const [writable, setWritable] = useState(false)
   const [editing, setEditing] = useState(false)
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
   const [uploading, setUploading] = useState<{ current: number; total: number } | null>(null)
   const [listOpen, setListOpen] = useState(true)
+  const editorRef = useRef<HTMLTextAreaElement>(null)
+  const latestRef = useRef({ selected, content, base, editing })
+  useLayoutEffect(() => {
+    latestRef.current = { selected, content, base, editing }
+  })
+  // 画面を離れたあとに終わった読み込みは、表示も下書きも変えない（離れたときに残した編集を古い内容で上書きしない）。
+  const mountedRef = useRef(false)
+  // 後から開いたファイルだけを表示する（先に押したファイルの応答が遅れて届いても、表示を戻さない）。
+  const openRequestRef = useRef(0)
+  const openingRef = useRef<string | null>(null)
 
-  const load = useCallback(async () => setFiles(await api<FileEntry[]>('/api/files')), [])
+  // 開いているファイルの編集が変わっていれば残し、変わっていなければ前に残したものも消す。残したかどうかを返す。
+  const keepEdit = useCallback(() => {
+    const { selected, content, base, editing } = latestRef.current
+    if (!selected) return false
+    const changed = editing && content !== base
+    if (changed) fileDrafts.set(selected, { base, content })
+    else fileDrafts.delete(selected)
+    return changed
+  }, [])
+
+  // 開けたかどうかを返す（ほかのファイルを開いた・画面を離れたときは開かない）。
+  const open = useCallback(
+    async (path: string) => {
+      setError('')
+      setMessage('')
+      const request = ++openRequestRef.current
+      openingRef.current = path
+      let data: { content: string; writable: boolean }
+      try {
+        data = await api<{ content: string; writable: boolean }>(`/api/files/content?path=${encodeURIComponent(path)}`)
+      } finally {
+        if (openRequestRef.current === request) openingRef.current = null
+      }
+      if (!mountedRef.current || openRequestRef.current !== request) return false
+      keepEdit()
+      const kept = data.writable ? fileDrafts.get(path) : undefined
+      setSelected(path)
+      setBase(data.content)
+      setContent(kept?.content ?? data.content)
+      setWritable(data.writable)
+      setEditing(kept !== undefined)
+      if (kept)
+        setMessage(
+          kept.base === data.content
+            ? '保存していない編集を戻しました（「編集をやめる」で破棄できます）。'
+            : '保存していない編集を戻しました。編集を始めたあとでファイルが変わっています（保存すると、その変更を上書きします）。',
+        )
+      return true
+    },
+    [keepEdit],
+  )
+
+  // 後から読み込んだ一覧だけを表示する（保存のあとの読み込みが削除のあとの読み込みより遅れて届いても、消したファイルを戻さない）。
+  const loadRequestRef = useRef(0)
+  const load = useCallback(async () => {
+    const request = ++loadRequestRef.current
+    const data = await api<FileEntry[]>('/api/files')
+    if (loadRequestRef.current === request) setFiles(data)
+  }, [])
   useEffect(() => {
+    mountedRef.current = true
     load().catch((e) => setError(e.message))
-  }, [load])
+    // 編集の途中で画面を移っていたら、そのファイルを開き直して編集を戻す。
+    const path = openFileKey.get('')
+    if (path) open(path).catch((e) => setError(e.message))
+    return () => {
+      mountedRef.current = false
+      // 開いている途中のファイルに残した編集があれば、戻ったときはそちらを開き直す。
+      const opening = openingRef.current
+      if (keepEdit()) openFileKey.set('', latestRef.current.selected as string)
+      else if (opening && fileDrafts.has(opening)) openFileKey.set('', opening)
+      else openFileKey.delete('')
+    }
+  }, [load, open, keepEdit])
 
   const groups = useMemo(() => {
     const out: Record<string, FileEntry[]> = {}
@@ -44,34 +165,61 @@ export function KnowledgePage() {
     return out
   }, [files])
 
-  const open = async (path: string) => {
-    setError('')
-    setMessage('')
-    const data = await api<{ content: string; writable: boolean }>(`/api/files/content?path=${encodeURIComponent(path)}`)
-    setSelected(path)
-    setContent(data.content)
-    setWritable(data.writable)
-    setEditing(false)
-  }
-
   const save = async () => {
     if (!selected) return
+    const path = selected
+    const saved = content
     try {
-      await api('/api/files/content', { method: 'PUT', body: json({ path: selected, content }) })
-      setEditing(false)
-      setMessage('保存しました')
+      await saveFile(path, saved)
+      // 保存している間にほかのファイルや画面へ移っていたら、残した編集のほうを保存した内容に合わせる
+      // （保存したあとに書き足した分だけを、保存していない編集として残す）。
+      const kept = fileDrafts.get(path)
+      if (kept?.content === saved) fileDrafts.delete(path)
+      else if (kept) fileDrafts.set(path, { base: saved, content: kept.content })
+      if (!mountedRef.current) return
+      // 先に送った保存が失敗していても、この保存で書き込めたのでそのエラーは消す。
+      setError('')
+      const latest = latestRef.current
+      if (latest.selected === path) {
+        setBase(saved)
+        // 保存している間に書き足した分は、編集を続けられるように残す。
+        if (latest.content === saved) setEditing(false)
+        setMessage(latest.content === saved ? '保存しました' : '保存しました（保存している間に変えた内容は、まだ保存していません）')
+      } else {
+        setMessage(`${path} を保存しました`)
+      }
       await load()
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e))
+      if (mountedRef.current) setError(e instanceof ApiError ? e.message : String(e))
     }
   }
 
   const remove = async () => {
     if (!selected || !window.confirm(`${selected} を削除しますか？`)) return
-    await api(`/api/files?path=${encodeURIComponent(selected)}`, { method: 'DELETE' })
-    setSelected(null)
-    setContent('')
-    await load()
+    const path = selected
+    try {
+      await deleteFile(path)
+      fileDrafts.delete(path)
+      if (openFileKey.get('') === path) openFileKey.delete('')
+      if (!mountedRef.current) return
+      // 削除している間にほかのファイルを開いていたら、そちらは閉じない（その編集を消さない）。
+      if (latestRef.current.selected === path) {
+        setSelected(null)
+        setContent('')
+        setEditing(false)
+      }
+      await load()
+    } catch (e) {
+      if (mountedRef.current) setError(e instanceof ApiError ? e.message : String(e))
+    }
+  }
+
+  const stopEditing = () => {
+    if (content !== base && !window.confirm('保存していない編集を破棄しますか？')) return
+    if (selected) fileDrafts.delete(selected)
+    setContent(base)
+    setEditing(false)
+    setMessage('')
   }
 
   const newNote = async () => {
@@ -79,10 +227,9 @@ export function KnowledgePage() {
     if (!name) return
     const path = `notes/${name.replace(/[\\/]/g, '_')}${name.endsWith('.md') ? '' : '.md'}`
     try {
-      await api('/api/files/content', { method: 'PUT', body: json({ path, content: `# ${name}\n\n` }) })
+      await saveFile(path, `# ${name}\n\n`)
       await load()
-      await open(path)
-      setEditing(true)
+      if (await open(path)) setEditing(true)
     } catch (e) {
       setError((e as Error).message)
     }
@@ -219,7 +366,7 @@ export function KnowledgePage() {
         )}
         {selected && (
           <>
-            <div className="row">
+            <div className="row wrap">
               <h2 className="grow">{selected}</h2>
               {writable && !editing && (
                 <button className="button small" onClick={() => setEditing(true)}>
@@ -227,9 +374,15 @@ export function KnowledgePage() {
                 </button>
               )}
               {writable && editing && (
-                <button className="button small primary" onClick={save}>
-                  保存
-                </button>
+                <>
+                  <button className="button small primary" onClick={save}>
+                    保存
+                  </button>
+                  <button className="button small" onClick={stopEditing}>
+                    編集をやめる
+                  </button>
+                  <SelectAllButton target={editorRef} />
+                </>
               )}
               {writable && (
                 <button className="button small danger" onClick={remove}>
@@ -238,7 +391,7 @@ export function KnowledgePage() {
               )}
             </div>
             {editing ? (
-              <textarea className="editor" value={content} onChange={(e) => setContent(e.target.value)} />
+              <textarea ref={editorRef} className="editor" value={content} onChange={(e) => setContent(e.target.value)} aria-label={`${selected} の内容`} />
             ) : selected.endsWith('.md') ? (
               <Markdown text={content} />
             ) : (

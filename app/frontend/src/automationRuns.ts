@@ -14,10 +14,11 @@ export const STATUS_LABELS: Record<string, string> = {
   skipped_limit: '上限のため未実行',
 }
 
-// The instruction is quoted in full (automation prompts are capped at 8,000) and so is a full result (summaries are
-// capped at 20,000); both, plus the question, stay within the 50,000-character limit of a chat message.
+// The instruction is quoted in full (automation prompts are capped at 8,000) and so is the result as far as the rest
+// of the budget goes (summaries are capped at 40,000). Quote and question together stay within the 50,000-character
+// limit of a chat message, with at least 5,000 left for the question.
 const QUOTE_PROMPT_LIMIT = 8000
-const QUOTE_RESULT_LIMIT = 20000
+const QUOTE_LIMIT = 45000
 
 export const statusLabel = (status: string) => STATUS_LABELS[status] ?? status
 
@@ -80,15 +81,14 @@ export function quoteDraft(run: RunRecord): string {
   const problem = runProblem(run)
   const result = [answer, problem && !answer.includes(problem) ? `（${problem}）` : ''].filter(Boolean).join('\n\n')
   const status = run.status === 'success' ? '' : `（${statusLabel(run.status)}）`
-  return [
+  const head = [
     `オートメーション「${run.name}」（${formatDate(run.started_at)}）の結果について質問です。`,
     '',
     '--- 指示 ---',
     clip(run.prompt ?? '', QUOTE_PROMPT_LIMIT),
     `--- 結果${status} ---`,
-    clip(result, QUOTE_RESULT_LIMIT),
-    '--- ここまで ---',
-    '',
-    '',
   ].join('\n')
+  // What follows the result (the note on a clipped result and the closing line) fits in the last 100 characters.
+  const room = QUOTE_LIMIT - [...head].length - 100
+  return [head, clip(result, room), '--- ここまで ---', '', ''].join('\n')
 }

@@ -874,7 +874,7 @@ async def test_report_result_accepts_summaries_up_to_the_limit(auto_env):
     call again) and is never recorded (issue #68)."""
     from life_helper.copilot_integration.system_prompt import MAX_SUMMARY_CHARS
 
-    assert MAX_SUMMARY_CHARS == 20_000
+    assert MAX_SUMMARY_CHARS == 40_000  # as long as a result can be written in one go (issue #77)
     ctx, runner, manager = auto_env
     a = ctx.automations.upsert(Automation(name="x", prompt="y"))
     full = "🏠" + "あ" * (MAX_SUMMARY_CHARS - 1)  # counted in code points, so the emoji is one character
@@ -1000,8 +1000,8 @@ def _chat_record(automation_id: str, run_id: str, *, mode: str = "new", minute: 
 
 
 def test_run_list_leaves_out_results_and_transcripts(client, ctx, monkeypatch):
-    """The list only names the runs and the result is read from the run itself, so long results (up to 20,000
-    characters each, issue #68) do not make the list heavy."""
+    """The list only names the runs and the result is read from the run itself, so long results (up to 40,000
+    characters each, issues #68 and #77) do not make the list heavy."""
     sign_in(client, ctx)
     store = ctx.automations
     store.upsert(Automation(id="aaaaaa000001", name="定期チェック", prompt="確認して", schedule=Schedule(kind="daily")))
@@ -1531,7 +1531,9 @@ def test_automation_list_scans_empty_history_once(client, ctx):
 
 def test_run_now_returns_the_id_reserved_for_its_task(client, ctx):
     csrf = sign_in(client, ctx)
-    automation = ctx.automations.upsert(Automation(name="定期チェック", prompt="確認して"))
+    automation = ctx.automations.upsert(Automation(name="定期チェック", prompt="確認して", max_runtime_minutes=40))
+    # Saved from another screen after this one listed it: the reply tells the settings the run uses (issue #77).
+    ctx.automations.upsert(automation.model_copy(update={"name": "家探し", "max_runtime_minutes": 60}))
     runner = SimpleNamespace(
         run=AsyncMock(return_value={"status": "success"}), manager=SimpleNamespace(reset=AsyncMock())
     )
@@ -1541,7 +1543,13 @@ def test_run_now_returns_the_id_reserved_for_its_task(client, ctx):
 
     assert response.status_code == 200
     run_id = response.json()["run_id"]
-    assert response.json() == {"started": True, "run_id": run_id, "runner": "app"}
+    assert response.json() == {
+        "started": True,
+        "run_id": run_id,
+        "runner": "app",
+        "name": "家探し",
+        "max_runtime_minutes": 60,
+    }
     assert len(run_id) == 16
     runner.run.assert_called_once_with(automation.id, run_id=run_id)
 
@@ -1965,7 +1973,14 @@ def test_run_now_hands_the_run_to_the_job(client, ctx, settings, monkeypatch):
 
     assert response.status_code == 200
     run_id = response.json()["run_id"]
-    assert response.json() == {"started": True, "run_id": run_id, "runner": "job", "job_started": True}
+    assert response.json() == {
+        "started": True,
+        "run_id": run_id,
+        "runner": "job",
+        "job_started": True,
+        "name": "定期チェック",
+        "max_runtime_minutes": 20,
+    }
     assert "automation_runner" not in ctx.extras  # nothing runs in the app
     # The app's managed identity signs in to Azure Resource Manager and starts the job.
     request = token.calls.last.request
@@ -1997,7 +2012,14 @@ def test_run_now_leaves_the_request_to_the_scheduled_job_when_the_job_cannot_be_
         response = client.post(f"/api/automations/{automation.id}/run", headers={"x-csrf-token": csrf})
 
     run_id = response.json()["run_id"]
-    assert response.json() == {"started": True, "run_id": run_id, "runner": "job", "job_started": False}
+    assert response.json() == {
+        "started": True,
+        "run_id": run_id,
+        "runner": "job",
+        "job_started": False,
+        "name": "定期チェック",
+        "max_runtime_minutes": 20,
+    }
     assert [r["run_id"] for r in ctx.automations.run_requests()] == [run_id]
     assert "HTTP 403" in caplog.text and "arm-token" not in caplog.text
 
@@ -2031,7 +2053,14 @@ def test_run_now_leaves_the_request_to_the_job_when_the_managed_identity_is_miss
 
     # With a job, the run never falls back to the app (which scales in to zero and would stop it).
     run_id = response.json()["run_id"]
-    assert response.json() == {"started": True, "run_id": run_id, "runner": "job", "job_started": False}
+    assert response.json() == {
+        "started": True,
+        "run_id": run_id,
+        "runner": "job",
+        "job_started": False,
+        "name": "定期チェック",
+        "max_runtime_minutes": 20,
+    }
     assert "automation_runner" not in ctx.extras
     assert [r["run_id"] for r in ctx.automations.run_requests()] == [run_id]
     assert "managed identity endpoint is not available" in caplog.text
