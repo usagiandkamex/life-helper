@@ -711,7 +711,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
     const generation = generationRef.current
     const newModel = composerKeyRef.current === NEW_CONVERSATION
       ? selectedModel
-      : composers.get(NEW_CONVERSATION)?.model ?? selectedModel
+      : composers.get(NEW_CONVERSATION)?.model ?? defaultModel
     const conv = await api<Conversation>('/api/conversations', { method: 'POST', body: json({ model: newModel }) })
     await loadConversations()
     // Something else was opened while it was being created, or this page was left.

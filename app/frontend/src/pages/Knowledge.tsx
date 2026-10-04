@@ -26,23 +26,43 @@ const summarize = (items: string[], limit = 3): string =>
 const fileDrafts = draftStore<{ base: string; content: string }>()
 // 画面を離れたときに編集していたファイル。戻ったら開き直す。
 const openFileKey = draftStore<string>()
-// 保存中のファイルごとの最後の保存。同じファイルの保存は順番に送る（後から押した保存を、先の保存が上書きしないように）。
-// 画面を離れて戻っても続けて並べられるように、画面の外に持つ。
-const savesInFlight = new Map<string, Promise<unknown>>()
+// 保存・削除中のファイルごとの最後の操作。同じファイルの保存と削除は順番に送る（後から押した保存を、先の保存が上書きしないように。
+// 待っていた保存が、削除したファイルを作り直さないように）。画面を離れて戻っても続けて並べられるように、画面の外に持つ。
+const writesInFlight = new Map<string, Promise<unknown>>()
+// 削除を始めたファイル（続けて押した削除の数）。削除が終わるまで、新しい保存は受け付けない。
+const deleting = new Map<string, number>()
 
-function saveFile(path: string, content: string) {
-  const previous = savesInFlight.get(path) ?? Promise.resolve()
+function enqueueWrite(path: string, task: () => Promise<unknown>) {
+  const previous = writesInFlight.get(path) ?? Promise.resolve()
   const epoch = draftEpoch()
   const send = () => {
-    // ログアウトしたあとは、待っていた保存を送らない（次にログインした人の権限で書き込まない）。
-    if (epoch !== draftEpoch()) throw new Error('ログアウトしたため、保存しませんでした。')
-    return api('/api/files/content', { method: 'PUT', body: json({ path, content }) })
+    // ログアウトしたあとは、待っていた操作を送らない（次にログインした人の権限で書き込まない）。
+    if (epoch !== draftEpoch()) throw new Error('ログアウトしたため、送りませんでした。')
+    return task()
   }
-  // 先の保存が失敗しても、この保存は送る。
+  // 先の操作が失敗しても、この操作は送る。
   const request = previous.then(send, send)
-  savesInFlight.set(path, request)
+  writesInFlight.set(path, request)
   const done = () => {
-    if (savesInFlight.get(path) === request) savesInFlight.delete(path)
+    if (writesInFlight.get(path) === request) writesInFlight.delete(path)
+  }
+  request.then(done, done)
+  return request
+}
+
+function saveFile(path: string, content: string) {
+  if (deleting.has(path)) return Promise.reject(new Error(`${path} を削除しているため、保存しませんでした。`))
+  return enqueueWrite(path, () => api('/api/files/content', { method: 'PUT', body: json({ path, content }) }))
+}
+
+// 先に押した保存を送り終えてから削除する。
+function deleteFile(path: string) {
+  deleting.set(path, (deleting.get(path) ?? 0) + 1)
+  const request = enqueueWrite(path, () => api(`/api/files?path=${encodeURIComponent(path)}`, { method: 'DELETE' }))
+  const done = () => {
+    const left = (deleting.get(path) ?? 1) - 1
+    if (left > 0) deleting.set(path, left)
+    else deleting.delete(path)
   }
   request.then(done, done)
   return request
@@ -113,7 +133,13 @@ export function KnowledgePage() {
     [keepEdit],
   )
 
-  const load = useCallback(async () => setFiles(await api<FileEntry[]>('/api/files')), [])
+  // 後から読み込んだ一覧だけを表示する（保存のあとの読み込みが削除のあとの読み込みより遅れて届いても、消したファイルを戻さない）。
+  const loadRequestRef = useRef(0)
+  const load = useCallback(async () => {
+    const request = ++loadRequestRef.current
+    const data = await api<FileEntry[]>('/api/files')
+    if (loadRequestRef.current === request) setFiles(data)
+  }, [])
   useEffect(() => {
     mountedRef.current = true
     load().catch((e) => setError(e.message))
@@ -171,17 +197,21 @@ export function KnowledgePage() {
   const remove = async () => {
     if (!selected || !window.confirm(`${selected} を削除しますか？`)) return
     const path = selected
-    await api(`/api/files?path=${encodeURIComponent(path)}`, { method: 'DELETE' })
-    fileDrafts.delete(path)
-    if (openFileKey.get('') === path) openFileKey.delete('')
-    if (!mountedRef.current) return
-    // 削除している間にほかのファイルを開いていたら、そちらは閉じない（その編集を消さない）。
-    if (latestRef.current.selected === path) {
-      setSelected(null)
-      setContent('')
-      setEditing(false)
+    try {
+      await deleteFile(path)
+      fileDrafts.delete(path)
+      if (openFileKey.get('') === path) openFileKey.delete('')
+      if (!mountedRef.current) return
+      // 削除している間にほかのファイルを開いていたら、そちらは閉じない（その編集を消さない）。
+      if (latestRef.current.selected === path) {
+        setSelected(null)
+        setContent('')
+        setEditing(false)
+      }
+      await load()
+    } catch (e) {
+      if (mountedRef.current) setError(e instanceof ApiError ? e.message : String(e))
     }
-    await load()
   }
 
   const stopEditing = () => {
@@ -197,7 +227,7 @@ export function KnowledgePage() {
     if (!name) return
     const path = `notes/${name.replace(/[\\/]/g, '_')}${name.endsWith('.md') ? '' : '.md'}`
     try {
-      await api('/api/files/content', { method: 'PUT', body: json({ path, content: `# ${name}\n\n` }) })
+      await saveFile(path, `# ${name}\n\n`)
       await load()
       if (await open(path)) setEditing(true)
     } catch (e) {
