@@ -523,8 +523,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
     switchComposer(NEW_CONVERSATION)
     setItems([{ kind: 'note', text: `「${run.name}」の結果を入力欄に引用しました。質問を書き足して送信すると、新しい会話が始まります。` }])
     setError('')
-    setInput(quoteDraft(run))
-    setAttachments([])
+    updateComposer(NEW_CONVERSATION, { input: (cur) => quoteDraft(run) + cur })
     window.requestAnimationFrame(() => {
       const el = inputRef.current
       if (!el) return
@@ -710,12 +709,16 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
 
   const newConversation = async () => {
     const generation = generationRef.current
-    const conv = await api<Conversation>('/api/conversations', { method: 'POST', body: json({ model: selectedModel }) })
+    const newModel = composerKeyRef.current === NEW_CONVERSATION
+      ? selectedModel
+      : composers.get(NEW_CONVERSATION)?.model ?? selectedModel
+    const conv = await api<Conversation>('/api/conversations', { method: 'POST', body: json({ model: newModel }) })
     await loadConversations()
     // Something else was opened while it was being created, or this page was left.
     if (generationRef.current !== generation || !mountedRef.current) return
     // What was being written for a new conversation goes into the one just made.
-    if (composerKeyRef.current === NEW_CONVERSATION) moveNewComposer(conv.id)
+    switchComposer(NEW_CONVERSATION)
+    moveNewComposer(conv.id)
     await openConversation(conv.id)
   }
 
