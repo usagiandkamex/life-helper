@@ -36,9 +36,10 @@ RUNNING_STATUS = "running"
 # why); the history also shows a run that stopped without saving anything as interrupted (see automation/api.py).
 INTERRUPTED_STATUS = "interrupted"
 
-# A 「今すぐ実行」 handed to the job is dropped when no job execution has picked it up after this long (a scheduled
-# execution starts every 15 minutes even when starting one on demand fails).
-RUN_REQUEST_TTL_SECONDS = 30 * 60
+# A 「今すぐ実行」 handed to the job is dropped when no job execution has run it after this long (a scheduled
+# execution starts every 15 minutes even when starting one on demand fails). Longer than the automation's lock
+# (65 minutes), so a request waiting for the lock of a run whose process was killed runs once that lock expires.
+RUN_REQUEST_TTL_SECONDS = 90 * 60
 
 # Everything the run history and the chat view need before opening a record (which also holds the transcript).
 RUN_META_FIELDS = (
