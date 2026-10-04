@@ -25,6 +25,9 @@ logger = logging.getLogger(__name__)
 KEEP = object()
 """Sentinel for ``open_session(write_scope=KEEP)``: leave the cached session's write scope untouched."""
 
+# Stopping the client is bounded: a CLI that stopped answering is killed instead of waited on.
+STOP_TIMEOUT_SECONDS = 30
+
 
 class NoTokenError(RuntimeError):
     """Raised when no GitHub token is stored (the user must sign in again)."""
@@ -114,15 +117,24 @@ class CopilotManager:
         sessions = list(self._sessions.values())
         self._sessions.clear()
         self._stale.clear()
-        for active in sessions:
-            await active.release()
-            await _disconnect_quietly(active.session)
-        if self._client is not None:
-            try:
-                await self._client.stop()
-            except Exception:  # noqa: BLE001
-                logger.warning("failed to stop Copilot client")
-        self._client, self._token = None, None
+        client, self._client, self._token = self._client, None, None
+        try:
+            async with asyncio.timeout(STOP_TIMEOUT_SECONDS):
+                for active in sessions:
+                    await active.release()
+                    await _disconnect_quietly(active.session)
+                if client is not None:
+                    try:
+                        await client.stop()
+                    except Exception:  # noqa: BLE001
+                        logger.warning("failed to stop Copilot client")
+        except TimeoutError:
+            logger.warning("Copilot client did not stop in time; stopping it forcibly")
+            if client is not None:
+                try:
+                    await client.force_stop()
+                except Exception:  # noqa: BLE001
+                    logger.warning("failed to stop Copilot client forcibly")
 
     async def list_models(self) -> list[dict]:
         client, _ = await self.client()

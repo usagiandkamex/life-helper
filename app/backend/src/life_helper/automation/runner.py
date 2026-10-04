@@ -24,7 +24,7 @@ from ..tools.registry import ToolSpec
 from .locks import FileLock
 from .models import Automation, expand_prompt
 from .notify import GitHubNotifier, NotifyError
-from .store import RUNNING_STATUS, AutomationStore
+from .store import INTERRUPTED_STATUS, RUNNING_STATUS, AutomationStore, parse_timestamp
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -37,6 +37,19 @@ MAX_EVENTS = 200
 # While a run is in progress, what it has produced so far is written to its record this often, so a run cut off by
 # the app or job stopping (shown as interrupted) still has the text it streamed.
 CHECKPOINT_SECONDS = 30
+# The record is also written at least this often (with ``heartbeat_at``), so the history can tell a run whose process
+# has stopped without saving anything well before its lock expires (see automation/api.py).
+HEARTBEAT_SECONDS = 60
+# How long a progress write waits for the record's lock; a skipped write is made again at the next checkpoint.
+PROGRESS_SAVE_SECONDS = 10
+# Copilot calls made while a run ends are bounded, so a CLI that stopped answering cannot keep the run from saving its
+# result: the client is restarted instead.
+ABORT_TIMEOUT_SECONDS = 10
+CLEANUP_TIMEOUT_SECONDS = 30
+RESET_TIMEOUT_SECONDS = 45
+# A run stopped from outside saves that it was interrupted within this long (the platform kills a container about
+# 30 seconds after asking it to stop).
+STOP_SAVE_SECONDS = 10
 TRANSCRIPT_VERSION = 1
 REPORT_REMINDER = (
     "\n\n（最後に必ず report_result ツールを呼び、結果の本文（summary）と、利用者に通知すべきかを報告してください。"
@@ -48,6 +61,9 @@ REPORT_FOLLOW_UP = (
     "利用者に通知すべきか（notify）を報告してください。"
 )
 REAUTH_MESSAGE = "GitHub への再ログインが必要です。アプリを開いてログインし直してください。"
+APP_STOPPED_MESSAGE = "アプリが停止したため中断しました（しばらく使われないときの自動停止や、更新による再起動など）。"
+JOB_STOPPED_MESSAGE = "オートメーションを実行するジョブが停止したため中断しました（制限時間の超過や更新など）。"
+JOB_TIME_LIMIT_MESSAGE = "オートメーションを実行するジョブの制限時間が近づいたため中断しました。"
 
 
 class ReportParams(BaseModel):
@@ -114,12 +130,23 @@ def build_notifier(ctx: AppContext) -> GitHubNotifier:
 
 
 class AutomationRunner:
-    def __init__(self, ctx: AppContext, store: AutomationStore, manager: CopilotManager | None = None) -> None:
+    def __init__(
+        self,
+        ctx: AppContext,
+        store: AutomationStore,
+        manager: CopilotManager | None = None,
+        *,
+        job_deadline: float | None = None,
+    ) -> None:
         self.ctx = ctx
         self.store = store
         self.manager = manager or CopilotManager(ctx, ctx.settings.copilot_automation_dir, automation=True)
         self.notifier = build_notifier(ctx)
         self._token_checked_at: float | None = None
+        # In the job: when (time.monotonic()) every run must have ended, ahead of the job's own time limit, after
+        # which the platform stops the job and any run still in progress with it.
+        self.job_deadline = job_deadline
+        self._runs_started = 0
 
     def _lock(self, automation_id: str) -> FileLock:
         return FileLock(
@@ -129,17 +156,60 @@ class AutomationRunner:
     async def run_due(self, now: datetime | None = None) -> list[dict]:
         now = now or datetime.now(UTC)
         results = []
+        due = []
         for automation in self.store.list():
             if automation.enabled and not automation.state.next_run_at:
                 self.store.update_state(automation.id, next_run_at=automation.schedule.next_after(now).isoformat())
                 continue
             if automation.is_due(now):
-                results.append(await self.run(automation.id, now=now, scheduled=True))
+                due.append(automation)
+        # Due runs share one job execution, one after another. The longest-waiting run goes first, so a run put off
+        # for lack of time (below) is not overtaken again by the same runs at the next job execution.
+        due.sort(key=lambda a: parse_timestamp(a.state.next_run_at) or now)
+        for automation in due:
+            if not self._fits(automation):
+                # Still due (next_run_at is left as it is): a later job execution, one every 15 minutes, runs it.
+                logger.info("automation %s put off to a later job execution: not enough time left", automation.id)
+                results.append({"automation_id": automation.id, "status": "deferred"})
+                continue
+            results.append(await self.run(automation.id, now=now, scheduled=True))
         return results
 
+    async def run_requested(self) -> list[dict]:
+        """Runs the 「今すぐ実行」 requests the web app handed to the job (see AutomationStore.add_run_request)."""
+        results = []
+        for request in self.store.run_requests():
+            automation_id, run_id = request["automation_id"], request["run_id"]
+            if request["expired"]:
+                if self.store.take_run_request(automation_id, run_id):
+                    logger.warning("automation %s: dropped a run request no job execution took in time", automation_id)
+                continue
+            automation = self.store.get(automation_id)
+            if automation is not None and not self._fits(automation):
+                # Left waiting: a later job execution runs it first.
+                results.append({"automation_id": automation_id, "status": "deferred"})
+                continue
+            results.append(await self.run(automation_id, run_id=run_id, request=True))
+        return results
+
+    def _fits(self, automation: Automation) -> bool:
+        """Whether a run can still use its whole time limit before the job's. The first run of a job execution always
+        starts (cut short at the job's limit if need be), so no run is put off for good."""
+        if self.job_deadline is None or self._runs_started == 0:
+            return True
+        return time.monotonic() + automation.max_runtime_minutes * 60 <= self.job_deadline
+
     async def run(
-        self, automation_id: str, *, now: datetime | None = None, scheduled: bool = False, run_id: str | None = None
+        self,
+        automation_id: str,
+        *,
+        now: datetime | None = None,
+        scheduled: bool = False,
+        run_id: str | None = None,
+        request: bool = False,
     ) -> dict:
+        """Runs one automation unless it is already running. With ``request`` it runs the waiting 「今すぐ実行」
+        request for ``run_id``, which is kept while the automation is running (a later job execution takes it)."""
         now = now or datetime.now(UTC)
         lock = self._lock(automation_id)
         if not lock.try_acquire():
@@ -147,10 +217,14 @@ class AutomationRunner:
         try:
             # Re-read after taking the lock: an overlapping job may have just run it.
             automation = self.store.get(automation_id)
+            # Taken under the lock, so a request is run once even when two job executions see it.
+            if request and not self.store.take_run_request(automation_id, run_id or ""):
+                return {"automation_id": automation_id, "status": "skipped_taken"}
             if automation is None:
                 return {"automation_id": automation_id, "status": "not_found"}
             if scheduled and not automation.is_due(now):
                 return {"automation_id": automation_id, "status": "skipped_not_due"}
+            self._runs_started += 1
             # Schedule the next run first so a crash cannot cause a tight retry loop.
             self.store.update_state(automation.id, next_run_at=automation.schedule.next_after(now).isoformat())
             return await self._execute(automation, now, run_id=run_id)
@@ -159,13 +233,15 @@ class AutomationRunner:
 
     async def _execute(self, automation: Automation, now: datetime, *, run_id: str | None = None) -> dict:
         run_id = run_id or uuid.uuid4().hex[:16]
+        started_at = datetime.now(UTC).isoformat()
         record: dict[str, Any] = {
             "id": run_id,
             "automation_id": automation.id,
             "name": automation.name,
             # Due automations run one after another with the same scheduled ``now``, so the record keeps the time this
             # run really started; the history shows how long it took (finished_at - started_at).
-            "started_at": datetime.now(UTC).isoformat(),
+            "started_at": started_at,
+            "heartbeat_at": started_at,
             # Recorded as running before any work starts, so the run history shows that the run is in progress
             # (scheduled runs happen in the job process, so the shared volume is the only place the app can see it).
             "status": RUNNING_STATUS,
@@ -187,6 +263,16 @@ class AutomationRunner:
         }
         # Every later write replaces this record, so the result never appears twice in the history.
         self.store.save_run(record)
+        try:
+            return await self._run_recorded(automation, record, now)
+        except asyncio.CancelledError:
+            # The process is stopping (the app scaling in or restarting, the job being stopped): record why before it
+            # goes, so the history explains the interruption instead of showing a run that seems to go on.
+            await self._record_stop(automation, record)
+            raise
+
+    async def _run_recorded(self, automation: Automation, record: dict[str, Any], now: datetime) -> dict:
+        run_id = record["id"]
         missing = [
             c
             for c in automation.connectors
@@ -211,15 +297,19 @@ class AutomationRunner:
             }
             return await self._finish(automation, record, condition_met=None)
 
-        # One deadline for the whole run, retry included, so a run never outlives its lock.
+        # One deadline for the whole run, retry included, so a run never outlives its lock (nor the job's time limit).
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + automation.max_runtime_minutes * 60
+        limit = float(automation.max_runtime_minutes * 60)
+        job_limited = self.job_deadline is not None and self.job_deadline - time.monotonic() < limit
+        if job_limited:
+            limit = max(0.0, self.job_deadline - time.monotonic())
+        deadline = loop.time() + limit
         run_ctx = RunContext()
         status, error = "error", None
         attempts = 0
         stop_checkpoints = asyncio.Event()
         checkpoints = asyncio.create_task(self._checkpoint(record, lambda: run_ctx, stop_checkpoints))
-        cut_off = True
+        cut_off, stopped = True, False
         try:
             for attempt in range(2):
                 run_ctx = RunContext()
@@ -235,7 +325,9 @@ class AutomationRunner:
                 except TimeoutError:
                     status, error = (
                         "timeout",
-                        f"{automation.max_runtime_minutes} 分以内に終わらなかったため中断しました。",
+                        JOB_TIME_LIMIT_MESSAGE
+                        if job_limited
+                        else f"{automation.max_runtime_minutes} 分以内に終わらなかったため中断しました。",
                     )
                     break
                 except Exception as exc:  # noqa: BLE001
@@ -250,15 +342,23 @@ class AutomationRunner:
                         continue
                     break
             cut_off = False
+        except asyncio.CancelledError:
+            stopped = True
+            raise
         finally:
             # Waited for (not cancelled), so a checkpoint still being written cannot land after the final result.
             stop_checkpoints.set()
             await asyncio.shield(checkpoints)
-            # The latest progress, for a run stopped from outside (e.g. the app shutting down) here or while it
-            # notifies below: its result is never written. A finished answer leaves out any unfinished leftover.
-            await self._save_progress(
+            # The latest progress, in case the result is never written (the run is stopped while it notifies below).
+            # A finished answer leaves out any unfinished leftover.
+            progress = self._progress(
                 record, run_ctx, include_partial=cut_off or status != "success", error=None if cut_off else error
             )
+            if stopped:
+                # Saved by _execute, with the reason the run stopped.
+                record |= progress
+            else:
+                await self._save_progress(progress)
 
         # A run cut off before it finished (timeout/error) leaves its streamed text here; keep it as the run's
         # result so the history shows what was produced instead of only the failure reason. Successful runs already
@@ -307,8 +407,10 @@ class AutomationRunner:
         return events, final_message
 
     async def _checkpoint(self, record: dict, current: Callable[[], RunContext], stop: asyncio.Event) -> None:
-        """Writes what the run has produced so far to its record every ``CHECKPOINT_SECONDS`` until ``stop``."""
+        """Writes what the run has produced so far to its record every ``CHECKPOINT_SECONDS`` until ``stop``, and at
+        least every ``HEARTBEAT_SECONDS`` so the history can tell that the run is still going on."""
         written: tuple | None = None
+        last_write = time.monotonic()
         while True:
             try:
                 await asyncio.wait_for(stop.wait(), CHECKPOINT_SECONDS)
@@ -325,15 +427,16 @@ class AutomationRunner:
                 run_ctx.follow_up_start,
             )
             # A retry starts from an empty context, which is written too so the discarded attempt does not remain.
-            if state != written and (written is not None or run_ctx.events or run_ctx.partial or run_ctx.report):
-                written = state
-                await self._save_progress(record, run_ctx)
+            changed = state != written and (written is not None or run_ctx.events or run_ctx.partial or run_ctx.report)
+            if changed or time.monotonic() - last_write >= HEARTBEAT_SECONDS:
+                written, last_write = state, time.monotonic()
+                await self._save_progress(self._progress(record, run_ctx))
 
-    async def _save_progress(
+    def _progress(
         self, record: dict, run_ctx: RunContext, *, include_partial: bool = True, error: str | None = None
-    ) -> None:
-        """Writes the run's progress to its record, which keeps its running status: only a run that is never
-        finished (shown as interrupted) is left with it; a finished run replaces it with its result."""
+    ) -> dict:
+        """The run's record with its progress so far. It keeps its running status: a finished run replaces it with
+        its result, and a run stopped from outside saves it as interrupted."""
         events, final_message = self._answer(run_ctx, include_partial=include_partial)
         trimmed, omitted = trim_events(events)
         snapshot = record | self._sanitize(
@@ -348,8 +451,14 @@ class AutomationRunner:
                 "requests": run_ctx.requests,
             }
         )
+        snapshot["heartbeat_at"] = datetime.now(UTC).isoformat()
+        return snapshot
+
+    async def _save_progress(self, snapshot: dict) -> None:
         try:
-            await asyncio.to_thread(self.store.save_run, snapshot, replace_only=True)
+            await asyncio.to_thread(
+                self.store.save_run, snapshot, replace_only=True, wait_seconds=PROGRESS_SAVE_SECONDS
+            )
         except Exception:  # noqa: BLE001
             logger.warning("could not save the progress of an automation run")
 
@@ -427,6 +536,7 @@ class AutomationRunner:
         unsubscribe = active.session.on(on_event)
         loop = asyncio.get_running_loop()
         prompt = expand_prompt(automation.prompt, now) + REPORT_REMINDER
+        stopping = False
         try:
             remaining = deadline - loop.time()
             if remaining <= 0:
@@ -453,23 +563,42 @@ class AutomationRunner:
         except TimeoutError:
             await self._abort(active.session)
             raise
+        except asyncio.CancelledError:
+            # The process is stopping: its Copilot client is stopped on the way out (and session state left behind
+            # is removed by the data retention), so no time is spent here before the run records the interruption.
+            stopping = True
+            raise
         finally:
             unsubscribe()
-            await active.release()
-            # Always close: report_result is bound to this run's context, so a cached session would report into a
-            # previous run. "continue" mode resumes the stored history from disk next time; "new" mode sessions are
-            # deleted so per-run session state does not pile up on the volume.
-            await self.manager.close_session(session_id)
-            if not continue_mode:
-                try:
-                    await self.manager.delete_session(session_id)
-                except Exception:  # noqa: BLE001
-                    logger.warning("could not delete automation session state")
+            if not stopping:
+                await self._close_session(active, session_id, delete=not continue_mode)
+
+    async def _close_session(self, active: Any, session_id: str, *, delete: bool) -> None:
+        """Ends the run's session. Bounded: when Copilot stops answering, its client is restarted instead of waited
+        on, so the run still records its result."""
+        try:
+            async with asyncio.timeout(CLEANUP_TIMEOUT_SECONDS):
+                await active.release()
+                # Always close: report_result is bound to this run's context, so a cached session would report into
+                # a previous run. "continue" mode resumes the stored history from disk next time; "new" mode sessions
+                # are deleted so per-run session state does not pile up on the volume.
+                await self.manager.close_session(session_id)
+                if delete:
+                    try:
+                        await self.manager.delete_session(session_id)
+                    except Exception:  # noqa: BLE001
+                        logger.warning("could not delete automation session state")
+        except TimeoutError:
+            logger.warning("Copilot did not answer while an automation session was closed; restarting the client")
+            try:
+                await asyncio.wait_for(self.manager.reset(), RESET_TIMEOUT_SECONDS)
+            except Exception:  # noqa: BLE001
+                logger.warning("could not restart the Copilot client")
 
     @staticmethod
     async def _abort(session: Any) -> None:
         try:
-            await session.abort()
+            await asyncio.wait_for(session.abort(), ABORT_TIMEOUT_SECONDS)
         except Exception:  # noqa: BLE001
             logger.debug("abort failed")
 
@@ -531,11 +660,25 @@ class AutomationRunner:
         except NotifyError:
             logger.warning("could not send re-login notice")
 
-    async def _finish(self, automation: Automation, record: dict, *, condition_met: bool | None) -> dict:
+    async def _record_stop(self, automation: Automation, record: dict) -> None:
+        """Saves a run stopped from outside as interrupted, with what it produced so far and the reason (a run that
+        had already decided its result, and was stopped while notifying, keeps that result)."""
+        if record.get("status") == RUNNING_STATUS:
+            reason = JOB_STOPPED_MESSAGE if self.job_deadline is not None else APP_STOPPED_MESSAGE
+            record |= {"status": INTERRUPTED_STATUS, "error": reason, "summary": record.get("summary") or reason}
+        try:
+            # The baseline for "only on change" is left as it is: the run may not have notified.
+            await self._finish(automation, record, condition_met=None, wait_seconds=STOP_SAVE_SECONDS)
+        except Exception:  # noqa: BLE001
+            logger.warning("automation %s: could not record that the run was interrupted", automation.id)
+
+    async def _finish(
+        self, automation: Automation, record: dict, *, condition_met: bool | None, wait_seconds: float = 40
+    ) -> dict:
         record["finished_at"] = datetime.now(UTC).isoformat()
         # The record was written when the run started; if it was deleted from the history since, it stays deleted.
         # Waiting for the record's lock happens off the event loop, so the app keeps serving meanwhile.
-        if not await asyncio.to_thread(self.store.save_run, record, replace_only=True):
+        if not await asyncio.to_thread(self.store.save_run, record, replace_only=True, wait_seconds=wait_seconds):
             logger.info(
                 "automation %s: the run result was not saved (deleted from the history meanwhile)", automation.id
             )

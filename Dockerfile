@@ -49,4 +49,6 @@ COPY --from=frontend --chown=app:app /src/dist /app/static
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=4)"
 # The web app. The scheduled ACA job uses the same image with the command: life-helper-job
-CMD ["uvicorn", "life_helper.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
+# Open connections (chat streams) get 10 seconds when the container is stopped, so the shutdown that records automation
+# runs in progress as interrupted runs within the platform's grace period.
+CMD ["uvicorn", "life_helper.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*", "--timeout-graceful-shutdown", "10"]

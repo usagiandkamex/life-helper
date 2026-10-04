@@ -340,7 +340,7 @@ details.collapse > summary:focus-visible { outline: 2px solid var(--md-primary);
 .run-heading { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; font-size: 0.8rem; color: var(--muted); }
 .run-status { padding: 0 0.4rem; border-radius: 999px; background: #f3f4f6; }
 .run-status.success { color: var(--ok); background: #f0fdf4; }
-.run-status.error, .run-status.timeout, .run-status.reauth { color: var(--danger); background: #fef2f2; }
+.run-status.error, .run-status.timeout, .run-status.reauth, .run-status.interrupted { color: var(--danger); background: #fef2f2; }
 .run-status.skipped_limit { color: var(--warn); background: #fffbeb; }
 .run-report { border-left: 3px solid var(--primary); background: #f8fafc; padding: 0.5rem 0.75rem; border-radius: 0 6px 6px 0; }
 .run-report small { color: var(--muted); }

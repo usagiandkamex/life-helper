@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import FastAPI
@@ -11,6 +12,9 @@ from .context import AppContext
 from .knowledge.store import KnowledgeStore
 
 logger = logging.getLogger(__name__)
+
+# How long the app waits, when it stops, for the automation runs it cancels to record that they were interrupted.
+RUN_STOP_WAIT_SECONDS = 20
 
 
 def ensure_directories(ctx: AppContext) -> None:
@@ -59,8 +63,12 @@ async def start_services(ctx: AppContext) -> None:
 
 
 async def shutdown_services(ctx: AppContext) -> None:
-    for task in list(ctx.extras.get("automation_tasks", ())):
+    tasks = list(ctx.extras.get("automation_tasks", ()))
+    for task in tasks:
         task.cancel()
+    if tasks:
+        # Before the Copilot client below is stopped and the process exits.
+        await asyncio.wait(tasks, timeout=RUN_STOP_WAIT_SECONDS)
     retention = ctx.extras.pop("retention", None)
     if retention is not None:
         await retention.shutdown()

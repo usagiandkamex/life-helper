@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
+import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -30,6 +32,14 @@ class UnreadableRunError(OSError):
 # A run is recorded as running when it starts and the same record is replaced with the result when it finishes, so
 # the history can show a run that is still in progress (its result and transcript are only there once it is done).
 RUNNING_STATUS = "running"
+# A run whose process stopped before it finished. Saved when the process is told to stop (the record then explains
+# why); the history also shows a run that stopped without saving anything as interrupted (see automation/api.py).
+INTERRUPTED_STATUS = "interrupted"
+
+# A 「今すぐ実行」 handed to the job is dropped when no job execution has run it after this long (a scheduled
+# execution starts every 15 minutes even when starting one on demand fails). Longer than the automation's lock
+# (65 minutes), so a request waiting for the lock of a run whose process was killed runs once that lock expires.
+RUN_REQUEST_TTL_SECONDS = 90 * 60
 
 # Everything the run history and the chat view need before opening a record (which also holds the transcript).
 RUN_META_FIELDS = (
@@ -41,6 +51,7 @@ RUN_META_FIELDS = (
     "notified",
     "transcript_version",
     "conversation_mode",
+    "heartbeat_at",
 )
 
 
@@ -99,6 +110,7 @@ class AutomationStore:
         self.chat_state_path = app_state_dir / "automation-chat.json"
         self.run_index_path = app_state_dir / "automation-run-index.json"
         self.locks_dir = app_state_dir / "locks"
+        self.requests_dir = app_state_dir / "automation-requests"
 
     # -- definitions -------------------------------------------------------------------------------------
 
@@ -183,9 +195,10 @@ class AutomationStore:
         # Taken by everything that rewrites or deletes an existing record, so a deleted run is never written back.
         return FileLock(self.locks_dir / f"run-{automation_id}-{run_id}.lock", ttl_seconds=30)
 
-    def save_run(self, record: dict, *, replace_only: bool = False) -> bool:
+    def save_run(self, record: dict, *, replace_only: bool = False, wait_seconds: float = 40) -> bool:
         """Writes a run record. With ``replace_only`` it is written only while the record still exists, so a run
-        deleted from the history in the meantime is not brought back. Returns whether it was written."""
+        deleted from the history in the meantime is not brought back (waiting up to ``wait_seconds`` for the record's
+        lock). Returns whether it was written."""
         if not replace_only:
             self._save_runs([record])
             return True
@@ -201,7 +214,9 @@ class AutomationStore:
         # Never written without the lock (a deletion could slip in between); waiting past the lock's 30-second expiry
         # lets a lock left by a stopped process be taken over.
         try:
-            return self._with_lock(op, lock=self._run_lock(automation_id, run_id), attempts=400)
+            return self._with_lock(
+                op, lock=self._run_lock(automation_id, run_id), attempts=max(1, int(wait_seconds * 10))
+            )
         except TimeoutError:
             logger.error("could not save the result of an automation run: its record stayed locked")
             return False
@@ -490,6 +505,73 @@ class AutomationStore:
         if metas is None:
             metas = self.list_run_meta()
         return sum(1 for r in metas if not r.get("read") and r.get("status") != RUNNING_STATUS)
+
+    # -- run requests ------------------------------------------------------------------------------------
+    # In production 「今すぐ実行」 is handed to the job, because the web app scales in to zero (and stops the run) once
+    # nobody uses it: the app leaves a request and starts a job execution, which runs it. There is one request file
+    # per automation, created like a lock, so the same automation is never queued twice; an expired request is
+    # taken over like a stale lock.
+
+    def _request_path(self, automation_id: str) -> Path:
+        if not _valid_id(automation_id):
+            raise ValueError("invalid automation id")
+        return self.requests_dir / f"{automation_id}.json"
+
+    def add_run_request(self, automation_id: str, run_id: str) -> bool:
+        """Asks the job to run ``automation_id`` with ``run_id``; False when it is already waiting for the job."""
+        if not _valid_id(run_id):
+            raise ValueError("invalid run id")
+        data = {"run_id": run_id, "requested_at": datetime.now(UTC).isoformat()}
+        lock = FileLock(self._request_path(automation_id), ttl_seconds=RUN_REQUEST_TTL_SECONDS, data=data)
+        return lock.try_acquire()
+
+    def run_requests(self) -> list[dict]:
+        """Requests waiting for the job, oldest first, with ``automation_id``, ``run_id`` and whether it expired."""
+        requests = []
+        for path in self.requests_dir.glob("*.json"):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                run_id, expires_at = data["run_id"], float(data["expires_at"])
+            except (OSError, ValueError, KeyError, TypeError):
+                continue  # gone, or still being written
+            if _valid_id(path.stem) and _valid_id(run_id):
+                requests.append(
+                    {
+                        "automation_id": path.stem,
+                        "run_id": run_id,
+                        "requested_at": str(data.get("requested_at", "")),
+                        "expired": expires_at < time.time(),
+                    }
+                )
+        return sorted(requests, key=lambda r: r["requested_at"])
+
+    def take_run_request(self, automation_id: str, run_id: str) -> bool:
+        """Removes the request for ``run_id``. False when it is gone or a newer request has taken its place."""
+        path = self._request_path(automation_id)
+        # Moved aside first so only one process takes it, and a newer request is never deleted unseen.
+        taken = path.with_name(f"{path.name}.taken-{uuid.uuid4().hex}")
+        try:
+            os.replace(path, taken)
+        except OSError:
+            return False
+        try:
+            raw = taken.read_bytes()
+        except OSError:
+            raw = b""
+        taken.unlink(missing_ok=True)
+        try:
+            if json.loads(raw).get("run_id") == run_id:
+                return True
+        except (ValueError, AttributeError):
+            pass
+        # Not this run's request: put it back, unless yet another request has been made since.
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except OSError:
+            return False
+        with os.fdopen(fd, "wb") as f:
+            f.write(raw)
+        return False
 
     # -- chat view state ---------------------------------------------------------------------------------
     # Kept apart from the run records so hiding a conversation never rewrites a result (or races with "read").

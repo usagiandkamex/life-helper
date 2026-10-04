@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import json
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Resource ID of a Container Apps job; the app calls Azure Resource Manager with it, so nothing else is accepted.
+_JOB_ID = re.compile(
+    r"/subscriptions/[0-9a-fA-F-]{36}/resourceGroups/[\w.()-]{0,89}[\w()-]"
+    r"/providers/Microsoft\.App/jobs/[A-Za-z0-9-]{1,32}"
+)
 
 
 class Settings(BaseSettings):
@@ -62,10 +69,18 @@ class Settings(BaseSettings):
     # All automations stop without a valid token, so this notice is sent even when per-automation notify is off.
     notify_reauth: bool = True
 
-    # Must exceed the longest allowed run so the per-automation lock outlives the run; kept in step with the
-    # ACA job's replicaTimeout (see infra/resources.bicep).
+    # Must exceed the longest allowed run (60 minutes plus the bounded clean-up) so the per-automation lock outlives
+    # the run.
     automation_lock_ttl_seconds: int = 65 * 60
     automation_monthly_run_limit: int = 300
+    # The ACA job's replicaTimeout (infra/resources.bicep sets both). Runs in the job are cut short before it, and
+    # runs that no longer fit wait for the next job execution, so the platform never stops a run half-way.
+    automation_job_timeout_seconds: int = Field(default=70 * 60, ge=10 * 60)
+    # 「今すぐ実行」 starts this ACA job (its resource ID) instead of running in the web app, which scales in to zero
+    # once nobody uses it. Empty (local development) runs it in the app. The app signs in to Azure with its
+    # user-assigned managed identity (this client ID), which needs permission to start the job.
+    automation_job_id: str = ""
+    managed_identity_client_id: str = ""
 
     # Automation runs, chat conversations and Copilot session state left unused for this many days are deleted.
     data_retention_days: int = Field(default=180, ge=1)
@@ -90,6 +105,14 @@ class Settings(BaseSettings):
             if self.dev_github_token.get_secret_value():
                 raise ValueError("LH_DEV_GITHUB_TOKEN must not be set in production")
         return self
+
+    @field_validator("automation_job_id")
+    @classmethod
+    def _check_automation_job_id(cls, value: str) -> str:
+        value = value.strip()
+        if value and not _JOB_ID.fullmatch(value):
+            raise ValueError("LH_AUTOMATION_JOB_ID must be the resource ID of a Container Apps job")
+        return value
 
     @model_validator(mode="after")
     def _check_rakuten_endpoints(self) -> Settings:

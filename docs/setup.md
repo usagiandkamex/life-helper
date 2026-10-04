@@ -316,6 +316,8 @@ gh workflow run Deploy                           # 3. デプロイして Azure �
 | Deploy ワークフローが実行されない | リポジトリ変数 `DEPLOY_ENABLED` が `true` か。`main` の CI が合格しているか |
 | Deploy がサインインで失敗する | ステップ 3 を実行したか。リポジトリ名を変えた場合はフェデレーション資格情報のサブジェクトも変わるため、スクリプトを再実行する |
 | オートメーションが動かない | 画面の実行履歴、Azure Portal のジョブ `caj-lifehelper-…` の実行履歴とログ |
+| 「今すぐ実行」が始まらない（「次の定期確認で実行します」と出る） | アプリのマネージド ID にジョブの「Container Apps Jobs Operator」ロールが割り当てられているか（`azd provision` で割り当てる。反映に数分かかることがある）。アプリのログの `could not start the automation job` |
+| 実行履歴が「中断」になる | 実行詳細の理由と、[運用ガイドの「中断」と表示される実行](operations.md#中断と表示される実行) |
 | アプリのログを見たい | Azure Portal → Log Analytics（`log-…`）→ `ContainerAppConsoleLogs_CL` |
 
 ## 削除する

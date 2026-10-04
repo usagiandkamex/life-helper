@@ -4,7 +4,8 @@ import type { RunRecord } from './types'
 
 export const STATUS_LABELS: Record<string, string> = {
   running: '実行中',
-  // A run that stopped while it was running (the app or the job ended); the API reports it instead of "running".
+  // A run that stopped while it was running (the app or the job ended). Saved with the reason when the process could
+  // still do so; otherwise the API reports a record left "running" as interrupted.
   interrupted: '中断',
   success: '成功',
   error: '失敗',
@@ -22,7 +23,9 @@ export const statusLabel = (status: string) => STATUS_LABELS[status] ?? status
 
 // 実行は始まったときに履歴に記録され、終わったときに結果で置き換わる。実行中と、実行中のまま止まった記録には、
 // まだ読むものがない（既読にも未読にもせず、結果の代わりに状況だけを見せる）。
-export const hasResult = (run: RunRecord) => run.status !== 'running' && run.status !== 'interrupted'
+// 止まるときに中断を記録できた実行（finished_at がある）は、理由と途中までの出力を結果として見せる。
+export const hasResult = (run: RunRecord) =>
+  run.status !== 'running' && !(run.status === 'interrupted' && !run.finished_at)
 
 // How long a run took. Runs recorded before a crash (and older records) have no finished_at, so it can be empty.
 export function runDuration(run: RunRecord): string {
