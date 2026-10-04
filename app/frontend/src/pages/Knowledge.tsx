@@ -44,6 +44,11 @@ export function KnowledgePage() {
   useLayoutEffect(() => {
     latestRef.current = { selected, content, base, editing }
   })
+  // 画面を離れたあとに終わった読み込みは、表示も下書きも変えない（離れたときに残した編集を古い内容で上書きしない）。
+  const mountedRef = useRef(false)
+  // 後から開いたファイルだけを表示する（先に押したファイルの応答が遅れて届いても、表示を戻さない）。
+  const openRequestRef = useRef(0)
+  const openingRef = useRef<string | null>(null)
 
   // 開いているファイルの編集が変わっていれば残し、変わっていなければ前に残したものも消す。残したかどうかを返す。
   const keepEdit = useCallback(() => {
@@ -55,11 +60,20 @@ export function KnowledgePage() {
     return changed
   }, [])
 
+  // 開けたかどうかを返す（ほかのファイルを開いた・画面を離れたときは開かない）。
   const open = useCallback(
     async (path: string) => {
       setError('')
       setMessage('')
-      const data = await api<{ content: string; writable: boolean }>(`/api/files/content?path=${encodeURIComponent(path)}`)
+      const request = ++openRequestRef.current
+      openingRef.current = path
+      let data: { content: string; writable: boolean }
+      try {
+        data = await api<{ content: string; writable: boolean }>(`/api/files/content?path=${encodeURIComponent(path)}`)
+      } finally {
+        if (openRequestRef.current === request) openingRef.current = null
+      }
+      if (!mountedRef.current || openRequestRef.current !== request) return false
       keepEdit()
       const kept = data.writable ? fileDrafts.get(path) : undefined
       setSelected(path)
@@ -73,18 +87,24 @@ export function KnowledgePage() {
             ? '保存していない編集を戻しました（「編集をやめる」で破棄できます）。'
             : '保存していない編集を戻しました。編集を始めたあとでファイルが変わっています（保存すると、その変更を上書きします）。',
         )
+      return true
     },
     [keepEdit],
   )
 
   const load = useCallback(async () => setFiles(await api<FileEntry[]>('/api/files')), [])
   useEffect(() => {
+    mountedRef.current = true
     load().catch((e) => setError(e.message))
     // 編集の途中で画面を移っていたら、そのファイルを開き直して編集を戻す。
     const path = openFileKey.get('')
     if (path) open(path).catch((e) => setError(e.message))
     return () => {
+      mountedRef.current = false
+      // 開いている途中のファイルに残した編集があれば、戻ったときはそちらを開き直す。
+      const opening = openingRef.current
       if (keepEdit()) openFileKey.set('', latestRef.current.selected as string)
+      else if (opening && fileDrafts.has(opening)) openFileKey.set('', opening)
       else openFileKey.delete('')
     }
   }, [load, open, keepEdit])
@@ -100,25 +120,44 @@ export function KnowledgePage() {
 
   const save = async () => {
     if (!selected) return
+    const path = selected
+    const saved = content
     try {
-      await api('/api/files/content', { method: 'PUT', body: json({ path: selected, content }) })
-      fileDrafts.delete(selected)
-      setBase(content)
-      setEditing(false)
-      setMessage('保存しました')
+      await api('/api/files/content', { method: 'PUT', body: json({ path, content: saved }) })
+      // 保存している間にほかのファイルや画面へ移っていたら、残した編集のほうを保存した内容に合わせる
+      // （保存したあとに書き足した分だけを、保存していない編集として残す）。
+      const kept = fileDrafts.get(path)
+      if (kept?.content === saved) fileDrafts.delete(path)
+      else if (kept) fileDrafts.set(path, { base: saved, content: kept.content })
+      if (!mountedRef.current) return
+      const latest = latestRef.current
+      if (latest.selected === path) {
+        setBase(saved)
+        // 保存している間に書き足した分は、編集を続けられるように残す。
+        if (latest.content === saved) setEditing(false)
+        setMessage(latest.content === saved ? '保存しました' : '保存しました（保存している間に変えた内容は、まだ保存していません）')
+      } else {
+        setMessage(`${path} を保存しました`)
+      }
       await load()
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e))
+      if (mountedRef.current) setError(e instanceof ApiError ? e.message : String(e))
     }
   }
 
   const remove = async () => {
     if (!selected || !window.confirm(`${selected} を削除しますか？`)) return
-    await api(`/api/files?path=${encodeURIComponent(selected)}`, { method: 'DELETE' })
-    fileDrafts.delete(selected)
-    setSelected(null)
-    setContent('')
-    setEditing(false)
+    const path = selected
+    await api(`/api/files?path=${encodeURIComponent(path)}`, { method: 'DELETE' })
+    fileDrafts.delete(path)
+    if (openFileKey.get('') === path) openFileKey.delete('')
+    if (!mountedRef.current) return
+    // 削除している間にほかのファイルを開いていたら、そちらは閉じない（その編集を消さない）。
+    if (latestRef.current.selected === path) {
+      setSelected(null)
+      setContent('')
+      setEditing(false)
+    }
     await load()
   }
 
@@ -137,8 +176,7 @@ export function KnowledgePage() {
     try {
       await api('/api/files/content', { method: 'PUT', body: json({ path, content: `# ${name}\n\n` }) })
       await load()
-      await open(path)
-      setEditing(true)
+      if (await open(path)) setEditing(true)
     } catch (e) {
       setError((e as Error).message)
     }

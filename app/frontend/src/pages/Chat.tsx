@@ -15,7 +15,7 @@ import { AutomationThreadView } from '../components/AutomationThread'
 import { Disclaimer } from '../components/Markdown'
 import { MessageItem } from '../components/MessageItem'
 import { SelectAllButton } from '../components/SelectAllButton'
-import { draftStore } from '../drafts'
+import { draftEpoch, draftStore } from '../drafts'
 import type {
   AutomationThread,
   AutomationThreadDetail,
@@ -58,10 +58,37 @@ const NEW_CONVERSATION = ''
 type PendingRead = { key: string | null; count: number; bytes: number }
 const EMPTY_COMPOSER: Composer = { input: '', attachments: [], model: null }
 const composers = draftStore<Composer>()
+// Kept outside the page: a read that ends after another tab was opened still counts until its files are attached,
+// also for the page shown when coming back.
+const pendingReads = new Map<symbol, PendingRead>()
 
 function keepComposer(key: string, composer: Composer) {
   if (composer.input.trim() || composer.attachments.length > 0 || composer.model !== null) composers.set(key, composer)
   else composers.delete(key)
+}
+
+type ComposerUpdate = {
+  input?: (cur: string) => string
+  attachments?: (cur: PendingAttachment[]) => PendingAttachment[]
+}
+// The chat page on screen, if any. A request that ends after its page was left (another tab, then maybe back to a
+// new page) changes the composer where it is now: on screen, or kept.
+let shownComposer: { key: () => string | null; update: (update: ComposerUpdate) => void; showReading: () => void } | null =
+  null
+
+// epoch: when the request was started. After signing out since, nothing is written back (the drafts are gone).
+function applyComposerUpdate(key: string, update: ComposerUpdate, epoch: number) {
+  if (epoch !== draftEpoch()) return
+  if (shownComposer?.key() === key) {
+    shownComposer.update(update)
+    return
+  }
+  const cur = composers.get(key) ?? EMPTY_COMPOSER
+  keepComposer(key, {
+    ...cur,
+    input: update.input ? update.input(cur.input) : cur.input,
+    attachments: update.attachments ? update.attachments(cur.attachments) : cur.attachments,
+  })
 }
 
 // Windows draws the 📎 emoji as an unusual clip, so the attachment icon is drawn instead of written.
@@ -145,8 +172,8 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   const [attachments, setAttachments] = useState(() => composers.get(NEW_CONVERSATION)?.attachments ?? [])
   // Files still being read, by the composer they were added in: counted against its limits, and sending from it waits
   // for them. `reading` is the number of reads for the composer on screen.
-  const [reading, setReading] = useState(0)
-  const pendingReadsRef = useRef(new Map<symbol, PendingRead>())
+  // Files may still be read for the new conversation of a page left before.
+  const [reading, setReading] = useState(() => [...pendingReads.values()].filter((r) => r.key === NEW_CONVERSATION).length)
   const [sending, setSending] = useState(false)
   const [models, setModels] = useState<{ id: string; name: string }[]>([])
   // Chosen in this composer; null until a model is picked here.
@@ -213,22 +240,24 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   useLayoutEffect(() => {
     composerRef.current = { input, attachments, model }
   })
+  // Drafts kept since this page was opened; signing out starts a new epoch (see drafts.ts).
+  const epochRef = useRef(draftEpoch())
 
-  const pendingReadsFor = (key: string | null) => [...pendingReadsRef.current.values()].filter((r) => r.key === key)
+  const pendingReadsFor = (key: string | null) => [...pendingReads.values()].filter((r) => r.key === key)
   const showReading = useCallback(() => {
-    setReading([...pendingReadsRef.current.values()].filter((r) => r.key === composerKeyRef.current).length)
+    setReading(pendingReadsFor(composerKeyRef.current).length)
   }, [])
 
   // The composer of a new conversation goes into the conversation just made, with the files still being read for it.
   const moveNewComposer = (id: string) => {
     composers.delete(NEW_CONVERSATION)
     composerKeyRef.current = id
-    const reads = pendingReadsRef.current
-    for (const [token, r] of reads) if (r.key === NEW_CONVERSATION) reads.set(token, { ...r, key: id })
+    for (const [token, r] of pendingReads) if (r.key === NEW_CONVERSATION) pendingReads.set(token, { ...r, key: id })
   }
 
+  // Once this page is left, what it shows is no longer kept: the page shown later may have changed the drafts since.
   const keepShownComposer = useCallback(() => {
-    if (composerKeyRef.current !== null) keepComposer(composerKeyRef.current, composerRef.current)
+    if (mountedRef.current && composerKeyRef.current !== null) keepComposer(composerKeyRef.current, composerRef.current)
   }, [])
 
   // Shows the composer of another conversation (null: none). The one on screen is kept unless its conversation is gone.
@@ -246,26 +275,34 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
     [keepShownComposer, showReading],
   )
 
-  // For a request that ends after another conversation was opened: it changes the composer it was started from.
+  // For a request that ends after another conversation (or tab) was opened: it changes the composer it was started
+  // from.
   const updateComposer = useCallback(
-    (
-      key: string,
-      update: { input?: (cur: string) => string; attachments?: (cur: PendingAttachment[]) => PendingAttachment[] },
-    ) => {
-      if (composerKeyRef.current === key) {
-        if (update.input) setInput(update.input)
-        if (update.attachments) setAttachments(update.attachments)
-        return
-      }
-      const cur = composers.get(key) ?? EMPTY_COMPOSER
-      keepComposer(key, {
-        ...cur,
-        input: update.input ? update.input(cur.input) : cur.input,
-        attachments: update.attachments ? update.attachments(cur.attachments) : cur.attachments,
-      })
-    },
+    (key: string, update: ComposerUpdate) => applyComposerUpdate(key, update, epochRef.current),
     [],
   )
+
+  useEffect(() => {
+    const shown = {
+      key: () => composerKeyRef.current,
+      update: (update: ComposerUpdate) => {
+        // Also into the ref, for this page being left before the change is rendered.
+        const cur = composerRef.current
+        composerRef.current = {
+          ...cur,
+          input: update.input ? update.input(cur.input) : cur.input,
+          attachments: update.attachments ? update.attachments(cur.attachments) : cur.attachments,
+        }
+        if (update.input) setInput(update.input)
+        if (update.attachments) setAttachments(update.attachments)
+      },
+      showReading,
+    }
+    shownComposer = shown
+    return () => {
+      if (shownComposer === shown) shownComposer = null
+    }
+  }, [showReading])
 
   const selectConversation = useCallback((id: string | null) => {
     generationRef.current += 1
@@ -379,7 +416,9 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
         const data = await api<{ messages: HistoryMessage[]; busy: boolean; turn_id?: string; unsent?: UnsentMessage[] }>(
           `/api/conversations/${id}/messages`,
         )
-        if (generationRef.current !== generation) return // a slower answer must not replace what was opened since
+        // A slower answer must not replace what was opened since; after this page was left, the page shown when
+        // coming back opens it again (and puts back what was not sent).
+        if (generationRef.current !== generation || !mountedRef.current) return
         // The whole history arrives at once, so it is shown at its end instead of scrolled there.
         jumpRef.current = true
         setItems(fromHistory(data.messages))
@@ -505,9 +544,9 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
       })
       .catch(() => undefined)
     return () => {
+      keepShownComposer()
       mountedRef.current = false
       sourceRef.current?.close()
-      keepShownComposer()
     }
   }, [loadConversations, keepShownComposer])
 
@@ -673,7 +712,8 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
     const generation = generationRef.current
     const conv = await api<Conversation>('/api/conversations', { method: 'POST', body: json({ model: selectedModel }) })
     await loadConversations()
-    if (generationRef.current !== generation) return // something else was opened while it was being created
+    // Something else was opened while it was being created, or this page was left.
+    if (generationRef.current !== generation || !mountedRef.current) return
     // What was being written for a new conversation goes into the one just made.
     if (composerKeyRef.current === NEW_CONVERSATION) moveNewComposer(conv.id)
     await openConversation(conv.id)
@@ -704,19 +744,19 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
     if (problems.length) setError([...new Set(problems)].join(' / '))
     if (accepted.length === 0) return
     const token = Symbol()
-    pendingReadsRef.current.set(token, { key, count: accepted.length, bytes: accepted.reduce((sum, f) => sum + f.size, 0) })
+    pendingReads.set(token, { key, count: accepted.length, bytes: accepted.reduce((sum, f) => sum + f.size, 0) })
     showReading()
     try {
       const read = await Promise.all(accepted.map(readAttachment))
       // Switched to another conversation while reading: the files belong to the one they were added in (or, for a new
       // conversation, the one it has become since).
-      const target = pendingReadsRef.current.get(token)?.key ?? null
+      const target = pendingReads.get(token)?.key ?? null
       if (target !== null) updateComposer(target, { attachments: (cur) => [...cur, ...read] })
     } catch (e) {
       if (generationRef.current === generation) setError((e as Error).message)
     } finally {
-      pendingReadsRef.current.delete(token)
-      showReading()
+      pendingReads.delete(token)
+      shownComposer?.showReading()
     }
   }
 
@@ -740,7 +780,8 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
       let id = currentIdRef.current
       if (!id) {
         const conv = await api<Conversation>('/api/conversations', { method: 'POST', body: json({ model: selectedModel }) })
-        if (generationRef.current !== generation) {
+        // Not sent; what was written stays in the composer of a new conversation.
+        if (generationRef.current !== generation || !mountedRef.current) {
           loadConversations()
           return
         }
@@ -778,7 +819,8 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
         setItems((prev) => [...prev, { kind: 'user', text: res.message.content, attachments: shown, at: res.message.at }])
         attach(res.turn_id)
       } catch (e) {
-        if (generationRef.current !== generation) return
+        // Not sent; what was written is still in its composer (asking about it waits until it is opened again).
+        if (generationRef.current !== generation || !mountedRef.current) return
         if (e instanceof ApiError && e.code === 'sensitive_data') {
           const ok = window.confirm(`${e.message}\nこの内容を Copilot に送信しますか？（ファイルには保存されません）`)
           if (ok) await send(true)
@@ -858,7 +900,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
       if (sourceRef.current && sourceRef.current.readyState !== EventSource.CLOSED) nextTurnRef.current = start
       else start()
     } catch (e) {
-      if (generationRef.current !== generation) {
+      if (generationRef.current !== generation || !mountedRef.current) {
         restore()
         return
       }
@@ -917,7 +959,8 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
       { method: 'POST' },
     )
     await loadConversations()
-    if (generationRef.current !== generation) return // it keeps running; its conversation shows it when opened
+    // It keeps running; its conversation shows it when opened.
+    if (generationRef.current !== generation || !mountedRef.current) return
     selectConversation(res.conversation_id)
     switchComposer(res.conversation_id)
     // The request itself is long; what is shown instead says what was asked, at the time it was asked.
