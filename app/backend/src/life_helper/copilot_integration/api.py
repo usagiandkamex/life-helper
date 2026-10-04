@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 from dataclasses import asdict
 from typing import Literal
 
+from copilot.session_events import AttachmentBlob, SessionBinaryAssetData, UserMessageData
 from fastapi import APIRouter, Depends, Header, HTTPException, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 
 from ..auth import CurrentUser, require_user
@@ -18,9 +21,10 @@ from .attachments import (
     MAX_ATTACHMENTS,
     AttachmentError,
     PreparedAttachments,
+    image_type,
     prepare_attachments,
 )
-from .events import history_from_events, posted_now
+from .events import history_from_events, posted_now, subagent_event
 from .manager import NoTokenError, SessionStateError
 from .turns import (
     ApprovalNotFoundError,
@@ -164,7 +168,73 @@ async def conversation_messages(
         raise _reauth() from e
     except SessionStateError as e:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(e)) from e
-    return {"messages": history_from_events(events, ctx.masker), "busy": False, "unsent": unsent}
+    return {
+        "messages": history_from_events(events, ctx.masker, conversation_id),
+        "busy": False,
+        "unsent": unsent,
+    }
+
+
+@router.get("/conversations/{conversation_id}/attachments/{asset_id}")
+async def conversation_attachment(
+    conversation_id: str,
+    asset_id: str,
+    user: CurrentUser = Depends(require_user),
+    ctx: AppContext = Depends(get_ctx),
+) -> Response:
+    conv = ctx.extras["conversations"].get(conversation_id)
+    if conv is None or not conv.started:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "attachment not found")
+    try:
+        async with ctx.turns.reserve(conversation_id):
+            active = await ctx.copilot.open_session(conversation_id, model=conv.model, resume=True)
+            events = await active.session.get_events()
+    except TurnBusyError as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, "the conversation is answering; wait until it finishes") from e
+    except NoTokenError as e:
+        raise _reauth() from e
+    except SessionStateError as e:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(e)) from e
+
+    referenced = any(
+        isinstance(data, UserMessageData)
+        and not subagent_event(event)
+        and any(
+            isinstance(attachment, AttachmentBlob)
+            and attachment.asset_id == asset_id
+            and attachment.mime_type.startswith("image/")
+            for attachment in data.attachments or []
+        )
+        for event in events
+        if (data := getattr(event, "data", None)) is not None
+    )
+    asset = next(
+        (
+            data
+            for event in events
+            if isinstance((data := getattr(event, "data", None)), SessionBinaryAssetData) and data.asset_id == asset_id
+        ),
+        None,
+    )
+    if (
+        not referenced
+        or asset is None
+        or asset.byte_length > ctx.settings.upload_max_bytes
+        or len(asset.data) != (asset.byte_length + 2) // 3 * 4
+    ):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "attachment not found")
+    try:
+        content = base64.b64decode(asset.data, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "attachment not found") from None
+    detected_type = image_type(content)
+    if len(content) != asset.byte_length or detected_type is None or detected_type != asset.mime_type:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "attachment not found")
+    return Response(
+        content,
+        media_type=detected_type,
+        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+    )
 
 
 async def _start_turn(

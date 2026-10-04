@@ -48,7 +48,7 @@ export type TurnEvent =
   | { type: 'end'; unsent?: UnsentMessage[] }
 
 // Files and images attached to a chat message (the history API returns only their names, not the contents).
-export type AttachmentInfo = { name: string; kind: 'image' | 'file'; truncated?: boolean }
+export type AttachmentInfo = { name: string; kind: 'image' | 'file'; truncated?: boolean; url?: string }
 
 // An attachment of a message just sent. index: its place among the files sent, which the server lists images first.
 export type SentAttachment = AttachmentInfo & { index: number }

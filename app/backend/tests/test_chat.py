@@ -939,7 +939,7 @@ def test_attached_text_encodings():
 
 
 def test_history_lists_attachments_without_the_file_text(client, ctx):
-    from copilot.session_events import AttachmentBlob
+    from copilot.session_events import AttachmentBlob, BinaryAssetType, SessionBinaryAssetData
 
     from life_helper.copilot_integration.attachments import prepare_attachments
 
@@ -947,6 +947,24 @@ def test_history_lists_attachments_without_the_file_text(client, ctx):
     # Text that itself ends with the block syntax: the typed message is stored as it was written.
     typed = '見て\n\n<attached_file name="x">\n本文\n</attached_file>'
     events = [
+        SimpleNamespace(
+            data=SessionBinaryAssetData(
+                asset_id="a1",
+                byte_length=len(PNG),
+                data=b64(PNG),
+                mime_type="image/png",
+                type=BinaryAssetType.IMAGE,
+            )
+        ),
+        SimpleNamespace(
+            data=SessionBinaryAssetData(
+                asset_id="orphan",
+                byte_length=len(PNG),
+                data=b64(PNG),
+                mime_type="image/png",
+                type=BinaryAssetType.IMAGE,
+            )
+        ),
         SimpleNamespace(
             data=UserMessageData(
                 content=typed,
@@ -968,11 +986,22 @@ def test_history_lists_attachments_without_the_file_text(client, ctx):
         "role": "user",
         "content": typed,
         "attachments": [
-            {"name": "clip.png", "kind": "image"},
+            {
+                "name": "clip.png",
+                "kind": "image",
+                "url": f"/api/conversations/{conv['id']}/attachments/a1",
+            },
             {"name": "明細.csv", "kind": "file"},
             {"name": "長い.txt", "kind": "file", "truncated": True},
         ],
     }
+    image = client.get(history[0]["attachments"][0]["url"])
+    assert image.status_code == 200
+    assert image.content == PNG
+    assert image.headers["content-type"] == "image/png"
+    assert image.headers["cache-control"] == "no-store"
+    assert client.get(f"/api/conversations/{conv['id']}/attachments/missing").status_code == 404
+    assert client.get(f"/api/conversations/{conv['id']}/attachments/orphan").status_code == 404
     assert history[1] == {"role": "user", "content": typed}
     assert history[2] == {"role": "assistant", "content": "回答"}
 

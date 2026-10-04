@@ -7,6 +7,7 @@ import json
 import re
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import quote
 
 from copilot.session_events import (
     AssistantMessageData,
@@ -172,7 +173,7 @@ def map_event(event: Any, masker: SecretMasker) -> dict | None:
     return None
 
 
-def history_from_events(events: list[Any], masker: SecretMasker) -> list[dict]:
+def history_from_events(events: list[Any], masker: SecretMasker, conversation_id: str) -> list[dict]:
     """Rebuilds a readable transcript (user/assistant messages and tool calls) from stored session events."""
     messages: list[dict] = []
     for event in events:
@@ -185,7 +186,20 @@ def history_from_events(events: list[Any], masker: SecretMasker) -> list[dict]:
                 files = attached_files(content, data.transformed_content)
                 message = {"role": "user", "content": masker.mask_text(content), **posted_at(event)}
                 images = [
-                    {"name": masker.mask_text(a.display_name or "画像"), "kind": "image"}
+                    {
+                        "name": masker.mask_text(a.display_name or "画像"),
+                        "kind": "image",
+                        **(
+                            {
+                                "url": (
+                                    f"/api/conversations/{quote(conversation_id, safe='')}/attachments/"
+                                    f"{quote(a.asset_id, safe='')}"
+                                )
+                            }
+                            if a.asset_id
+                            else {}
+                        ),
+                    }
                     for a in data.attachments or []
                     if isinstance(a, AttachmentBlob) and a.mime_type.startswith("image/")
                 ]

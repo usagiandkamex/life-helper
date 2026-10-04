@@ -6,7 +6,13 @@ export function AttachmentList({ items, onRemove }: { items: ShownAttachment[]; 
     <ul className="attachments">
       {items.map((a, i) => (
         <li key={i} className="attachment" title={a.truncated ? `${a.name}（長いため、先頭の一部だけを Copilot に渡しました）` : a.name}>
-          {a.url ? <img src={a.url} alt="" /> : <span aria-hidden="true">{a.kind === 'image' ? '🖼️' : '📄'}</span>}
+          {a.url ? (
+            <a href={a.url} target="_blank" rel="noreferrer" aria-label={`${a.name} を開く`}>
+              <img src={a.url} alt="" />
+            </a>
+          ) : (
+            <span aria-hidden="true">{a.kind === 'image' ? '🖼️' : '📄'}</span>
+          )}
           <span className="attachment-name">{a.name}</span>
           {a.truncated && <small>（一部のみ）</small>}
           {onRemove && (
