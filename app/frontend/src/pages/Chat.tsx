@@ -940,6 +940,8 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
       await api(`/api/conversations/${id}`, { method: 'DELETE' })
       for (const [messageId, sent] of sentFilesRef.current)
         if (sent.conversationId === id) sentFilesRef.current.delete(messageId)
+      // Files still being read for it are dropped when read, instead of making its composer again.
+      for (const [token, r] of pendingReads) if (r.key === id) pendingReads.delete(token)
       composers.delete(id)
       if (currentIdRef.current === id) {
         selectConversation(null)

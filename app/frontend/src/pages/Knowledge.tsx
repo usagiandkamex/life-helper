@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { api, ApiError, formatDate, json } from '../api'
 import { Markdown } from '../components/Markdown'
 import { SelectAllButton } from '../components/SelectAllButton'
-import { draftStore } from '../drafts'
+import { draftEpoch, draftStore } from '../drafts'
 import type { FileEntry } from '../types'
 
 const GROUP_LABELS: Record<string, string> = {
@@ -26,6 +26,27 @@ const summarize = (items: string[], limit = 3): string =>
 const fileDrafts = draftStore<{ base: string; content: string }>()
 // 画面を離れたときに編集していたファイル。戻ったら開き直す。
 const openFileKey = draftStore<string>()
+// 保存中のファイルごとの最後の保存。同じファイルの保存は順番に送る（後から押した保存を、先の保存が上書きしないように）。
+// 画面を離れて戻っても続けて並べられるように、画面の外に持つ。
+const savesInFlight = new Map<string, Promise<unknown>>()
+
+function saveFile(path: string, content: string) {
+  const previous = savesInFlight.get(path) ?? Promise.resolve()
+  const epoch = draftEpoch()
+  const send = () => {
+    // ログアウトしたあとは、待っていた保存を送らない（次にログインした人の権限で書き込まない）。
+    if (epoch !== draftEpoch()) throw new Error('ログアウトしたため、保存しませんでした。')
+    return api('/api/files/content', { method: 'PUT', body: json({ path, content }) })
+  }
+  // 先の保存が失敗しても、この保存は送る。
+  const request = previous.then(send, send)
+  savesInFlight.set(path, request)
+  const done = () => {
+    if (savesInFlight.get(path) === request) savesInFlight.delete(path)
+  }
+  request.then(done, done)
+  return request
+}
 
 export function KnowledgePage() {
   const [files, setFiles] = useState<FileEntry[]>([])
@@ -123,13 +144,15 @@ export function KnowledgePage() {
     const path = selected
     const saved = content
     try {
-      await api('/api/files/content', { method: 'PUT', body: json({ path, content: saved }) })
+      await saveFile(path, saved)
       // 保存している間にほかのファイルや画面へ移っていたら、残した編集のほうを保存した内容に合わせる
       // （保存したあとに書き足した分だけを、保存していない編集として残す）。
       const kept = fileDrafts.get(path)
       if (kept?.content === saved) fileDrafts.delete(path)
       else if (kept) fileDrafts.set(path, { base: saved, content: kept.content })
       if (!mountedRef.current) return
+      // 先に送った保存が失敗していても、この保存で書き込めたのでそのエラーは消す。
+      setError('')
       const latest = latestRef.current
       if (latest.selected === path) {
         setBase(saved)
