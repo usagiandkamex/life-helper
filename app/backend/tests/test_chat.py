@@ -359,6 +359,7 @@ def test_history_while_busy_does_not_touch_session(client, ctx):
     turn = client.post(f"/api/conversations/{conv['id']}/turns", json={"prompt": "hi"}, headers=h).json()
     history = client.get(f"/api/conversations/{conv['id']}/messages").json()
     assert history["busy"] is True and history["turn_id"] == turn["turn_id"]
+    assert client.get(f"/api/conversations/{conv['id']}/attachments/a").status_code == 409
     assert len(fake.opened) == 1  # only the turn opened the session
     assert client.delete(f"/api/conversations/{conv['id']}", headers=h).status_code == 409
     wait_turn_done(ctx, turn["turn_id"])
@@ -1050,22 +1051,28 @@ def test_history_images_reject_invalid_assets(client, ctx, settings):
         assert client.get(f"/api/conversations/{conv['id']}/attachments/{asset_id}").status_code == 404, asset_id
 
 
-async def test_overlapping_history_image_requests_share_one_read(ctx):
+@pytest.mark.parametrize("requests", [("a", "b"), ("a", "messages"), ("messages", "a"), ("messages", "messages")])
+@pytest.mark.parametrize("blocked_at", ["open_session", "get_events"])
+async def test_overlapping_history_image_requests_share_one_read(ctx, monkeypatch, requests, blocked_at):
     from life_helper.bootstrap import init_chat, init_core
-    from life_helper.copilot_integration.api import conversation_attachment
+    from life_helper.copilot_integration.api import conversation_attachment, conversation_messages
     from life_helper.copilot_integration.turns import TurnBusyError
 
     jpeg = b"\xff\xd8\xff" + b"\x00" * 16
     started = asyncio.Event()
     release = asyncio.Event()
 
+    async def pause(stage):
+        if blocked_at == stage:
+            started.set()
+            await release.wait()
+
     class SlowSession(AttachmentSession):
         reads = 0
 
         async def get_events(self):
             self.reads += 1
-            started.set()
-            await release.wait()
+            await pause("get_events")
             return await super().get_events()
 
     init_core(ctx)
@@ -1073,33 +1080,67 @@ async def test_overlapping_history_image_requests_share_one_read(ctx):
     session = SlowSession(
         events=image_message(("a", len(PNG), b64(PNG), "image/png"), ("b", len(jpeg), b64(jpeg), "image/jpeg"))
     )
-    install_fake(ctx, session)
+    fake = install_fake(ctx, session)
+    open_session = fake.open_session
+
+    async def slow_open(*args, **kwargs):
+        await pause("open_session")
+        return await open_session(*args, **kwargs)
+
+    monkeypatch.setattr(fake, "open_session", slow_open)
     conv = ctx.extras["conversations"].create("", "auto")
     ctx.extras["conversations"].update(conv.id, started=True)
 
-    first = asyncio.create_task(conversation_attachment(conv.id, "a", user=None, ctx=ctx))
-    await started.wait()
-    second = asyncio.create_task(conversation_attachment(conv.id, "b", user=None, ctx=ctx))
+    async def request(kind):
+        if kind == "messages":
+            return await conversation_messages(conv.id, user=None, ctx=ctx)
+        return await conversation_attachment(conv.id, kind, user=None, ctx=ctx)
+
+    first = asyncio.create_task(request(requests[0]))
+    await asyncio.wait_for(started.wait(), timeout=5)
+    second = asyncio.create_task(request(requests[1]))
     await asyncio.sleep(0)
     # The read still keeps turns and deletion out of the conversation.
     with pytest.raises(TurnBusyError):
         async with ctx.turns.reserve(conv.id):
             pass
     release.set()
-    images = await asyncio.gather(first, second)
-    assert [(r.status_code, r.body, r.media_type) for r in images] == [
-        (200, PNG, "image/png"),
-        (200, jpeg, "image/jpeg"),
-    ]
+    results = await asyncio.gather(first, second, return_exceptions=True)
+    for kind, result in zip(requests, results, strict=True):
+        assert not isinstance(result, Exception), result
+        if kind == "messages":
+            assert result == {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "見て",
+                        "attachments": [
+                            {
+                                "name": f"{a}.png",
+                                "kind": "image",
+                                "url": f"/api/conversations/{conv.id}/attachments/{a}",
+                            }
+                            for a in ("a", "b")
+                        ],
+                    }
+                ],
+                "busy": False,
+                "unsent": [],
+            }
+        else:
+            content, mime = (PNG, "image/png") if kind == "a" else (jpeg, "image/jpeg")
+            assert (result.status_code, result.body, result.media_type) == (200, content, mime)
+    assert fake.opened == [(conv.id, "auto", True)]
     assert session.reads == 1
     assert not ctx.turns.busy(conv.id)
 
 
-async def test_history_image_read_does_not_reopen_a_deleted_conversation(ctx):
+@pytest.mark.parametrize("kind", ["image", "messages"])
+async def test_history_read_does_not_reopen_a_deleted_conversation(ctx, kind):
     from fastapi import HTTPException
 
     from life_helper.bootstrap import init_chat, init_core
-    from life_helper.copilot_integration.api import conversation_attachment, delete_conversation
+    from life_helper.copilot_integration.api import conversation_attachment, conversation_messages, delete_conversation
 
     init_core(ctx)
     init_chat(ctx)
@@ -1107,12 +1148,16 @@ async def test_history_image_read_does_not_reopen_a_deleted_conversation(ctx):
     conv = ctx.extras["conversations"].create("", "auto")
     ctx.extras["conversations"].update(conv.id, started=True)
 
-    image = asyncio.create_task(conversation_attachment(conv.id, "a", user=None, ctx=ctx))
+    read = asyncio.create_task(
+        conversation_attachment(conv.id, "a", user=None, ctx=ctx)
+        if kind == "image"
+        else conversation_messages(conv.id, user=None, ctx=ctx)
+    )
     await asyncio.sleep(0)
     # Deleted after the request looked the conversation up, but before its read reserved it.
     assert await delete_conversation(conv.id, user=None, ctx=ctx) == {"ok": True}
     with pytest.raises(HTTPException) as e:
-        await image
+        await read
     assert e.value.status_code == 404
     assert fake.opened == [] and fake.deleted == [conv.id]
 

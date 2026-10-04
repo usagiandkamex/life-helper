@@ -150,7 +150,7 @@ async def conversation_messages(
     conv = ctx.extras["conversations"].get(conversation_id)
     if conv is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "conversation not found")
-    if ctx.turns.busy(conversation_id):
+    if ctx.turns.active_turn_id(conversation_id) is not None:
         # Do not touch the live session while it answers; the client re-attaches to the running turn instead.
         return {"messages": [], "busy": True, "turn_id": ctx.turns.active_turn_id(conversation_id)}
     # Messages the last turn could not send, for a client that was not following it when it ended.
@@ -158,10 +158,7 @@ async def conversation_messages(
     if not conv.started:
         return {"messages": [], "busy": False, "unsent": unsent}
     try:
-        # Reserve so a turn cannot start while the history is being read from the session.
-        async with ctx.turns.reserve(conversation_id):
-            active = await ctx.copilot.open_session(conversation_id, model=conv.model, resume=True)
-            events = await active.session.get_events()
+        events = await _shared_events(ctx, conversation_id, conv.model)
     except TurnBusyError:
         return {"messages": [], "busy": True, "turn_id": ctx.turns.active_turn_id(conversation_id)}
     except NoTokenError as e:
@@ -176,10 +173,9 @@ async def conversation_messages(
 
 
 async def _shared_events(ctx: AppContext, conversation_id: str, model: str) -> list:
-    """The session's events for the history's images. The thumbnails of one history are fetched at once, so a read
-    that is already running for the conversation is shared rather than refused; the read itself still reserves the
+    """Share in-flight event reads between history and image requests. The read itself still reserves the
     conversation, so it never overlaps a turn or a deletion."""
-    reads: dict[str, asyncio.Task] = ctx.extras.setdefault("attachment_reads", {})
+    reads: dict[str, asyncio.Task] = ctx.extras.setdefault("history_reads", {})
     task = reads.get(conversation_id)
     if task is None:
 
@@ -189,7 +185,7 @@ async def _shared_events(ctx: AppContext, conversation_id: str, model: str) -> l
                     # The read starts later than the request looked the conversation up: it may be gone by now, and
                     # opening it again would bring its session back.
                     if ctx.extras["conversations"].get(conversation_id) is None:
-                        return []
+                        raise HTTPException(status.HTTP_404_NOT_FOUND, "conversation not found")
                     active = await ctx.copilot.open_session(conversation_id, model=model, resume=True)
                     return await active.session.get_events()
             finally:
