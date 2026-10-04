@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 from dataclasses import asdict
 from typing import Literal
 
+from copilot.session_events import AttachmentBlob, SessionBinaryAssetData, UserMessageData
 from fastapi import APIRouter, Depends, Header, HTTPException, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 
 from ..auth import CurrentUser, require_user
@@ -18,9 +21,10 @@ from .attachments import (
     MAX_ATTACHMENTS,
     AttachmentError,
     PreparedAttachments,
+    image_type,
     prepare_attachments,
 )
-from .events import history_from_events, posted_now
+from .events import history_from_events, posted_now, subagent_event
 from .manager import NoTokenError, SessionStateError
 from .turns import (
     ApprovalNotFoundError,
@@ -146,7 +150,7 @@ async def conversation_messages(
     conv = ctx.extras["conversations"].get(conversation_id)
     if conv is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "conversation not found")
-    if ctx.turns.busy(conversation_id):
+    if ctx.turns.active_turn_id(conversation_id) is not None:
         # Do not touch the live session while it answers; the client re-attaches to the running turn instead.
         return {"messages": [], "busy": True, "turn_id": ctx.turns.active_turn_id(conversation_id)}
     # Messages the last turn could not send, for a client that was not following it when it ended.
@@ -154,17 +158,102 @@ async def conversation_messages(
     if not conv.started:
         return {"messages": [], "busy": False, "unsent": unsent}
     try:
-        # Reserve so a turn cannot start while the history is being read from the session.
-        async with ctx.turns.reserve(conversation_id):
-            active = await ctx.copilot.open_session(conversation_id, model=conv.model, resume=True)
-            events = await active.session.get_events()
+        events = await _shared_events(ctx, conversation_id, conv.model)
     except TurnBusyError:
         return {"messages": [], "busy": True, "turn_id": ctx.turns.active_turn_id(conversation_id)}
     except NoTokenError as e:
         raise _reauth() from e
     except SessionStateError as e:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(e)) from e
-    return {"messages": history_from_events(events, ctx.masker), "busy": False, "unsent": unsent}
+    return {
+        "messages": history_from_events(events, ctx.masker, conversation_id),
+        "busy": False,
+        "unsent": unsent,
+    }
+
+
+async def _shared_events(ctx: AppContext, conversation_id: str, model: str) -> list:
+    """Share in-flight event reads between history and image requests. The read itself still reserves the
+    conversation, so it never overlaps a turn or a deletion."""
+    reads: dict[str, asyncio.Task] = ctx.extras.setdefault("history_reads", {})
+    task = reads.get(conversation_id)
+    if task is None:
+
+        async def read() -> list:
+            try:
+                async with ctx.turns.reserve(conversation_id):
+                    # The read starts later than the request looked the conversation up: it may be gone by now, and
+                    # opening it again would bring its session back.
+                    if ctx.extras["conversations"].get(conversation_id) is None:
+                        raise HTTPException(status.HTTP_404_NOT_FOUND, "conversation not found")
+                    active = await ctx.copilot.open_session(conversation_id, model=model, resume=True)
+                    return await active.session.get_events()
+            finally:
+                reads.pop(conversation_id, None)
+
+        task = reads[conversation_id] = asyncio.create_task(read())
+    # A request that goes away does not cancel the read the others wait for.
+    return await asyncio.shield(task)
+
+
+@router.get("/conversations/{conversation_id}/attachments/{asset_id}")
+async def conversation_attachment(
+    conversation_id: str,
+    asset_id: str,
+    user: CurrentUser = Depends(require_user),
+    ctx: AppContext = Depends(get_ctx),
+) -> Response:
+    conv = ctx.extras["conversations"].get(conversation_id)
+    if conv is None or not conv.started:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "attachment not found")
+    try:
+        events = await _shared_events(ctx, conversation_id, conv.model)
+    except TurnBusyError as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, "the conversation is answering; wait until it finishes") from e
+    except NoTokenError as e:
+        raise _reauth() from e
+    except SessionStateError as e:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(e)) from e
+
+    referenced = any(
+        isinstance(data, UserMessageData)
+        and not subagent_event(event)
+        and any(
+            isinstance(attachment, AttachmentBlob)
+            and attachment.asset_id == asset_id
+            and attachment.mime_type.startswith("image/")
+            for attachment in data.attachments or []
+        )
+        for event in events
+        if (data := getattr(event, "data", None)) is not None
+    )
+    asset = next(
+        (
+            data
+            for event in events
+            if isinstance((data := getattr(event, "data", None)), SessionBinaryAssetData) and data.asset_id == asset_id
+        ),
+        None,
+    )
+    if (
+        not referenced
+        or asset is None
+        or asset.byte_length > ctx.settings.upload_max_bytes
+        or len(asset.data) != (asset.byte_length + 2) // 3 * 4
+    ):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "attachment not found")
+    try:
+        content = base64.b64decode(asset.data, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "attachment not found") from None
+    detected_type = image_type(content)
+    if len(content) != asset.byte_length or detected_type is None or detected_type != asset.mime_type:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "attachment not found")
+    return Response(
+        content,
+        media_type=detected_type,
+        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+    )
 
 
 async def _start_turn(

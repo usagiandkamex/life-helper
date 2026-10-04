@@ -359,6 +359,7 @@ def test_history_while_busy_does_not_touch_session(client, ctx):
     turn = client.post(f"/api/conversations/{conv['id']}/turns", json={"prompt": "hi"}, headers=h).json()
     history = client.get(f"/api/conversations/{conv['id']}/messages").json()
     assert history["busy"] is True and history["turn_id"] == turn["turn_id"]
+    assert client.get(f"/api/conversations/{conv['id']}/attachments/a").status_code == 409
     assert len(fake.opened) == 1  # only the turn opened the session
     assert client.delete(f"/api/conversations/{conv['id']}", headers=h).status_code == 409
     wait_turn_done(ctx, turn["turn_id"])
@@ -939,7 +940,7 @@ def test_attached_text_encodings():
 
 
 def test_history_lists_attachments_without_the_file_text(client, ctx):
-    from copilot.session_events import AttachmentBlob
+    from copilot.session_events import AttachmentBlob, BinaryAssetType, SessionBinaryAssetData
 
     from life_helper.copilot_integration.attachments import prepare_attachments
 
@@ -947,6 +948,24 @@ def test_history_lists_attachments_without_the_file_text(client, ctx):
     # Text that itself ends with the block syntax: the typed message is stored as it was written.
     typed = '見て\n\n<attached_file name="x">\n本文\n</attached_file>'
     events = [
+        SimpleNamespace(
+            data=SessionBinaryAssetData(
+                asset_id="a1",
+                byte_length=len(PNG),
+                data=b64(PNG),
+                mime_type="image/png",
+                type=BinaryAssetType.IMAGE,
+            )
+        ),
+        SimpleNamespace(
+            data=SessionBinaryAssetData(
+                asset_id="orphan",
+                byte_length=len(PNG),
+                data=b64(PNG),
+                mime_type="image/png",
+                type=BinaryAssetType.IMAGE,
+            )
+        ),
         SimpleNamespace(
             data=UserMessageData(
                 content=typed,
@@ -968,13 +987,179 @@ def test_history_lists_attachments_without_the_file_text(client, ctx):
         "role": "user",
         "content": typed,
         "attachments": [
-            {"name": "clip.png", "kind": "image"},
+            {
+                "name": "clip.png",
+                "kind": "image",
+                "url": f"/api/conversations/{conv['id']}/attachments/a1",
+            },
             {"name": "明細.csv", "kind": "file"},
             {"name": "長い.txt", "kind": "file", "truncated": True},
         ],
     }
+    image = client.get(history[0]["attachments"][0]["url"])
+    assert image.status_code == 200
+    assert image.content == PNG
+    assert image.headers["content-type"] == "image/png"
+    assert image.headers["cache-control"] == "no-store"
+    assert client.get(f"/api/conversations/{conv['id']}/attachments/missing").status_code == 404
+    assert client.get(f"/api/conversations/{conv['id']}/attachments/orphan").status_code == 404
     assert history[1] == {"role": "user", "content": typed}
     assert history[2] == {"role": "assistant", "content": "回答"}
+
+
+def image_message(*assets) -> list:
+    """A history whose one message references every given asset, as an image."""
+    from copilot.session_events import AttachmentBlob, BinaryAssetType, SessionBinaryAssetData
+
+    events = [
+        SimpleNamespace(
+            data=SessionBinaryAssetData(
+                asset_id=asset_id, byte_length=length, data=data, mime_type=mime, type=BinaryAssetType.IMAGE
+            )
+        )
+        for asset_id, length, data, mime in assets
+    ]
+    blobs = [AttachmentBlob(mime_type=mime, display_name=f"{a}.png", asset_id=a) for a, _, _, mime in assets]
+    return [*events, SimpleNamespace(data=UserMessageData(content="見て", attachments=blobs))]
+
+
+def test_history_images_reject_invalid_assets(client, ctx, settings):
+    settings.upload_max_bytes = 64
+    limit = PNG + b"\x00" * (64 - len(PNG))
+    over = limit + b"\x00"
+    events = image_message(
+        ("limit", len(limit), b64(limit), "image/png"),
+        ("over", len(over), b64(over), "image/png"),
+        # The base64 text is longer than the stated size can be.
+        ("long", len(PNG), b64(PNG) + "AAAA", "image/png"),
+        # Of the right length, but not base64.
+        ("garbled", len(PNG), "!" * len(b64(PNG)), "image/png"),
+        # Padded base64 of the right length that decodes to one byte less than stated.
+        ("short", len(PNG), b64(PNG[:-1]), "image/png"),
+        ("text", 24, b64(b"x" * 24), "image/png"),
+        ("mislabelled", len(PNG), b64(PNG), "image/jpeg"),
+    )
+    assert len(b64(PNG[:-1])) == len(b64(PNG))
+    csrf = sign_in(client, ctx)
+    install_fake(ctx, AttachmentSession(events=events))
+    conv = client.post("/api/conversations", json={}, headers={"x-csrf-token": csrf}).json()
+    ctx.extras["conversations"].update(conv["id"], started=True)
+
+    image = client.get(f"/api/conversations/{conv['id']}/attachments/limit")
+    assert image.status_code == 200 and image.content == limit
+    for asset_id in ("over", "long", "garbled", "short", "text", "mislabelled"):
+        assert client.get(f"/api/conversations/{conv['id']}/attachments/{asset_id}").status_code == 404, asset_id
+
+
+@pytest.mark.parametrize("requests", [("a", "b"), ("a", "messages"), ("messages", "a"), ("messages", "messages")])
+@pytest.mark.parametrize("blocked_at", ["open_session", "get_events"])
+async def test_overlapping_history_image_requests_share_one_read(ctx, monkeypatch, requests, blocked_at):
+    from life_helper.bootstrap import init_chat, init_core
+    from life_helper.copilot_integration.api import conversation_attachment, conversation_messages
+    from life_helper.copilot_integration.turns import TurnBusyError
+
+    jpeg = b"\xff\xd8\xff" + b"\x00" * 16
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def pause(stage):
+        if blocked_at == stage:
+            started.set()
+            await release.wait()
+
+    class SlowSession(AttachmentSession):
+        reads = 0
+
+        async def get_events(self):
+            self.reads += 1
+            await pause("get_events")
+            return await super().get_events()
+
+    init_core(ctx)
+    init_chat(ctx)
+    session = SlowSession(
+        events=image_message(("a", len(PNG), b64(PNG), "image/png"), ("b", len(jpeg), b64(jpeg), "image/jpeg"))
+    )
+    fake = install_fake(ctx, session)
+    open_session = fake.open_session
+
+    async def slow_open(*args, **kwargs):
+        await pause("open_session")
+        return await open_session(*args, **kwargs)
+
+    monkeypatch.setattr(fake, "open_session", slow_open)
+    conv = ctx.extras["conversations"].create("", "auto")
+    ctx.extras["conversations"].update(conv.id, started=True)
+
+    async def request(kind):
+        if kind == "messages":
+            return await conversation_messages(conv.id, user=None, ctx=ctx)
+        return await conversation_attachment(conv.id, kind, user=None, ctx=ctx)
+
+    first = asyncio.create_task(request(requests[0]))
+    await asyncio.wait_for(started.wait(), timeout=5)
+    second = asyncio.create_task(request(requests[1]))
+    await asyncio.sleep(0)
+    # The read still keeps turns and deletion out of the conversation.
+    with pytest.raises(TurnBusyError):
+        async with ctx.turns.reserve(conv.id):
+            pass
+    release.set()
+    results = await asyncio.gather(first, second, return_exceptions=True)
+    for kind, result in zip(requests, results, strict=True):
+        assert not isinstance(result, Exception), result
+        if kind == "messages":
+            assert result == {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "見て",
+                        "attachments": [
+                            {
+                                "name": f"{a}.png",
+                                "kind": "image",
+                                "url": f"/api/conversations/{conv.id}/attachments/{a}",
+                            }
+                            for a in ("a", "b")
+                        ],
+                    }
+                ],
+                "busy": False,
+                "unsent": [],
+            }
+        else:
+            content, mime = (PNG, "image/png") if kind == "a" else (jpeg, "image/jpeg")
+            assert (result.status_code, result.body, result.media_type) == (200, content, mime)
+    assert fake.opened == [(conv.id, "auto", True)]
+    assert session.reads == 1
+    assert not ctx.turns.busy(conv.id)
+
+
+@pytest.mark.parametrize("kind", ["image", "messages"])
+async def test_history_read_does_not_reopen_a_deleted_conversation(ctx, kind):
+    from fastapi import HTTPException
+
+    from life_helper.bootstrap import init_chat, init_core
+    from life_helper.copilot_integration.api import conversation_attachment, conversation_messages, delete_conversation
+
+    init_core(ctx)
+    init_chat(ctx)
+    fake = install_fake(ctx, AttachmentSession(events=image_message(("a", len(PNG), b64(PNG), "image/png"))))
+    conv = ctx.extras["conversations"].create("", "auto")
+    ctx.extras["conversations"].update(conv.id, started=True)
+
+    read = asyncio.create_task(
+        conversation_attachment(conv.id, "a", user=None, ctx=ctx)
+        if kind == "image"
+        else conversation_messages(conv.id, user=None, ctx=ctx)
+    )
+    await asyncio.sleep(0)
+    # Deleted after the request looked the conversation up, but before its read reserved it.
+    assert await delete_conversation(conv.id, user=None, ctx=ctx) == {"ok": True}
+    with pytest.raises(HTTPException) as e:
+        await read
+    assert e.value.status_code == 404
+    assert fake.opened == [] and fake.deleted == [conv.id]
 
 
 def test_message_times_come_from_the_session_events(client, ctx):
