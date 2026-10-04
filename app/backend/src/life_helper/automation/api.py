@@ -312,8 +312,11 @@ async def run_now(
     automation_id: str, user: CurrentUser = Depends(require_user), ctx: AppContext = Depends(get_ctx)
 ) -> dict:
     store = _store(ctx)
-    if store.get(automation_id) is None:
+    automation = store.get(automation_id)
+    if automation is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "automation not found")
+    # The screen's list can be older than the saved settings (edited elsewhere), so the reply says what runs.
+    accepted = {"name": automation.name, "max_runtime_minutes": automation.max_runtime_minutes}
     busy = any(_run_view(ctx, m).get("status") == RUNNING_STATUS for m in store.list_run_meta(automation_id))
     if busy or automation_id in _requested_ids(store):
         raise HTTPException(status.HTTP_409_CONFLICT, "実行中です。終わってから実行してください")
@@ -328,11 +331,11 @@ async def run_now(
         except JobStartError as e:
             # The request stays: the next scheduled job execution (within 15 minutes) runs it.
             logger.warning("could not start the automation job: %s", e)
-            return {"started": True, "run_id": run_id, "runner": "job", "job_started": False}
-        return {"started": True, "run_id": run_id, "runner": "job", "job_started": True}
+            return {"started": True, "run_id": run_id, "runner": "job", "job_started": False} | accepted
+        return {"started": True, "run_id": run_id, "runner": "job", "job_started": True} | accepted
     # Local development: run in this process.
     runner: AutomationRunner = ctx.extras.setdefault("automation_runner", AutomationRunner(ctx, store))
     task = asyncio.create_task(runner.run(automation_id, run_id=run_id))
     ctx.extras.setdefault("automation_tasks", set()).add(task)
     task.add_done_callback(ctx.extras["automation_tasks"].discard)
-    return {"started": True, "run_id": run_id, "runner": "app"}
+    return {"started": True, "run_id": run_id, "runner": "app"} | accepted

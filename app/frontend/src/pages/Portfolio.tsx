@@ -41,6 +41,14 @@ const MARKET_LABELS: Record<string, string> = { jp: '日本株', us: '米国株'
 const SEARCH_FAILED = '候補を取得できませんでした。時間をおいて探し直すか、コードを指定して紐付けるか、公式サイトの基準価額を手入力してください。'
 
 const amount = (value: number) => value.toLocaleString('ja-JP', { maximumFractionDigits: 2 })
+const percent = new Intl.NumberFormat('ja-JP', {
+  style: 'percent',
+  signDisplay: 'exceptZero',
+  minimumFractionDigits: 1,
+  maximumFractionDigits: 1,
+})
+// 損益の比率（取得額に対する割合、"+20.0%"）。評価額がない・取得額が 0 のときは出さない。
+const gainRate = (gain: number | null, cost: number) => (gain === null || !(cost > 0) ? '' : percent.format(gain / cost))
 // The editor shows the totals it is about to save in full: amount() and yen() round, which would make an added
 // 0.001 口 or 0.1 円 look like no change at all.
 const exact = (value: number) => value.toLocaleString('ja-JP', { maximumSignificantDigits: 17 })
@@ -580,6 +588,8 @@ export function PortfolioPage() {
   const editing = editId ? view.holdings.find((h) => h.id === editId) : undefined
   // 削除や CSV の取り込みで銘柄が入れ替わったときは、選び直してもらう。
   const selected = view.holdings.find((h) => h.id === selectedId)
+  // 価格未登録の銘柄は取得額だけが合計に入るので、そのときの合計の比率は出さない（実際より低く見えてしまう）。
+  const totalRate = view.missing_prices.length > 0 ? '' : gainRate(view.total_gain, view.total_cost)
   return (
     <div className="stack">
       <Disclaimer />
@@ -591,6 +601,7 @@ export function PortfolioPage() {
           <p className="big">{yen(view.total_value)}</p>
           <small>
             取得額 {yen(view.total_cost)} / 損益 {yen(view.total_gain)}
+            {totalRate && `（${totalRate}）`}
           </small>
         </div>
         {Object.entries(view.accounts).map(([key, a]) => (
@@ -688,7 +699,10 @@ export function PortfolioPage() {
                   <td className="num">{h.quantity.toLocaleString('ja-JP')}</td>
                   <td className="num">{yen(h.cost_total)}</td>
                   <td className="num">{yen(h.value)}</td>
-                  <td className={`num ${h.gain !== null && h.gain < 0 ? 'neg' : 'pos'}`}>{yen(h.gain)}</td>
+                  <td className={`num ${h.gain !== null && h.gain < 0 ? 'neg' : 'pos'}`}>
+                    {yen(h.gain)}
+                    <span className="rate">{gainRate(h.gain, h.cost_total)}</span>
+                  </td>
                   <td>
                     <PriceCell holding={h} />
                   </td>
@@ -701,7 +715,7 @@ export function PortfolioPage() {
           </table>
         </div>
         {/* 行ごとにボタンを置くと表が読みにくいので、編集する銘柄はここで選ぶ。 */}
-        <div className="row wrap">
+        <div className="row wrap holding-actions">
           <label className="grow">
             編集する銘柄
             <select value={selected?.id ?? ''} onChange={(e) => selectHolding(e.target.value)}>

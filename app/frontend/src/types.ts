@@ -236,7 +236,15 @@ export type AutomationList = {
 }
 
 // 「今すぐ実行」の応答。runner が job のときはジョブが実行する（job_started が false なら、次の定期確認で実行する）。
-export type RunNowResult = { started: boolean; run_id: string; runner: 'app' | 'job'; job_started?: boolean }
+export type RunNowResult = {
+  started: boolean
+  run_id: string
+  runner: 'app' | 'job'
+  job_started?: boolean
+  // The saved settings the run uses (the list on screen can be older).
+  name?: string
+  max_runtime_minutes?: number
+}
 
 export type RunRecord = {
   id: string

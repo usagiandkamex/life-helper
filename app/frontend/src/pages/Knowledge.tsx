@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError, formatDate, json } from '../api'
 import { Markdown } from '../components/Markdown'
+import { SelectAllButton } from '../components/SelectAllButton'
+import { draftStore } from '../drafts'
 import type { FileEntry } from '../types'
 
 const GROUP_LABELS: Record<string, string> = {
@@ -19,21 +21,73 @@ const FILE_ERROR_STATUSES = [400, 413]
 const summarize = (items: string[], limit = 3): string =>
   items.length > limit ? `${items.slice(0, limit).join('、')} ほか ${items.length - limit} 件` : items.join('、')
 
+// 保存していない編集（ファイルのパスごと）。ほかのファイルを開いたり、画面を移ったりしても戻せるように残す。
+// base は編集を始めたときのファイルの内容で、戻すときにファイルがその後で変わったかを確かめる。
+const fileDrafts = draftStore<{ base: string; content: string }>()
+// 画面を離れたときに編集していたファイル。戻ったら開き直す。
+const openFileKey = draftStore<string>()
+
 export function KnowledgePage() {
   const [files, setFiles] = useState<FileEntry[]>([])
   const [selected, setSelected] = useState<string | null>(null)
   const [content, setContent] = useState('')
+  // 開いたときのファイルの内容（編集を破棄したらここへ戻す）。
+  const [base, setBase] = useState('')
   const [writable, setWritable] = useState(false)
   const [editing, setEditing] = useState(false)
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
   const [uploading, setUploading] = useState<{ current: number; total: number } | null>(null)
   const [listOpen, setListOpen] = useState(true)
+  const editorRef = useRef<HTMLTextAreaElement>(null)
+  const latestRef = useRef({ selected, content, base, editing })
+  useLayoutEffect(() => {
+    latestRef.current = { selected, content, base, editing }
+  })
+
+  // 開いているファイルの編集が変わっていれば残し、変わっていなければ前に残したものも消す。残したかどうかを返す。
+  const keepEdit = useCallback(() => {
+    const { selected, content, base, editing } = latestRef.current
+    if (!selected) return false
+    const changed = editing && content !== base
+    if (changed) fileDrafts.set(selected, { base, content })
+    else fileDrafts.delete(selected)
+    return changed
+  }, [])
+
+  const open = useCallback(
+    async (path: string) => {
+      setError('')
+      setMessage('')
+      const data = await api<{ content: string; writable: boolean }>(`/api/files/content?path=${encodeURIComponent(path)}`)
+      keepEdit()
+      const kept = data.writable ? fileDrafts.get(path) : undefined
+      setSelected(path)
+      setBase(data.content)
+      setContent(kept?.content ?? data.content)
+      setWritable(data.writable)
+      setEditing(kept !== undefined)
+      if (kept)
+        setMessage(
+          kept.base === data.content
+            ? '保存していない編集を戻しました（「編集をやめる」で破棄できます）。'
+            : '保存していない編集を戻しました。編集を始めたあとでファイルが変わっています（保存すると、その変更を上書きします）。',
+        )
+    },
+    [keepEdit],
+  )
 
   const load = useCallback(async () => setFiles(await api<FileEntry[]>('/api/files')), [])
   useEffect(() => {
     load().catch((e) => setError(e.message))
-  }, [load])
+    // 編集の途中で画面を移っていたら、そのファイルを開き直して編集を戻す。
+    const path = openFileKey.get('')
+    if (path) open(path).catch((e) => setError(e.message))
+    return () => {
+      if (keepEdit()) openFileKey.set('', latestRef.current.selected as string)
+      else openFileKey.delete('')
+    }
+  }, [load, open, keepEdit])
 
   const groups = useMemo(() => {
     const out: Record<string, FileEntry[]> = {}
@@ -44,20 +98,12 @@ export function KnowledgePage() {
     return out
   }, [files])
 
-  const open = async (path: string) => {
-    setError('')
-    setMessage('')
-    const data = await api<{ content: string; writable: boolean }>(`/api/files/content?path=${encodeURIComponent(path)}`)
-    setSelected(path)
-    setContent(data.content)
-    setWritable(data.writable)
-    setEditing(false)
-  }
-
   const save = async () => {
     if (!selected) return
     try {
       await api('/api/files/content', { method: 'PUT', body: json({ path: selected, content }) })
+      fileDrafts.delete(selected)
+      setBase(content)
       setEditing(false)
       setMessage('保存しました')
       await load()
@@ -69,9 +115,19 @@ export function KnowledgePage() {
   const remove = async () => {
     if (!selected || !window.confirm(`${selected} を削除しますか？`)) return
     await api(`/api/files?path=${encodeURIComponent(selected)}`, { method: 'DELETE' })
+    fileDrafts.delete(selected)
     setSelected(null)
     setContent('')
+    setEditing(false)
     await load()
+  }
+
+  const stopEditing = () => {
+    if (content !== base && !window.confirm('保存していない編集を破棄しますか？')) return
+    if (selected) fileDrafts.delete(selected)
+    setContent(base)
+    setEditing(false)
+    setMessage('')
   }
 
   const newNote = async () => {
@@ -219,7 +275,7 @@ export function KnowledgePage() {
         )}
         {selected && (
           <>
-            <div className="row">
+            <div className="row wrap">
               <h2 className="grow">{selected}</h2>
               {writable && !editing && (
                 <button className="button small" onClick={() => setEditing(true)}>
@@ -227,9 +283,15 @@ export function KnowledgePage() {
                 </button>
               )}
               {writable && editing && (
-                <button className="button small primary" onClick={save}>
-                  保存
-                </button>
+                <>
+                  <button className="button small primary" onClick={save}>
+                    保存
+                  </button>
+                  <button className="button small" onClick={stopEditing}>
+                    編集をやめる
+                  </button>
+                  <SelectAllButton target={editorRef} />
+                </>
               )}
               {writable && (
                 <button className="button small danger" onClick={remove}>
@@ -238,7 +300,7 @@ export function KnowledgePage() {
               )}
             </div>
             {editing ? (
-              <textarea className="editor" value={content} onChange={(e) => setContent(e.target.value)} />
+              <textarea ref={editorRef} className="editor" value={content} onChange={(e) => setContent(e.target.value)} aria-label={`${selected} の内容`} />
             ) : selected.endsWith('.md') ? (
               <Markdown text={content} />
             ) : (

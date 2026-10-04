@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { api, ApiError, onAuthError, setCsrfToken } from './api'
+import { clearDrafts } from './drafts'
 import type { Me } from './types'
 import { AutomationsPage } from './pages/Automations'
 import { ChatPage } from './pages/Chat'
@@ -68,6 +69,7 @@ export default function App() {
   const location = useLocation()
   // Pages report the count after marking runs read; a poll that started before that must not undo it.
   const unreadVersion = useRef(0)
+  const loggedOut = useRef(false)
   const updateUnread = useCallback((n: number) => {
     unreadVersion.current += 1
     setUnread(n)
@@ -110,6 +112,14 @@ export default function App() {
     return () => window.clearInterval(timer)
   }, [me])
 
+  // Signing out drops what was being written. After the pages have closed, which keep their drafts as they close; an
+  // expired session keeps them, so that they are still there after signing in again.
+  useEffect(() => {
+    if (me?.authenticated !== false || !loggedOut.current) return
+    loggedOut.current = false
+    clearDrafts()
+  }, [me])
+
   // Browser back/forward also leaves the drawer behind, and on a wide screen the tabs are back.
   useEffect(() => setNavOpen(false), [location])
   useEffect(() => {
@@ -139,6 +149,7 @@ export default function App() {
 
   const logout = async () => {
     await api('/auth/logout', { method: 'POST' })
+    loggedOut.current = true
     setMe({ authenticated: false })
   }
 
