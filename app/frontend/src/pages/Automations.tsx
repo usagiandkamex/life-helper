@@ -44,13 +44,30 @@ const editorKey = (d: Draft) => d.id ?? ''
 
 const isIntIn = (v: number, min: number, max: number) => Number.isInteger(v) && v >= min && v <= max
 
+const parseNumber = (text: string) => (text.trim() === '' ? NaN : Number(text))
+
 // 数値の入力欄。消して打ち直している間は空欄のままにする（0 で埋めない）。空欄は NaN で持ち、保存前に止める。
+// 打ちかけの文字（「-」「1.」など）は、数にすると消えてしまうので、打った文字のまま見せる。
 function NumberInput({
   value,
   onValueChange,
   ...rest
 }: Omit<InputHTMLAttributes<HTMLInputElement>, 'type' | 'value' | 'onChange'> & { value: number; onValueChange: (v: number) => void }) {
-  return <input type="number" {...rest} value={Number.isNaN(value) ? '' : value} onChange={(e) => onValueChange(e.currentTarget.valueAsNumber)} />
+  const [text, setText] = useState('')
+  // 外から値が変わったとき（別の編集を開いたなど）は、その値を見せる。
+  const shown = Object.is(parseNumber(text), value) ? text : Number.isNaN(value) ? '' : String(value)
+  return (
+    <input
+      type="number"
+      {...rest}
+      value={shown}
+      onChange={(e) => {
+        const next = e.currentTarget.value
+        setText(next)
+        onValueChange(parseNumber(next))
+      }}
+    />
+  )
 }
 
 function describe(s: Schedule): string {

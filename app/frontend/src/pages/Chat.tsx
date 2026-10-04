@@ -54,6 +54,8 @@ let lastOpened: { kind: 'chat' | 'automation'; id: string } | null = null
 // model null: the model the conversation last answered with (or the default). NEW_CONVERSATION: one not created yet.
 type Composer = { input: string; attachments: PendingAttachment[]; model: string | null }
 const NEW_CONVERSATION = ''
+// Files being read for a composer (key as in composerKeyRef), held against its limits until they are attached.
+type PendingRead = { key: string | null; count: number; bytes: number }
 const EMPTY_COMPOSER: Composer = { input: '', attachments: [], model: null }
 const composers = draftStore<Composer>()
 
@@ -141,9 +143,10 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   const [items, setItems] = useState<Item[]>([])
   const [input, setInput] = useState(() => composers.get(NEW_CONVERSATION)?.input ?? '')
   const [attachments, setAttachments] = useState(() => composers.get(NEW_CONVERSATION)?.attachments ?? [])
-  // Files still being read: counted against the limits, and sending waits for them.
+  // Files still being read, by the composer they were added in: counted against its limits, and sending from it waits
+  // for them. `reading` is the number of reads for the composer on screen.
   const [reading, setReading] = useState(0)
-  const readingRef = useRef({ count: 0, bytes: 0 })
+  const pendingReadsRef = useRef(new Map<symbol, PendingRead>())
   const [sending, setSending] = useState(false)
   const [models, setModels] = useState<{ id: string; name: string }[]>([])
   // Chosen in this composer; null until a model is picked here.
@@ -211,6 +214,19 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
     composerRef.current = { input, attachments, model }
   })
 
+  const pendingReadsFor = (key: string | null) => [...pendingReadsRef.current.values()].filter((r) => r.key === key)
+  const showReading = useCallback(() => {
+    setReading([...pendingReadsRef.current.values()].filter((r) => r.key === composerKeyRef.current).length)
+  }, [])
+
+  // The composer of a new conversation goes into the conversation just made, with the files still being read for it.
+  const moveNewComposer = (id: string) => {
+    composers.delete(NEW_CONVERSATION)
+    composerKeyRef.current = id
+    const reads = pendingReadsRef.current
+    for (const [token, r] of reads) if (r.key === NEW_CONVERSATION) reads.set(token, { ...r, key: id })
+  }
+
   const keepShownComposer = useCallback(() => {
     if (composerKeyRef.current !== null) keepComposer(composerKeyRef.current, composerRef.current)
   }, [])
@@ -225,8 +241,9 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
       setInput(next.input)
       setAttachments(next.attachments)
       setModel(next.model)
+      showReading()
     },
-    [keepShownComposer],
+    [keepShownComposer, showReading],
   )
 
   // For a request that ends after another conversation was opened: it changes the composer it was started from.
@@ -658,10 +675,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
     await loadConversations()
     if (generationRef.current !== generation) return // something else was opened while it was being created
     // What was being written for a new conversation goes into the one just made.
-    if (composerKeyRef.current === NEW_CONVERSATION) {
-      composers.delete(NEW_CONVERSATION)
-      composerKeyRef.current = conv.id
-    }
+    if (composerKeyRef.current === NEW_CONVERSATION) moveNewComposer(conv.id)
     await openConversation(conv.id)
   }
 
@@ -670,9 +684,9 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
     const generation = generationRef.current
     const key = composerKeyRef.current
     const problems: string[] = []
-    const pending = readingRef.current
-    let count = attachments.length + pending.count
-    let bytes = attachments.reduce((sum, a) => sum + a.size, 0) + pending.bytes
+    const pending = pendingReadsFor(key)
+    let count = attachments.length + pending.reduce((sum, r) => sum + r.count, 0)
+    let bytes = attachments.reduce((sum, a) => sum + a.size, 0) + pending.reduce((sum, r) => sum + r.bytes, 0)
     const accepted = files.filter((f) => {
       const name = f.name || '貼り付けたデータ'
       const allowed = IMAGE_TYPES.includes(f.type) || FILE_SUFFIXES.some((s) => f.name.toLowerCase().endsWith(s))
@@ -689,20 +703,20 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
     })
     if (problems.length) setError([...new Set(problems)].join(' / '))
     if (accepted.length === 0) return
-    const reserved = { count: accepted.length, bytes: accepted.reduce((sum, f) => sum + f.size, 0) }
-    pending.count += reserved.count
-    pending.bytes += reserved.bytes
-    setReading((n) => n + 1)
+    const token = Symbol()
+    pendingReadsRef.current.set(token, { key, count: accepted.length, bytes: accepted.reduce((sum, f) => sum + f.size, 0) })
+    showReading()
     try {
       const read = await Promise.all(accepted.map(readAttachment))
-      // Switched to another conversation while reading: the files belong to the one they were added in.
-      if (key !== null) updateComposer(key, { attachments: (cur) => [...cur, ...read] })
+      // Switched to another conversation while reading: the files belong to the one they were added in (or, for a new
+      // conversation, the one it has become since).
+      const target = pendingReadsRef.current.get(token)?.key ?? null
+      if (target !== null) updateComposer(target, { attachments: (cur) => [...cur, ...read] })
     } catch (e) {
       if (generationRef.current === generation) setError((e as Error).message)
     } finally {
-      pending.count -= reserved.count
-      pending.bytes -= reserved.bytes
-      setReading((n) => n - 1)
+      pendingReadsRef.current.delete(token)
+      showReading()
     }
   }
 
@@ -733,8 +747,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
         id = conv.id
         selectConversation(id)
         // The composer goes with what is being sent into the conversation just made.
-        composers.delete(NEW_CONVERSATION)
-        composerKeyRef.current = id
+        moveNewComposer(id)
         generation = generationRef.current
       }
       try {
