@@ -49,10 +49,12 @@ class JobStarter:
 
     @property
     def configured(self) -> bool:
-        return bool(self.job_id and self.identity_endpoint and self.identity_header)
+        return bool(self.job_id)
 
     async def start(self) -> None:
         """Starts one execution of the job; raises JobStartError when Azure does not accept it."""
+        if not (self.identity_endpoint and self.identity_header):
+            raise JobStartError("the managed identity endpoint is not available")
         try:
             async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS, transport=self.transport) as client:
                 token = await self._access_token(client)
@@ -89,7 +91,7 @@ class JobStarter:
 
 
 def job_starter(ctx: AppContext) -> JobStarter:
-    """The app's job starter (configured only on Azure: the job's resource ID and the managed identity endpoint)."""
+    """The app's job starter (configured only on Azure, where the job's resource ID is set)."""
     starter = ctx.extras.get("job_starter")
     if starter is None:
         s = ctx.settings

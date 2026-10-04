@@ -2015,7 +2015,26 @@ async def test_the_job_starter_reuses_its_token():
         await starter.start()
     assert token.call_count == 1 and start.call_count == 2
     assert "client_id" not in token.calls.last.request.url.params  # the system identity when none is given
-    assert not JobStarter(JOB_ID).configured  # outside Azure there is no identity endpoint
+    assert not JobStarter("").configured  # local development: no job
+
+
+def test_run_now_leaves_the_request_to_the_job_when_the_managed_identity_is_missing(
+    client, ctx, settings, monkeypatch, caplog
+):
+    csrf = sign_in(client, ctx)
+    settings.automation_job_id = JOB_ID
+    monkeypatch.delenv("IDENTITY_ENDPOINT", raising=False)
+    monkeypatch.delenv("IDENTITY_HEADER", raising=False)
+    automation = ctx.automations.upsert(Automation(name="定期チェック", prompt="確認して"))
+
+    response = client.post(f"/api/automations/{automation.id}/run", headers={"x-csrf-token": csrf})
+
+    # With a job, the run never falls back to the app (which scales in to zero and would stop it).
+    run_id = response.json()["run_id"]
+    assert response.json() == {"started": True, "run_id": run_id, "runner": "job", "job_started": False}
+    assert "automation_runner" not in ctx.extras
+    assert [r["run_id"] for r in ctx.automations.run_requests()] == [run_id]
+    assert "managed identity endpoint is not available" in caplog.text
 
 
 def test_run_now_refuses_an_automation_that_is_running(client, ctx):
