@@ -349,7 +349,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
       // 本番では、アプリが使われないと止まるため、実行はジョブに任せる。ジョブの起動には数分かかることがある。
       const inJob = startedRun.runner === 'job'
       if (inJob && !startedRun.job_started) {
-        setMessage(`「${name}」の実行を受け付けました。実行用のジョブをすぐに起動できなかったため、次の定期確認（15 分以内）で実行します。始まると実行履歴に出ます。`)
+        setMessage(`「${name}」の実行を受け付けました。実行用のジョブをすぐに起動できなかったため、次の定期確認（15 分以内）で実行します。始まると実行履歴に出ます。${limit}`)
         await load()
         return
       }

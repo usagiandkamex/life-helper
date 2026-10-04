@@ -658,7 +658,10 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
     await loadConversations()
     if (generationRef.current !== generation) return // something else was opened while it was being created
     // What was being written for a new conversation goes into the one just made.
-    if (composerKeyRef.current === NEW_CONVERSATION) composerKeyRef.current = conv.id
+    if (composerKeyRef.current === NEW_CONVERSATION) {
+      composers.delete(NEW_CONVERSATION)
+      composerKeyRef.current = conv.id
+    }
     await openConversation(conv.id)
   }
 
@@ -730,6 +733,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
         id = conv.id
         selectConversation(id)
         // The composer goes with what is being sent into the conversation just made.
+        composers.delete(NEW_CONVERSATION)
         composerKeyRef.current = id
         generation = generationRef.current
       }
