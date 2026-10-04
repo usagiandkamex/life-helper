@@ -11,11 +11,13 @@ from pathlib import Path
 
 
 class FileLock:
-    def __init__(self, path: Path, ttl_seconds: int) -> None:
+    def __init__(self, path: Path, ttl_seconds: int, data: dict | None = None) -> None:
         self.path = path
         self.ttl = ttl_seconds
         self.token = uuid.uuid4().hex
         self.acquired = False
+        # Extra fields written into the lock file (for locks that also carry a small payload).
+        self.data = data or {}
 
     def _write_new(self) -> bool:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -24,7 +26,8 @@ class FileLock:
         except FileExistsError:
             return False
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump({"token": self.token, "host": socket.gethostname(), "expires_at": time.time() + self.ttl}, f)
+            lock = {"token": self.token, "host": socket.gethostname(), "expires_at": time.time() + self.ttl}
+            json.dump(self.data | lock, f)
         return True
 
     def _expired(self) -> bool:

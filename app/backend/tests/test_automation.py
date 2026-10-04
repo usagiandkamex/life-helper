@@ -507,13 +507,15 @@ async def test_progress_is_kept_when_the_run_is_cut_off(auto_env, monkeypatch):
     assert stored["status"] == "running" and stored["final_message"] == "途中まで"
     assert stored["events"][-1] == {"type": "message", "content": "途中まで", "partial": True}
 
-    # Stopped from outside (the app shutting down): no result is written, but the progress stays in the record.
+    # Stopped from outside (the app shutting down): saved as interrupted, with the reason and the progress so far.
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
     stored = ctx.automations.get_run(a.id, "abcdef0123456789")
-    assert stored["status"] == "running" and stored["final_message"] == "途中まで"
-    assert stored["summary"] == "途中まで" and "finished_at" not in stored
+    assert stored["status"] == "interrupted" and stored["final_message"] == "途中まで"
+    assert stored["summary"] == "途中まで" and stored["error"] == runner_module.APP_STOPPED_MESSAGE
+    assert stored["finished_at"] and stored["events"][-1]["partial"] is True
+    assert ctx.automations.get(a.id).state.last_status == "interrupted"
 
 
 async def test_progress_leaves_out_an_unfinished_follow_up(auto_env, monkeypatch):
@@ -554,7 +556,7 @@ async def test_progress_leaves_out_an_unfinished_follow_up(auto_env, monkeypatch
         await task
     # Interrupted during the follow-up: the finished main answer is shown, never the follow-up's text.
     stored = ctx.automations.get_run(a.id, "abcdef0123456789")
-    assert stored["status"] == "running"
+    assert stored["status"] == "interrupted"
     assert stored["final_message"] == stored["summary"] == "空室を確認しました"
     assert [e["type"] for e in stored["events"]] == ["message", "follow_up"]
     assert not any(e.get("partial") for e in stored["events"])
@@ -600,10 +602,13 @@ async def test_progress_is_kept_when_cut_off_while_notifying(auto_env, monkeypat
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    # The answer was finished before the notification, so it stays even though the result is never written.
+    # The result was decided before the notification, so it is saved as it is (only the notification is missing).
     stored = ctx.automations.get_run(a.id, "abcdef0123456789")
-    assert stored["status"] == "running" and stored["final_message"] == "空室を確認しました"
+    assert stored["status"] == "success" and stored["final_message"] == "空室を確認しました"
     assert stored["report"] == {"summary": "要約", "notify": False} and stored["summary"] == "要約"
+    assert stored["finished_at"] and stored["notified"] is False
+    # The baseline for "only on change" is left alone, so a missed notification is not lost.
+    assert ctx.automations.get(a.id).state.last_condition_met is None
 
 
 async def test_failure_reason_is_kept_when_cut_off_while_notifying(auto_env, monkeypatch):
@@ -624,7 +629,8 @@ async def test_failure_reason_is_kept_when_cut_off_while_notifying(auto_env, mon
         await task
 
     stored = ctx.automations.get_run(a.id, "abcdef0123456789")
-    assert stored["status"] == "running" and "20 分" in stored["error"] and "20 分" in stored["summary"]
+    assert stored["status"] == "timeout" and "20 分" in stored["error"] and "20 分" in stored["summary"]
+    assert stored["finished_at"]
 
 
 async def test_retry_clears_the_progress_of_the_failed_attempt(auto_env, monkeypatch):
@@ -665,7 +671,8 @@ async def test_retry_clears_the_progress_of_the_failed_attempt(auto_env, monkeyp
 
     # Only the attempt that was running is kept; the failed attempt's text is not shown as the result.
     stored = ctx.automations.get_run(a.id, "abcdef0123456789")
-    assert stored["status"] == "running" and stored["final_message"] == "" and stored["events"] == []
+    assert stored["status"] == "interrupted" and stored["final_message"] == "" and stored["events"] == []
+    assert stored["summary"] == stored["error"] == runner_module.APP_STOPPED_MESSAGE
 
 
 @respx.mock
@@ -727,9 +734,10 @@ async def test_run_due_records_real_start_time_but_shares_now(auto_env, monkeypa
 
     assert [r["status"] for r in results] == ["success", "success"]
     # Each record keeps its own real start time; a shared `now` would make them identical (both == scheduled).
+    # (A's start, its last progress and its finish come first.)
     assert {r["started_at"] for r in results} == {
         datetime(2026, 1, 1, 15, 1, 1, tzinfo=UTC).isoformat(),
-        datetime(2026, 1, 1, 15, 1, 3, tzinfo=UTC).isoformat(),
+        datetime(2026, 1, 1, 15, 1, 4, tzinfo=UTC).isoformat(),
     }
     # Prompt expansion (both the stored prompt and the sent prompt) uses the shared scheduled `now`, not the clock.
     assert all("2026-01-01" in p and "2026-01-02" not in p for p in manager.prompts)
@@ -1531,7 +1539,7 @@ def test_run_now_returns_the_id_reserved_for_its_task(client, ctx):
 
     assert response.status_code == 200
     run_id = response.json()["run_id"]
-    assert response.json() == {"started": True, "run_id": run_id}
+    assert response.json() == {"started": True, "run_id": run_id, "runner": "app"}
     assert len(run_id) == 16
     runner.run.assert_called_once_with(automation.id, run_id=run_id)
 

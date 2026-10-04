@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Annotated, Literal
@@ -15,6 +16,7 @@ from ..connectors.registry import get_connectors
 from ..context import AppContext, get_ctx
 from ..security import SENSITIVE_LABELS, detect_sensitive
 from . import chat
+from .dispatch import JobStartError, job_starter
 from .models import (
     DEFAULT_RUNTIME_MINUTES,
     MAX_RUNTIME_MINUTES,
@@ -25,13 +27,15 @@ from .models import (
     normalize_connectors,
 )
 from .runner import AutomationRunner, build_notifier
-from .store import RUNNING_STATUS, AutomationStore, parse_timestamp
+from .store import INTERRUPTED_STATUS, RUNNING_STATUS, AutomationStore, parse_timestamp
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/automations")
 
-# A run that is still recorded as running after its lock could have expired was left behind by an app or job that
-# stopped, so the history shows it as interrupted instead of running for ever.
-INTERRUPTED_STATUS = "interrupted"
+# A run still recorded as running after its lock could have expired, or whose record has not been written for this
+# long (a run in progress writes it every minute, see runner.HEARTBEAT_SECONDS), was left behind by an app or job that
+# stopped without saving anything, so the history shows it as interrupted instead of running for ever.
+HEARTBEAT_STALE_SECONDS = 5 * 60
 # The run list shows only names, times and statuses. The result and transcript are read from the run itself, so the
 # list (up to 50 runs) is answered from the run metadata index without opening the records, however long the results
 # get.
@@ -111,12 +115,20 @@ def _run_view(ctx: AppContext, record: dict) -> dict:
     job process), so both the list and the detail decide the same way, from the same clock."""
     if record.get("status") != RUNNING_STATUS:
         return record
+    now = datetime.now(UTC)
     started = parse_timestamp(record.get("started_at"))
-    if started is None:
-        return record
-    if (datetime.now(UTC) - started).total_seconds() > ctx.settings.automation_lock_ttl_seconds:
+    if started is not None and (now - started).total_seconds() > ctx.settings.automation_lock_ttl_seconds:
+        return record | {"status": INTERRUPTED_STATUS}
+    # Records written before the heartbeat existed have none and are decided by their start alone.
+    heartbeat = parse_timestamp(record.get("heartbeat_at"))
+    if heartbeat is not None and (now - heartbeat).total_seconds() > HEARTBEAT_STALE_SECONDS:
         return record | {"status": INTERRUPTED_STATUS}
     return record
+
+
+def _requested_ids(store: AutomationStore) -> set[str]:
+    """Automations with a 「今すぐ実行」 waiting for the job to start it."""
+    return {r["automation_id"] for r in store.run_requests() if not r["expired"]}
 
 
 @router.get("")
@@ -127,6 +139,7 @@ def list_automations(user: CurrentUser = Depends(require_user), ctx: AppContext 
     # Taken from every run record (the history is capped), so an automation stays marked as running however many
     # newer runs there are; it cannot be started again until then.
     running = {m["automation_id"] for m in metas if _run_view(ctx, m).get("status") == RUNNING_STATUS}
+    running |= _requested_ids(store)
     running &= {a["id"] for a in items}  # the history of a deleted automation is kept
     return {
         "automations": items,
@@ -243,7 +256,8 @@ def list_runs(
         metas = _store(ctx).list_run_meta(automation_id)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
-    return [_run_view(ctx, {k: m[k] for k in RUN_LIST_FIELDS if k in m}) for m in metas[:RUN_LIST_LIMIT]]
+    views = (_run_view(ctx, m) for m in metas[:RUN_LIST_LIMIT])
+    return [{k: v[k] for k in RUN_LIST_FIELDS if k in v} for v in views]
 
 
 @router.get("/{automation_id}/runs/{run_id}")
@@ -297,11 +311,28 @@ def delete_run(
 async def run_now(
     automation_id: str, user: CurrentUser = Depends(require_user), ctx: AppContext = Depends(get_ctx)
 ) -> dict:
-    if _store(ctx).get(automation_id) is None:
+    store = _store(ctx)
+    if store.get(automation_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "automation not found")
-    runner: AutomationRunner = ctx.extras.setdefault("automation_runner", AutomationRunner(ctx, _store(ctx)))
+    busy = any(_run_view(ctx, m).get("status") == RUNNING_STATUS for m in store.list_run_meta(automation_id))
+    if busy or automation_id in _requested_ids(store):
+        raise HTTPException(status.HTTP_409_CONFLICT, "実行中です。終わってから実行してください")
     run_id = uuid.uuid4().hex[:16]
+    starter = job_starter(ctx)
+    if starter.configured:
+        # Run in the job: the web app scales in to zero (and would stop the run) once nobody uses it for a while.
+        if not store.add_run_request(automation_id, run_id):
+            raise HTTPException(status.HTTP_409_CONFLICT, "実行中です。終わってから実行してください")
+        try:
+            await starter.start()
+        except JobStartError as e:
+            # The request stays: the next scheduled job execution (within 15 minutes) runs it.
+            logger.warning("could not start the automation job: %s", e)
+            return {"started": True, "run_id": run_id, "runner": "job", "job_started": False}
+        return {"started": True, "run_id": run_id, "runner": "job", "job_started": True}
+    # Local development: run in this process.
+    runner: AutomationRunner = ctx.extras.setdefault("automation_runner", AutomationRunner(ctx, store))
     task = asyncio.create_task(runner.run(automation_id, run_id=run_id))
     ctx.extras.setdefault("automation_tasks", set()).add(task)
     task.add_done_callback(ctx.extras["automation_tasks"].discard)
-    return {"started": True, "run_id": run_id}
+    return {"started": True, "run_id": run_id, "runner": "app"}
