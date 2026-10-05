@@ -608,7 +608,9 @@ export function PortfolioPage() {
           <div className="card" key={key}>
             <h3>{a.label}</h3>
             <p className="big">{yen(a.value)}</p>
-            <small>取得額 {yen(a.cost)}</small>
+            <small>
+              取得額 {yen(a.cost)} / 損益 {yen(a.value - a.cost)}
+            </small>
           </div>
         ))}
       </section>

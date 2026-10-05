@@ -405,7 +405,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
       // 画面の一覧は、ほかの画面で保存した設定より古いことがあるので、API が返した保存済みの設定で伝える。
       const name = startedRun.name ?? a.name
       const minutes = startedRun.max_runtime_minutes ?? a.max_runtime_minutes
-      const limit = `実行時間の上限は、「最大実行時間」の設定の ${minutes} 分です（「編集」で 60 分まで変えられます）。`
+      const limit = `実行時間の上限は、「最大実行時間」の設定の ${minutes} 分です。`
       // 本番では、アプリが使われないと止まるため、実行はジョブに任せる。ジョブの起動には数分かかることがある。
       const inJob = startedRun.runner === 'job'
       if (inJob && !startedRun.job_started) {
