@@ -604,13 +604,18 @@ export function PortfolioPage() {
             {totalRate && `（${totalRate}）`}
           </small>
         </div>
-        {Object.entries(view.accounts).map(([key, a]) => (
-          <div className="card" key={key}>
-            <h3>{a.label}</h3>
-            <p className="big">{yen(a.value)}</p>
-            <small>取得額 {yen(a.cost)}</small>
-          </div>
-        ))}
+        {Object.entries(view.accounts).map(([key, a]) => {
+          const hasMissing = view.holdings.some((h) => h.account === key && h.value === null)
+          return (
+            <div className="card" key={key}>
+              <h3>{a.label}</h3>
+              <p className="big">{yen(a.value)}</p>
+              <small>
+                取得額 {yen(a.cost)} / 損益 {hasMissing ? '—' : yen(a.value - a.cost)}
+              </small>
+            </div>
+          )
+        })}
       </section>
       <div className="row wrap">
         <button className="button primary" onClick={calculate} disabled={busy || calculating}>
