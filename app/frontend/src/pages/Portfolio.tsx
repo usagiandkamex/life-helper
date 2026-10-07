@@ -606,12 +606,14 @@ export function PortfolioPage() {
         </div>
         {Object.entries(view.accounts).map(([key, a]) => {
           const hasMissing = view.holdings.some((h) => h.account === key && h.value === null)
+          const accountRate = hasMissing ? '' : gainRate(a.value - a.cost, a.cost)
           return (
             <div className="card" key={key}>
               <h3>{a.label}</h3>
               <p className="big">{yen(a.value)}</p>
               <small>
                 取得額 {yen(a.cost)} / 損益 {hasMissing ? '—' : yen(a.value - a.cost)}
+                {accountRate && `（${accountRate}）`}
               </small>
             </div>
           )
