@@ -26,7 +26,7 @@ def normalize_connectors(names: list[str]) -> list[str]:
 
 
 class Schedule(BaseModel):
-    kind: Literal["daily", "weekly", "monthly", "yearly", "cron"] = "daily"
+    kind: Literal["manual", "daily", "weekly", "monthly", "yearly", "cron"] = "daily"
     time: str = Field(default="09:00", description="HH:MM（日本時間）")
     weekday: int = Field(default=0, ge=0, le=6, description="0=月曜 … 6=日曜")
     day: int = Field(default=1, ge=1, le=31)
@@ -49,6 +49,8 @@ class Schedule(BaseModel):
         return self
 
     def cron_expression(self) -> str:
+        if self.kind == "manual":
+            return ""
         hour, minute = (int(x) for x in self.time.split(":"))
         match self.kind:
             case "daily":
@@ -62,11 +64,15 @@ class Schedule(BaseModel):
                 return f"{minute} {hour} {self.day} {self.month} *"
         return self.cron
 
-    def next_after(self, moment: datetime) -> datetime:
+    def next_after(self, moment: datetime) -> datetime | None:
+        if self.kind == "manual":
+            return None
         base = moment.astimezone(JST)
         return croniter(self.cron_expression(), base).get_next(datetime).astimezone(UTC)
 
     def occurrences_within(self, start: datetime, days: int) -> int:
+        if self.kind == "manual":
+            return 0
         end = start + timedelta(days=days)
         it = croniter(self.cron_expression(), start.astimezone(JST))
         count = 0
@@ -133,12 +139,13 @@ class Automation(BaseModel):
         return normalize_connectors(v)
 
     def is_due(self, now: datetime) -> bool:
-        if not self.enabled or not self.state.next_run_at:
+        if not self.enabled or self.schedule.kind == "manual" or not self.state.next_run_at:
             return False
         return datetime.fromisoformat(self.state.next_run_at) <= now
 
     def schedule_next(self, now: datetime) -> None:
-        self.state.next_run_at = self.schedule.next_after(now).isoformat()
+        next_run = self.schedule.next_after(now)
+        self.state.next_run_at = next_run.isoformat() if next_run else None
 
 
 WEEKDAYS = "月火水木金土日"

@@ -76,6 +76,8 @@ function NumberInput({
 
 function describe(s: Schedule): string {
   switch (s.kind) {
+    case 'manual':
+      return '手動実行のみ'
     case 'daily':
       return `毎日 ${s.time}`
     case 'weekly':
@@ -503,7 +505,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
                   </td>
                   <td>{a.name}</td>
                   <td>{describe(a.schedule)}</td>
-                  <td>{a.enabled ? formatDate(a.state.next_run_at) : '停止中'}</td>
+                  <td>{!a.enabled ? '停止中' : a.schedule.kind === 'manual' ? '—' : formatDate(a.state.next_run_at)}</td>
                   <td>{a.state.last_status ? STATUS_LABELS[a.state.last_status] ?? a.state.last_status : '—'}</td>
                   <td>{a.notify.github ? 'GitHub' : 'アプリ内のみ'}</td>
                   <td className="actions">
@@ -699,6 +701,7 @@ function Editor({
           <label>
             周期
             <select value={s.kind} onChange={(e) => setSchedule({ kind: e.target.value as Schedule['kind'] })}>
+              <option value="manual">手動実行のみ</option>
               <option value="daily">毎日</option>
               <option value="weekly">毎週</option>
               <option value="monthly">毎月</option>
@@ -730,7 +733,9 @@ function Editor({
               <NumberInput min={1} max={31} value={s.day} onValueChange={(day) => setSchedule({ day })} />
             </label>
           )}
-          {s.kind === 'cron' ? (
+          {s.kind === 'manual' ? (
+            <span className="hint">定期実行せず、「今すぐ実行」で実行します。</span>
+          ) : s.kind === 'cron' ? (
             <label>
               cron（分 時 日 月 曜日・日本時間）
               <input value={s.cron} onChange={(e) => setSchedule({ cron: e.target.value })} placeholder="0 9 * * 1-5" />

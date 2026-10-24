@@ -189,7 +189,7 @@ export type PortfolioView = {
 }
 
 export type Schedule = {
-  kind: 'daily' | 'weekly' | 'monthly' | 'yearly' | 'cron'
+  kind: 'manual' | 'daily' | 'weekly' | 'monthly' | 'yearly' | 'cron'
   time: string
   weekday: number
   day: number
