@@ -377,6 +377,29 @@ def test_system_message_contains_kb_profile_and_rules(kb):
     assert "task" in auto_research and "researcher" in auto_research and "report_result" in auto_research
 
 
+@pytest.mark.parametrize("automation", [False, True])
+@pytest.mark.parametrize("browser", [False, True])
+@pytest.mark.parametrize("subagents", [False, True])
+def test_web_research_rules_prefer_api_and_get_and_balance_product_sources(kb, automation, browser, subagents):
+    msg = build_system_message(kb, automation=automation, browser=browser, subagents=subagents)
+    assert "まず利用可能な API コネクタ" in msg and "`web_fetch`（HTTP GET）" in msg
+    assert "API を直接呼ばない" in msg and "未設定の API" in msg
+    assert "ブラウザ（Playwright）は最終手段" in msg
+    assert "別の公開ページ・公式資料" in msg and "同じ取得を繰り返さない" in msg
+    assert "購入先を限定していない" in msg and "Amazon・楽天・メーカー公式サイトを満遍なく" in msg
+    assert "search_rakuten_items" in msg and "使えなければ公開ページ" in msg
+    assert "型番・容量・個数" in msg and "価格・送料・在庫・確認日時・出典 URL" in msg
+    assert "理由を添えて未確認" in msg and "取扱なし" in msg
+    assert "検索結果の抜粋だけで価格・在庫などを確定しない" in msg
+    assert "ログイン・CAPTCHA・アクセス制限を回避しない" in msg
+    assert "それでも本文が取れないページは" not in msg
+    assert ("browser_open" in msg) is browser
+    if browser:
+        assert "最終手段としてだけ" in msg and "不足分だけ" in msg
+        assert "最初から開かない" in msg
+    assert ("委任せず自分で行い" in msg) is subagents
+
+
 def test_research_agent_is_read_only(kb):
     from life_helper.copilot_integration.agents import RESEARCH_AGENT_TOOLS, build_research_agent
 
@@ -392,6 +415,20 @@ def test_research_agent_is_read_only(kb):
     assert "外部の信頼できないデータ" in agent["prompt"]
     # Its only way to the internet is web_fetch, so it is told how to read past a cut-off result (issue #65).
     assert "max_length" in agent["prompt"] and "start_index" in agent["prompt"]
+
+
+def test_research_agent_balances_sources_with_only_available_read_tools(kb):
+    from life_helper.copilot_integration.agents import build_research_agent
+
+    prompt = build_research_agent(kb.resolve().as_posix())["prompt"]
+    assert "`web_fetch`（HTTP GET）" in prompt and "別の公開資料" in prompt
+    assert "Amazon・楽天・メーカー公式サイト" in prompt and "偏りなく" in prompt
+    assert "特定のサイトだけを任された場合はその範囲を守り" in prompt
+    assert "型番・容量・個数" in prompt
+    assert "価格・送料・在庫・確認日時・出典 URL" in prompt
+    assert "試した取得方法と理由" in prompt and "確認できなかったこと" in prompt
+    assert "ログイン・CAPTCHA・アクセス制限を回避" in prompt
+    assert "search_rakuten_items" not in prompt and "browser_open" not in prompt
 
 
 def test_chat_sessions_require_approval_but_automations_do_not(ctx):
