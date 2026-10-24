@@ -379,8 +379,9 @@ def test_system_message_contains_kb_profile_and_rules(kb):
 
 @pytest.mark.parametrize("automation", [False, True])
 @pytest.mark.parametrize("browser", [False, True])
-def test_web_research_rules_prefer_api_and_get_and_balance_product_sources(kb, automation, browser):
-    msg = build_system_message(kb, automation=automation, browser=browser)
+@pytest.mark.parametrize("subagents", [False, True])
+def test_web_research_rules_prefer_api_and_get_and_balance_product_sources(kb, automation, browser, subagents):
+    msg = build_system_message(kb, automation=automation, browser=browser, subagents=subagents)
     assert "まず利用可能な API コネクタ" in msg and "`web_fetch`（HTTP GET）" in msg
     assert "API を直接呼ばない" in msg and "未設定の API" in msg
     assert "ブラウザ（Playwright）は最終手段" in msg
@@ -396,6 +397,7 @@ def test_web_research_rules_prefer_api_and_get_and_balance_product_sources(kb, a
     if browser:
         assert "最終手段としてだけ" in msg and "不足分だけ" in msg
         assert "最初から開かない" in msg
+    assert ("委任せず自分で行い" in msg) is subagents
 
 
 def test_research_agent_is_read_only(kb):
@@ -422,6 +424,7 @@ def test_research_agent_balances_sources_with_only_available_read_tools(kb):
     assert "`web_fetch`（HTTP GET）" in prompt and "別の公開資料" in prompt
     assert "Amazon・楽天・メーカー公式サイト" in prompt and "偏りなく" in prompt
     assert "特定のサイトだけを任された場合はその範囲を守り" in prompt
+    assert "型番・容量・個数" in prompt
     assert "価格・送料・在庫・確認日時・出典 URL" in prompt
     assert "試した取得方法と理由" in prompt and "確認できなかったこと" in prompt
     assert "ログイン・CAPTCHA・アクセス制限を回避" in prompt
