@@ -158,6 +158,8 @@ class AutomationRunner:
         results = []
         due = []
         for automation in self.store.list():
+            if automation.schedule.kind == "manual":
+                continue
             if automation.enabled and not automation.state.next_run_at:
                 self.store.update_state(automation.id, next_run_at=automation.schedule.next_after(now).isoformat())
                 continue
@@ -226,7 +228,8 @@ class AutomationRunner:
                 return {"automation_id": automation_id, "status": "skipped_not_due"}
             self._runs_started += 1
             # Schedule the next run first so a crash cannot cause a tight retry loop.
-            self.store.update_state(automation.id, next_run_at=automation.schedule.next_after(now).isoformat())
+            automation.schedule_next(now)
+            self.store.update_state(automation.id, next_run_at=automation.state.next_run_at)
             return await self._execute(automation, now, run_id=run_id)
         finally:
             lock.release()

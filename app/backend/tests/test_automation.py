@@ -54,6 +54,19 @@ def test_weekly_monthly_yearly_expressions():
     assert Schedule(kind="daily").occurrences_within(datetime(2026, 1, 1, tzinfo=UTC), 30) == 30
 
 
+def test_manual_schedule_has_no_scheduled_runs():
+    schedule = Schedule(kind="manual")
+    automation = Automation(name="x", prompt="y", schedule=schedule)
+
+    assert schedule.cron_expression() == ""
+    assert schedule.next_after(datetime(2026, 1, 1, tzinfo=UTC)) is None
+    assert schedule.occurrences_within(datetime(2026, 1, 1, tzinfo=UTC), 30) == 0
+    automation.schedule_next(datetime(2026, 1, 1, tzinfo=UTC))
+    assert automation.state.next_run_at is None
+    automation.state.next_run_at = "2026-01-01T00:00:00+00:00"
+    assert not automation.is_due(datetime(2026, 1, 2, tzinfo=UTC))
+
+
 @pytest.mark.parametrize("cron", ["not a cron", "* * * * *", "*/1 * * * *"])
 def test_invalid_or_too_frequent_cron_rejected(cron):
     with pytest.raises(ValidationError):
@@ -717,6 +730,17 @@ async def test_run_due_only_runs_due_automations(auto_env):
     assert datetime.fromisoformat(ctx.automations.get(a.id).state.next_run_at) > next_run
 
 
+async def test_run_due_skips_manual_automations(auto_env):
+    ctx, runner, _ = auto_env
+    automation = ctx.automations.upsert(Automation(name="x", prompt="y", schedule=Schedule(kind="manual")))
+
+    assert await runner.run_due(datetime(2026, 1, 1, tzinfo=UTC)) == []
+    assert ctx.automations.get(automation.id).state.next_run_at is None
+    assert ctx.automations.list_run_meta(automation.id) == []
+    assert (await runner.run(automation.id))["status"] == "success"
+    assert ctx.automations.get(automation.id).state.next_run_at is None
+
+
 async def test_run_due_records_real_start_time_but_shares_now(auto_env, monkeypatch):
     ctx, runner, manager = auto_env
     schedule = Schedule(kind="daily", time="00:00")  # 00:00 JST
@@ -766,6 +790,11 @@ def test_automation_api(client, ctx):
     assert created["notify"]["github"] is True and created["allow_write"] is False
     assert created["estimated_runs_per_month"] == 30 and created["state"]["next_run_at"]
     assert created["max_runtime_minutes"] == 20
+    manual = client.post(
+        "/api/automations", json=dict(body, name="手動チェック", schedule={"kind": "manual"}), headers=h
+    ).json()
+    assert manual["schedule"]["kind"] == "manual"
+    assert manual["estimated_runs_per_month"] == 0 and manual["state"]["next_run_at"] is None
 
     listing = client.get("/api/automations").json()
     assert listing["usage"]["estimated_runs_per_month"] == 30 and listing["github_notify_configured"] is False
@@ -779,8 +808,13 @@ def test_automation_api(client, ctx):
     assert client.post("/api/automations", json=dict(body, max_runtime_minutes=61), headers=h).status_code == 422
     assert client.post("/api/automations", json=dict(body, prompt="口座番号: 1234567"), headers=h).status_code == 422
 
-    updated = client.put(f"/api/automations/{created['id']}", json=dict(body, name="改名"), headers=h).json()
+    updated = client.put(
+        f"/api/automations/{created['id']}",
+        json=dict(body, name="改名", schedule={"kind": "manual"}),
+        headers=h,
+    ).json()
     assert updated["name"] == "改名" and updated["id"] == created["id"]
+    assert updated["state"]["next_run_at"] is None and updated["estimated_runs_per_month"] == 0
     assert client.get("/api/automations/runs").json() == []
     assert client.delete(f"/api/automations/{created['id']}", headers=h).status_code == 200
     assert client.get("/api/automations/x/runs/y").status_code in (400, 404)
@@ -1531,7 +1565,9 @@ def test_automation_list_scans_empty_history_once(client, ctx):
 
 def test_run_now_returns_the_id_reserved_for_its_task(client, ctx):
     csrf = sign_in(client, ctx)
-    automation = ctx.automations.upsert(Automation(name="定期チェック", prompt="確認して", max_runtime_minutes=40))
+    automation = ctx.automations.upsert(
+        Automation(name="手動チェック", prompt="確認して", schedule=Schedule(kind="manual"), max_runtime_minutes=40)
+    )
     # Saved from another screen after this one listed it: the reply tells the settings the run uses (issue #77).
     ctx.automations.upsert(automation.model_copy(update={"name": "家探し", "max_runtime_minutes": 60}))
     runner = SimpleNamespace(
