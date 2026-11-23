@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { api, ApiError, onAuthError, setCsrfToken } from './api'
+import { LoadingIndicator } from './components/LoadingIndicator'
 import { clearDrafts } from './drafts'
 import type { Me } from './types'
 import { AutomationsPage } from './pages/Automations'
@@ -143,7 +144,7 @@ export default function App() {
         </div>
       </div>
     )
-  if (me === null) return <div className="center">読み込み中…</div>
+  if (me === null) return <div className="center"><LoadingIndicator /></div>
   if (!me.authenticated)
     return <LoginPage devLogin={!!me.dev_login} oauthConfigured={me.oauth_configured !== false} onSignedIn={loadMe} />
 

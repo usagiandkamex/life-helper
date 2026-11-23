@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type 
 import { Link, useSearchParams } from 'react-router-dom'
 import { api, ApiError, formatDate, json } from '../api'
 import { hasResult, runAnswer, runStatusText, STATUS_LABELS } from '../automationRuns'
+import { LoadingIndicator } from '../components/LoadingIndicator'
 import { Markdown } from '../components/Markdown'
 import { SelectAllButton } from '../components/SelectAllButton'
 import { draftStore } from '../drafts'
@@ -452,7 +453,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
     }
   }
 
-  if (!list) return <div className="panel">{error || '読み込み中…'}</div>
+  if (!list) return <div className="panel">{error || <LoadingIndicator />}</div>
   const usage = list.usage
   // 同じオートメーションは同時に実行できないので、実行中の記録がある間は「今すぐ実行」を押せないようにする。
   // 実行履歴は新しい 50 件までなので、上限のない一覧側の実行中のオートメーションで決める。

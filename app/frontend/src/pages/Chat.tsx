@@ -12,6 +12,7 @@ import {
 } from '../chatItems'
 import { AttachmentList } from '../components/AttachmentList'
 import { AutomationThreadView } from '../components/AutomationThread'
+import { LoadingIndicator } from '../components/LoadingIndicator'
 import { Disclaimer } from '../components/Markdown'
 import { MessageItem } from '../components/MessageItem'
 import { SelectAllButton } from '../components/SelectAllButton'
@@ -1076,7 +1077,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
                 onAsk={askAbout}
               />
             ) : (
-              !error && <p className="hint">読み込み中…</p>
+              !error && <p className="hint"><LoadingIndicator /></p>
             )
           ) : (
             <>
