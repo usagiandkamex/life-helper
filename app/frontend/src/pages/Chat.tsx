@@ -162,6 +162,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
   const [conversations, setConversations] = useState<Conversation[]>([])
+  const [loadingConversations, setLoadingConversations] = useState(true)
   const [threads, setThreads] = useState<AutomationThread[]>([])
   const [currentId, setCurrentId] = useState<string | null>(null)
   // An automation conversation is read-only and shown instead of a chat conversation, never together with one.
@@ -169,6 +170,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   const [thread, setThread] = useState<AutomationThreadDetail | null>(null)
   const [threadBusy, setThreadBusy] = useState(false)
   const [items, setItems] = useState<Item[]>([])
+  const [loadingHistory, setLoadingHistory] = useState(false)
   const [input, setInput] = useState(() => composers.get(NEW_CONVERSATION)?.input ?? '')
   const [attachments, setAttachments] = useState(() => composers.get(NEW_CONVERSATION)?.attachments ?? [])
   // Files still being read, by the composer they were added in: counted against its limits, and sending from it waits
@@ -317,6 +319,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
     setThreadId(null)
     setThread(null)
     setThreadBusy(false)
+    setLoadingHistory(false)
     setWaiting([])
     setStopping(false)
     nextTurnRef.current = null
@@ -413,6 +416,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
       setDrawer(false)
       setItems([])
       setError('')
+      setLoadingHistory(true)
       try {
         const data = await api<{ messages: HistoryMessage[]; busy: boolean; turn_id?: string; unsent?: UnsentMessage[] }>(
           `/api/conversations/${id}/messages`,
@@ -430,6 +434,8 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
         // A conversation deleted elsewhere must not be opened again every time this page is shown.
         if (e instanceof ApiError && e.status === 404 && lastOpened?.id === id) lastOpened = null
         if (generationRef.current === generation) setError((e as Error).message)
+      } finally {
+        if (generationRef.current === generation && mountedRef.current) setLoadingHistory(false)
       }
     },
     [attach, restoreUnsent, selectConversation, switchComposer],
@@ -535,8 +541,15 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   }
 
   useEffect(() => {
+    let active = true
     mountedRef.current = true
-    loadConversations().catch((e) => setError(e.message))
+    loadConversations()
+      .catch((e) => {
+        if (active) setError(e.message)
+      })
+      .finally(() => {
+        if (active) setLoadingConversations(false)
+      })
     api<{ default: string; models: { id: string; name: string }[] }>('/api/models')
       .then((d) => {
         setModels(d.models)
@@ -544,6 +557,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
       })
       .catch(() => undefined)
     return () => {
+      active = false
       keepShownComposer()
       mountedRef.current = false
       sourceRef.current?.close()
@@ -1006,6 +1020,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
         <button className="button block" onClick={organize} disabled={!!turnId}>
           メモリを整理
         </button>
+        {loadingConversations && <LoadingIndicator label="会話一覧を読み込み中…" />}
         <ul>
           {entries.map((e) =>
             e.kind === 'chat' ? (
@@ -1081,7 +1096,8 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
             )
           ) : (
             <>
-              {items.length === 0 && (
+              {loadingHistory && <LoadingIndicator label="会話を読み込み中…" />}
+              {!loadingHistory && items.length === 0 && (
                 <div className="empty">
                   <p>何でも相談してください。例:</p>
                   <ul>

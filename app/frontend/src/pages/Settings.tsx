@@ -1,16 +1,19 @@
 import { useEffect, useState } from 'react'
 import { api, formatDate } from '../api'
+import { LoadingIndicator } from '../components/LoadingIndicator'
 import type { ConnectorStatus } from '../types'
 
 export function SettingsPage({ login }: { login: string }) {
-  const [connectors, setConnectors] = useState<ConnectorStatus[]>([])
-  const [notify, setNotify] = useState<boolean | null>(null)
+  const [connectors, setConnectors] = useState<ConnectorStatus[] | null>(null)
+  const [notify, setNotify] = useState<boolean | null>()
 
   useEffect(() => {
-    api<ConnectorStatus[]>('/api/connectors').then(setConnectors).catch(() => undefined)
+    api<ConnectorStatus[]>('/api/connectors')
+      .then(setConnectors)
+      .catch(() => setConnectors((current) => current ?? []))
     api<{ github_notify_configured: boolean }>('/api/automations')
       .then((d) => setNotify(d.github_notify_configured))
-      .catch(() => undefined)
+      .catch(() => setNotify((current) => current ?? null))
   }, [])
 
   return (
@@ -25,6 +28,7 @@ export function SettingsPage({ login }: { login: string }) {
       <section className="panel">
         <h2>外部サービス（コネクタ）</h2>
         <p className="hint">API キーは Azure のシークレットでだけ管理します。画面やチャットからは入力できません。</p>
+        {connectors === null && <LoadingIndicator label="外部サービスを読み込み中…" />}
         <table>
           <thead>
             <tr>
@@ -35,7 +39,7 @@ export function SettingsPage({ login }: { login: string }) {
             </tr>
           </thead>
           <tbody>
-            {connectors.map((c) => (
+            {connectors?.map((c) => (
               <tr key={c.name}>
                 <td>{c.label}</td>
                 <td>{c.configured ? '登録済み' : '未登録'}</td>
@@ -48,7 +52,11 @@ export function SettingsPage({ login }: { login: string }) {
       </section>
       <section className="panel">
         <h2>GitHub 通知</h2>
-        <p>{notify === null ? '—' : notify ? '設定済み（GitHub App）' : '未設定'}</p>
+        <p>
+          {notify === undefined
+            ? <LoadingIndicator label="通知設定を読み込み中…" />
+            : notify === null ? '—' : notify ? '設定済み（GitHub App）' : '未設定'}
+        </p>
       </section>
     </div>
   )

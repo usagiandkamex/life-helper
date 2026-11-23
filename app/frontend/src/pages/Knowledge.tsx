@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError, formatDate, json } from '../api'
+import { LoadingIndicator } from '../components/LoadingIndicator'
 import { Markdown } from '../components/Markdown'
 import { SelectAllButton } from '../components/SelectAllButton'
 import { draftEpoch, draftStore } from '../drafts'
@@ -70,6 +71,7 @@ function deleteFile(path: string) {
 
 export function KnowledgePage() {
   const [files, setFiles] = useState<FileEntry[]>([])
+  const [loadingFiles, setLoadingFiles] = useState(true)
   const [selected, setSelected] = useState<string | null>(null)
   const [content, setContent] = useState('')
   // 開いたときのファイルの内容（編集を破棄したらここへ戻す）。
@@ -141,12 +143,20 @@ export function KnowledgePage() {
     if (loadRequestRef.current === request) setFiles(data)
   }, [])
   useEffect(() => {
+    let active = true
     mountedRef.current = true
-    load().catch((e) => setError(e.message))
+    load()
+      .catch((e) => {
+        if (active) setError(e.message)
+      })
+      .finally(() => {
+        if (active) setLoadingFiles(false)
+      })
     // 編集の途中で画面を移っていたら、そのファイルを開き直して編集を戻す。
     const path = openFileKey.get('')
     if (path) open(path).catch((e) => setError(e.message))
     return () => {
+      active = false
       mountedRef.current = false
       // 開いている途中のファイルに残した編集があれば、戻ったときはそちらを開き直す。
       const opening = openingRef.current
@@ -336,6 +346,7 @@ export function KnowledgePage() {
               ZIP で書き出し
             </a>
           </div>
+          {loadingFiles && <LoadingIndicator label="ファイル一覧を読み込み中…" />}
           {Object.entries(GROUP_LABELS)
             .filter(([key]) => groups[key]?.length)
             .map(([key, label]) => (
