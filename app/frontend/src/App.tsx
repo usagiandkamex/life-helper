@@ -143,7 +143,12 @@ export default function App() {
         </div>
       </div>
     )
-  if (me === null) return <div className="center">読み込み中…</div>
+  if (me === null)
+    return (
+      <div className="center">
+        <span className="loading-indicator" role="status">読み込み中…</span>
+      </div>
+    )
   if (!me.authenticated)
     return <LoginPage devLogin={!!me.dev_login} oauthConfigured={me.oauth_configured !== false} onSignedIn={loadMe} />
 

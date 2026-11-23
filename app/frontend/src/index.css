@@ -172,6 +172,19 @@ label.button { flex-direction: row; }
 .link.small { font-size: 0.8125rem; }
 
 .center { display: grid; place-items: center; height: 100vh; }
+.loading-indicator { display: inline-flex; align-items: center; gap: 0.75rem; }
+.loading-indicator::before {
+  content: '';
+  width: 1.5rem;
+  height: 1.5rem;
+  border: 0.1875rem solid var(--border);
+  border-top-color: var(--primary);
+  border-radius: 50%;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .loading-indicator::before { animation: loading-spin 0.8s linear infinite; }
+}
+@keyframes loading-spin { to { transform: rotate(360deg); } }
 .hint { color: var(--muted); font-size: 0.75rem; line-height: 1rem; letter-spacing: 0.025rem; margin: 0.25rem 0; }
 details.hint > summary { cursor: pointer; color: var(--primary); font-weight: 500; padding: 0.25rem 0; }
 details.hint > summary:focus-visible { outline: 2px solid var(--md-primary); outline-offset: 2px; border-radius: var(--md-shape-xs); }
