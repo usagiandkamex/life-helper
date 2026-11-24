@@ -12,6 +12,7 @@ import {
 } from '../chatItems'
 import { AttachmentList } from '../components/AttachmentList'
 import { AutomationThreadView } from '../components/AutomationThread'
+import { LoadingIndicator } from '../components/LoadingIndicator'
 import { Disclaimer } from '../components/Markdown'
 import { MessageItem } from '../components/MessageItem'
 import { SelectAllButton } from '../components/SelectAllButton'
@@ -162,6 +163,9 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   const [params, setParams] = useSearchParams()
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [threads, setThreads] = useState<AutomationThread[]>([])
+  const [conversationsLoading, setConversationsLoading] = useState(true)
+  const [threadsLoading, setThreadsLoading] = useState(true)
+  const [historyLoading, setHistoryLoading] = useState(false)
   const [currentId, setCurrentId] = useState<string | null>(null)
   // An automation conversation is read-only and shown instead of a chat conversation, never together with one.
   const [threadId, setThreadId] = useState<string | null>(null)
@@ -306,6 +310,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
 
   const selectConversation = useCallback((id: string | null) => {
     generationRef.current += 1
+    setHistoryLoading(false)
     // What is shown next starts at its latest message; its content going back to the top is not the user scrolling up.
     followRef.current = true
     lastScrollTopRef.current = 0
@@ -322,14 +327,22 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   }, [])
 
   const loadConversations = useCallback(async () => {
-    setConversations(await api<Conversation[]>('/api/conversations'))
+    try {
+      setConversations(await api<Conversation[]>('/api/conversations'))
+    } finally {
+      setConversationsLoading(false)
+    }
   }, [])
 
   const loadThreads = useCallback(async () => {
     const request = ++threadsRequestRef.current
-    const data = await api<AutomationThread[]>('/api/automations/chat')
-    // Refreshes overlap (timer, focus, after read/hide): an older answer must not bring back a hidden entry.
-    if (request === threadsRequestRef.current) setThreads(data)
+    try {
+      const data = await api<AutomationThread[]>('/api/automations/chat')
+      // Refreshes overlap (timer, focus, after read/hide): an older answer must not bring back a hidden entry.
+      if (request === threadsRequestRef.current) setThreads(data)
+    } finally {
+      if (request === threadsRequestRef.current) setThreadsLoading(false)
+    }
   }, [])
 
   // Messages the turn could not send go back to the composer, so they can be edited and sent again; their files too,
@@ -409,6 +422,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
       switchComposer(id)
       selectConversation(id)
       const generation = generationRef.current
+      setHistoryLoading(true)
       setDrawer(false)
       setItems([])
       setError('')
@@ -429,6 +443,8 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
         // A conversation deleted elsewhere must not be opened again every time this page is shown.
         if (e instanceof ApiError && e.status === 404 && lastOpened?.id === id) lastOpened = null
         if (generationRef.current === generation) setError((e as Error).message)
+      } finally {
+        if (generationRef.current === generation && mountedRef.current) setHistoryLoading(false)
       }
     },
     [attach, restoreUnsent, selectConversation, switchComposer],
@@ -596,9 +612,9 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
 
   useEffect(() => {
     const refresh = () => {
-      if (document.visibilityState === 'visible') loadThreads().catch(() => undefined)
+      if (document.visibilityState === 'visible') loadThreads().catch((e) => setError(e.message))
     }
-    refresh()
+    loadThreads().catch((e) => setError(e.message))
     const timer = window.setInterval(refresh, THREAD_REFRESH_MS)
     window.addEventListener('focus', refresh)
     return () => {
@@ -1005,6 +1021,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
         <button className="button block" onClick={organize} disabled={!!turnId}>
           メモリを整理
         </button>
+        {(conversationsLoading || threadsLoading) && <LoadingIndicator />}
         <ul>
           {entries.map((e) =>
             e.kind === 'chat' ? (
@@ -1076,11 +1093,12 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
                 onAsk={askAbout}
               />
             ) : (
-              !error && <p className="hint">読み込み中…</p>
+              !error && <LoadingIndicator />
             )
           ) : (
             <>
-              {items.length === 0 && (
+              {historyLoading && <LoadingIndicator />}
+              {items.length === 0 && !historyLoading && !error && (
                 <div className="empty">
                   <p>何でも相談してください。例:</p>
                   <ul>

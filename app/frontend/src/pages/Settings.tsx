@@ -1,16 +1,19 @@
 import { useEffect, useState } from 'react'
 import { api, formatDate } from '../api'
+import { LoadingIndicator } from '../components/LoadingIndicator'
 import type { ConnectorStatus } from '../types'
 
 export function SettingsPage({ login }: { login: string }) {
-  const [connectors, setConnectors] = useState<ConnectorStatus[]>([])
+  const [connectors, setConnectors] = useState<ConnectorStatus[] | null>(null)
+  const [connectorsError, setConnectorsError] = useState('')
   const [notify, setNotify] = useState<boolean | null>(null)
+  const [notifyError, setNotifyError] = useState('')
 
   useEffect(() => {
-    api<ConnectorStatus[]>('/api/connectors').then(setConnectors).catch(() => undefined)
+    api<ConnectorStatus[]>('/api/connectors').then(setConnectors).catch((e) => setConnectorsError(e.message))
     api<{ github_notify_configured: boolean }>('/api/automations')
       .then((d) => setNotify(d.github_notify_configured))
-      .catch(() => undefined)
+      .catch((e) => setNotifyError(e.message))
   }, [])
 
   return (
@@ -25,30 +28,42 @@ export function SettingsPage({ login }: { login: string }) {
       <section className="panel">
         <h2>外部サービス（コネクタ）</h2>
         <p className="hint">API キーは Azure のシークレットでだけ管理します。画面やチャットからは入力できません。</p>
-        <table>
-          <thead>
-            <tr>
-              <th>サービス</th>
-              <th>キー</th>
-              <th>最終利用</th>
-              <th>費用</th>
-            </tr>
-          </thead>
-          <tbody>
-            {connectors.map((c) => (
-              <tr key={c.name}>
-                <td>{c.label}</td>
-                <td>{c.configured ? '登録済み' : '未登録'}</td>
-                <td>{formatDate(c.last_used)}</td>
-                <td>{c.cost}</td>
+        {connectorsError ? (
+          <div className="banner error" role="alert">{connectorsError}</div>
+        ) : connectors === null ? (
+          <LoadingIndicator />
+        ) : (
+          <table>
+            <thead>
+              <tr>
+                <th>サービス</th>
+                <th>キー</th>
+                <th>最終利用</th>
+                <th>費用</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {connectors.map((c) => (
+                <tr key={c.name}>
+                  <td>{c.label}</td>
+                  <td>{c.configured ? '登録済み' : '未登録'}</td>
+                  <td>{formatDate(c.last_used)}</td>
+                  <td>{c.cost}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </section>
       <section className="panel">
         <h2>GitHub 通知</h2>
-        <p>{notify === null ? '—' : notify ? '設定済み（GitHub App）' : '未設定'}</p>
+        {notifyError ? (
+          <div className="banner error" role="alert">{notifyError}</div>
+        ) : notify === null ? (
+          <LoadingIndicator />
+        ) : (
+          <p>{notify ? '設定済み（GitHub App）' : '未設定'}</p>
+        )}
       </section>
     </div>
   )

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { api, formatDate, json, yen } from '../api'
 import { AmountInput } from '../components/AmountInput'
 import { LazyChart } from '../components/LazyChart'
+import { LoadingIndicator } from '../components/LoadingIndicator'
 import { Disclaimer } from '../components/Markdown'
 import { afterPurchase, averageCost, groupNumber, parseNumber, totalsProblem, type Totals } from '../holdings'
 import type { ChartData, FundAutoLink, FundCandidates, Holding, PortfolioView } from '../types'
@@ -584,7 +585,12 @@ export function PortfolioPage() {
     setChart({ type: 'investment', x: 'year', series: ['principal', 'value'], data: res.yearly })
   }
 
-  if (!view) return <div className="panel">{error || '読み込み中…'}</div>
+  if (!view)
+    return (
+      <div className="panel">
+        {error ? <div className="banner error" role="alert">{error}</div> : <LoadingIndicator />}
+      </div>
+    )
   const editing = editId ? view.holdings.find((h) => h.id === editId) : undefined
   // 削除や CSV の取り込みで銘柄が入れ替わったときは、選び直してもらう。
   const selected = view.holdings.find((h) => h.id === selectedId)

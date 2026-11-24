@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type 
 import { Link, useSearchParams } from 'react-router-dom'
 import { api, ApiError, formatDate, json } from '../api'
 import { hasResult, runAnswer, runStatusText, STATUS_LABELS } from '../automationRuns'
+import { LoadingIndicator } from '../components/LoadingIndicator'
 import { Markdown } from '../components/Markdown'
 import { SelectAllButton } from '../components/SelectAllButton'
 import { draftStore } from '../drafts'
@@ -106,6 +107,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   // null は「まだ読めていない」。読めたかどうかで、保存済みモデルが一覧にないときの書き方を変える。
   const [models, setModels] = useState<{ id: string; name: string }[] | null>(null)
   const [runs, setRuns] = useState<RunRecord[]>([])
+  const [runsLoading, setRunsLoading] = useState(true)
   const [run, setRun] = useState<RunRecord | null>(null)
   const [runsOpen, setRunsOpen] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
@@ -171,13 +173,17 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
   const load = useCallback(async () => {
     // 見張り・更新・削除の読み込みは重なることがある。後から始めた読み込みだけを反映し、古い応答で消した記録を戻さない。
     const request = ++loadRequestRef.current
-    const data = await api<AutomationList>('/api/automations')
-    if (request !== loadRequestRef.current) return
-    setList(data)
-    onUnreadChange(data.unread)
-    const loaded = await api<RunRecord[]>('/api/automations/runs')
-    if (request !== loadRequestRef.current) return
-    setRuns(loaded)
+    try {
+      const data = await api<AutomationList>('/api/automations')
+      if (request !== loadRequestRef.current) return
+      setList(data)
+      onUnreadChange(data.unread)
+      const loaded = await api<RunRecord[]>('/api/automations/runs')
+      if (request !== loadRequestRef.current) return
+      setRuns(loaded)
+    } finally {
+      if (request === loadRequestRef.current) setRunsLoading(false)
+    }
   }, [onUnreadChange])
 
   const openRun = useCallback(
@@ -452,7 +458,12 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
     }
   }
 
-  if (!list) return <div className="panel">{error || '読み込み中…'}</div>
+  if (!list)
+    return (
+      <div className="panel">
+        {error ? <div className="banner error" role="alert">{error}</div> : <LoadingIndicator />}
+      </div>
+    )
   const usage = list.usage
   // 同じオートメーションは同時に実行できないので、実行中の記録がある間は「今すぐ実行」を押せないようにする。
   // 実行履歴は新しい 50 件までなので、上限のない一覧側の実行中のオートメーションで決める。
@@ -550,6 +561,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
             一覧を閉じると結果が幅いっぱいに広がる */}
         <div className={`runs-layout${runsOpen ? '' : ' list-closed'}`}>
           <ul id="run-list" className="runs" aria-label="実行履歴の一覧" hidden={!runsOpen}>
+            {runsLoading && <li><LoadingIndicator /></li>}
             {runs.map((r) => (
               <li key={r.id} className={[r.read || !hasResult(r) ? '' : 'unread', run?.id === r.id ? 'selected' : ''].filter(Boolean).join(' ')}>
                 <button className="link" aria-current={run?.id === r.id ? 'true' : undefined} onClick={() => openRun(r.automation_id, r.id)}>
@@ -561,7 +573,7 @@ export function AutomationsPage({ onUnreadChange }: { onUnreadChange: (n: number
                 </button>
               </li>
             ))}
-            {runs.length === 0 && <li className="hint">まだ実行されていません。</li>}
+            {!runsLoading && runs.length === 0 && !error && <li className="hint">まだ実行されていません。</li>}
           </ul>
           {!run && runs.length > 0 && (
             <p className="hint run-detail">
