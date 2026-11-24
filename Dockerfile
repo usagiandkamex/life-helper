@@ -36,8 +36,10 @@ RUN uv sync --no-dev --no-install-project \
 
 USER root
 # Headless Chromium for the browser_* tools with its system libraries, plus a Japanese font for screenshots.
-RUN playwright install --with-deps --only-shell chromium \
-    && apt-get install -y --no-install-recommends fonts-ipafont-gothic \
+# Playwright's bundled Node driver needs libatomic1 before it can install browser dependencies.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libatomic1 fonts-ipafont-gothic \
+    && playwright install --with-deps --only-shell chromium \
     && rm -rf /var/lib/apt/lists/*
 
 USER app
