@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError, formatDate, json } from '../api'
+import { LoadingIndicator } from '../components/LoadingIndicator'
 import { Markdown } from '../components/Markdown'
 import { SelectAllButton } from '../components/SelectAllButton'
 import { draftEpoch, draftStore } from '../drafts'
@@ -70,6 +71,8 @@ function deleteFile(path: string) {
 
 export function KnowledgePage() {
   const [files, setFiles] = useState<FileEntry[]>([])
+  const [filesLoading, setFilesLoading] = useState(true)
+  const [opening, setOpening] = useState<string | null>(null)
   const [selected, setSelected] = useState<string | null>(null)
   const [content, setContent] = useState('')
   // 開いたときのファイルの内容（編集を破棄したらここへ戻す）。
@@ -108,11 +111,18 @@ export function KnowledgePage() {
       setMessage('')
       const request = ++openRequestRef.current
       openingRef.current = path
+      setOpening(path)
       let data: { content: string; writable: boolean }
       try {
         data = await api<{ content: string; writable: boolean }>(`/api/files/content?path=${encodeURIComponent(path)}`)
+      } catch (e) {
+        if (mountedRef.current && openRequestRef.current === request) throw e
+        return false
       } finally {
-        if (openRequestRef.current === request) openingRef.current = null
+        if (openRequestRef.current === request) {
+          openingRef.current = null
+          if (mountedRef.current) setOpening(null)
+        }
       }
       if (!mountedRef.current || openRequestRef.current !== request) return false
       keepEdit()
@@ -137,16 +147,23 @@ export function KnowledgePage() {
   const loadRequestRef = useRef(0)
   const load = useCallback(async () => {
     const request = ++loadRequestRef.current
-    const data = await api<FileEntry[]>('/api/files')
-    if (loadRequestRef.current === request) setFiles(data)
+    try {
+      const data = await api<FileEntry[]>('/api/files')
+      if (loadRequestRef.current === request) setFiles(data)
+    } finally {
+      if (loadRequestRef.current === request) setFilesLoading(false)
+    }
   }, [])
   useEffect(() => {
+    let active = true
     mountedRef.current = true
-    load().catch((e) => setError(e.message))
+    load()
+      .catch((e) => { if (active) setError(e.message) })
     // 編集の途中で画面を移っていたら、そのファイルを開き直して編集を戻す。
     const path = openFileKey.get('')
     if (path) open(path).catch((e) => setError(e.message))
     return () => {
+      active = false
       mountedRef.current = false
       // 開いている途中のファイルに残した編集があれば、戻ったときはそちらを開き直す。
       const opening = openingRef.current
@@ -336,6 +353,7 @@ export function KnowledgePage() {
               ZIP で書き出し
             </a>
           </div>
+          {filesLoading && <LoadingIndicator />}
           {Object.entries(GROUP_LABELS)
             .filter(([key]) => groups[key]?.length)
             .map(([key, label]) => (
@@ -344,7 +362,7 @@ export function KnowledgePage() {
                 <ul>
                   {groups[key].map((f) => (
                     <li key={f.path} className={f.path === selected ? 'active' : ''}>
-                      <button className="link" onClick={() => open(f.path)}>
+                      <button className="link" onClick={() => open(f.path).catch((e) => setError(e.message))}>
                         {f.path.split('/').slice(1).join('/') || f.path}
                       </button>
                       <small>{formatDate(f.modified)}</small>
@@ -361,7 +379,8 @@ export function KnowledgePage() {
       <section className="panel grow">
         {message && <div className="banner ok">{message}</div>}
         {error && <div className="banner error">{error}</div>}
-        {!selected && (
+        {opening && <LoadingIndicator label={`${opening} を読み込み中…`} />}
+        {!selected && !opening && (
           <p className="hint">{listOpen ? '左の一覧からファイルを選んでください。' : 'ファイル一覧を開いて、ファイルを選んでください。'}</p>
         )}
         {selected && (
