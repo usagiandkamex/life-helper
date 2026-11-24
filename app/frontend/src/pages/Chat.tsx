@@ -192,6 +192,7 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
   const [stopping, setStopping] = useState(false)
   const [drawer, setDrawer] = useState(false)
   const [error, setError] = useState('')
+  const [threadsError, setThreadsError] = useState('')
   // What is sent, counted while it is typed: a pasted error log is over the limit long before that can be seen.
   const promptChars = useMemo(() => promptLength(input.trim()), [input])
   const promptTooLong = promptChars > MAX_PROMPT_CHARS
@@ -339,7 +340,12 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
     try {
       const data = await api<AutomationThread[]>('/api/automations/chat')
       // Refreshes overlap (timer, focus, after read/hide): an older answer must not bring back a hidden entry.
-      if (request === threadsRequestRef.current) setThreads(data)
+      if (request === threadsRequestRef.current) {
+        setThreads(data)
+        setThreadsError('')
+      }
+    } catch (e) {
+      if (request === threadsRequestRef.current) setThreadsError((e as Error).message)
     } finally {
       if (request === threadsRequestRef.current) setThreadsLoading(false)
     }
@@ -1022,6 +1028,11 @@ export function ChatPage({ onUnreadChange }: { onUnreadChange: (unread: number) 
           メモリを整理
         </button>
         {(conversationsLoading || threadsLoading) && <LoadingIndicator />}
+        {threadsError && (
+          <div className="banner error" role="alert">
+            {threadsError}
+          </div>
+        )}
         <ul>
           {entries.map((e) =>
             e.kind === 'chat' ? (

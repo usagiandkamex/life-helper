@@ -115,6 +115,9 @@ export function KnowledgePage() {
       let data: { content: string; writable: boolean }
       try {
         data = await api<{ content: string; writable: boolean }>(`/api/files/content?path=${encodeURIComponent(path)}`)
+      } catch (e) {
+        if (mountedRef.current && openRequestRef.current === request) throw e
+        return false
       } finally {
         if (openRequestRef.current === request) {
           openingRef.current = null
@@ -144,15 +147,18 @@ export function KnowledgePage() {
   const loadRequestRef = useRef(0)
   const load = useCallback(async () => {
     const request = ++loadRequestRef.current
-    const data = await api<FileEntry[]>('/api/files')
-    if (loadRequestRef.current === request) setFiles(data)
+    try {
+      const data = await api<FileEntry[]>('/api/files')
+      if (loadRequestRef.current === request) setFiles(data)
+    } finally {
+      if (loadRequestRef.current === request) setFilesLoading(false)
+    }
   }, [])
   useEffect(() => {
     let active = true
     mountedRef.current = true
     load()
       .catch((e) => { if (active) setError(e.message) })
-      .finally(() => { if (active) setFilesLoading(false) })
     // 編集の途中で画面を移っていたら、そのファイルを開き直して編集を戻す。
     const path = openFileKey.get('')
     if (path) open(path).catch((e) => setError(e.message))
